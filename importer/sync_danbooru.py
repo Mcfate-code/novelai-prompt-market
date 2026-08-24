@@ -239,6 +239,30 @@ def _post_thumb_url(post_id: int, timeout: int = 15) -> str | None:
     return _post_image_urls(post_id, timeout)[0]
 
 
+def fetch_fast_images(tag: str, timeout: int = 15) -> tuple[str | None, str | None]:
+    """快速取一张高分例图，单请求直连 posts.json。
+
+    网页首屏和批量预缓存优先使用此路径，避免先查 wiki 再查 post 的多次往返。
+    需要更强「权威 Examples」语义时，再调用 fetch_authoritative_images。
+    """
+    cfg = _settings()["danbooru"]
+    base = cfg["base_url"].rstrip("/")
+    q = urllib.parse.urlencode(
+        {"tags": db.underscore(tag), "limit": 1, "search[order]": "score"}
+    )
+    try:
+        data = _http_json(f"{base}/posts.json?{q}", timeout=timeout)
+        if isinstance(data, list) and data:
+            post = data[0]
+            thumb = post.get("preview_file_url") or post.get("large_file_url") or post.get("file_url")
+            large = post.get("sample_file_url") or post.get("large_file_url") or post.get("file_url")
+            if thumb:
+                return thumb, large or thumb
+    except Exception:  # noqa: BLE001
+        return None, None
+    return None, None
+
+
 def fetch_authoritative_images(tag: str, timeout: int = 15) -> tuple[str | None, str | None]:
     """取某个 tag 的权威例图 (缩略图 URL, 大图 URL)。
 

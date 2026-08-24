@@ -661,62 +661,60 @@ def del_zh_note(tag: str):
 
 
 def _fetch_and_cache(tag: str) -> tuple[str, str]:
-    """取权威例图 (thumb, large) URL → 下载两图 → 返回本地 URL 对（失败返回空串）。"""
-    remote_thumb, remote_large = sync_danbooru.fetch_authoritative_images(tag)
+    """快速取图并先落缩略图；大图在同一后台任务中随后补齐。"""
+    remote_thumb, remote_large = sync_danbooru.fetch_fast_images(tag)
     if not remote_thumb:
         return "", ""
     digest = hashlib.md5(tag.encode("utf-8")).hexdigest()
     ext = _guess_img_ext(remote_thumb)
     fname = digest + ext
     fpath = THUMB_DIR / fname
-    # 缩略图和大图互不依赖，使用应用级图片线程池并发下载。
     lname = digest + "_l.jpg"
     lpath = THUMB_DIR / lname
     image_ex = getattr(app.state, "image_executor", None)
-    thumb_future = None if fpath.exists() else (
-        image_ex.submit(sync_danbooru.fetch_image_bytes, remote_thumb)
-        if image_ex else None
-    )
-    large_future = None
-    if remote_large and remote_large != remote_thumb and not lpath.exists():
-        large_future = (
-            image_ex.submit(sync_danbooru.fetch_image_bytes, remote_large)
-            if image_ex else None
-        )
-    thumb_data = thumb_future.result() if thumb_future else (
-        sync_danbooru.fetch_image_bytes(remote_thumb) if not fpath.exists() else None
-    )
-    large_data = large_future.result() if large_future else (
-        sync_danbooru.fetch_image_bytes(remote_large)
-        if remote_large and remote_large != remote_thumb and not lpath.exists() else None
-    )
 
-    thumb_local = ""
-    if fpath.exists():
-        thumb_local = f"/static/thumbs/{fname}"
-    elif thumb_data:
+    thumb_data = None
+    if not fpath.exists():
+        future = image_ex.submit(sync_danbooru.fetch_image_bytes, remote_thumb) if image_ex else None
+        thumb_data = future.result() if future else sync_danbooru.fetch_image_bytes(remote_thumb)
+    thumb_local = f"/static/thumbs/{fname}" if fpath.exists() else ""
+    if not thumb_local and thumb_data:
         try:
-            fpath.write_bytes(thumb_data)
+            tmp = fpath.with_suffix(fpath.suffix + ".tmp")
+            tmp.write_bytes(thumb_data)
+            os.replace(tmp, fpath)
             thumb_local = f"/static/thumbs/{fname}"
         except OSError:  # noqa: BLE001
             thumb_local = ""
+    if not thumb_local:
+        return "", ""
 
-    # 大图：统一压缩为本地 jpg（不存原始大图）
+    # 缩略图先可用；大图由 _fetch_large_and_cache 在另一个后台任务中补齐。
+    return thumb_local, thumb_local
+
+
+def _fetch_large_and_cache(tag: str, thumb_local: str) -> str:
+    """后台补抓并压缩大图，失败时保留缩略图作为 hover 回退。"""
+    remote_thumb, remote_large = sync_danbooru.fetch_fast_images(tag)
+    if not remote_large or remote_large == remote_thumb:
+        return thumb_local
+    digest = hashlib.md5(tag.encode("utf-8")).hexdigest()
+    lpath = THUMB_DIR / f"{digest}_l.jpg"
     if lpath.exists():
-        large_local = f"/static/thumbs/{lname}"
-    elif large_data:
-        compressed = imageutil.compress_image_bytes(large_data)
-        if compressed:
-            try:
-                lpath.write_bytes(compressed)
-                large_local = f"/static/thumbs/{lname}"
-            except OSError:  # noqa: BLE001
-                large_local = ""
-        else:
-            large_local = ""
-    else:
-        large_local = thumb_local  # 无大图时兜底用同一张
-    return thumb_local, large_local
+        return f"/static/thumbs/{lpath.name}"
+    # 此函数本身已经运行在图片后台线程中，不能再次向同一线程池提交并等待，
+    # 否则并发补图达到线程数上限时会相互等待。直接下载即可。
+    data = sync_danbooru.fetch_image_bytes(remote_large)
+    compressed = imageutil.compress_image_bytes(data) if data else None
+    if not compressed:
+        return thumb_local
+    try:
+        tmp = lpath.with_suffix(lpath.suffix + ".tmp")
+        tmp.write_bytes(compressed)
+        os.replace(tmp, lpath)
+        return f"/static/thumbs/{lpath.name}"
+    except OSError:  # noqa: BLE001
+        return thumb_local
 
 
 # 全局懒加载后台任务去重锁，线程池由应用 lifespan 管理
@@ -761,24 +759,42 @@ def thumbs(tags: str = ""):
                 "large": {n: (cached.get(n) or ("", ""))[1] for n in names},
             }
 
+        def _write_thumb_row(tag: str, thumb_local: str, large_local: str) -> None:
+            conn2 = _conn()
+            try:
+                conn2.execute(
+                    "INSERT INTO tag_thumbs (tag_name, thumb_url, thumb_large_url, fetched_at) "
+                    "VALUES (?,?,?,?) "
+                    "ON CONFLICT(tag_name) DO UPDATE SET thumb_url=excluded.thumb_url, "
+                    "thumb_large_url=excluded.thumb_large_url, fetched_at=excluded.fetched_at",
+                    (tag, thumb_local, large_local, db.now_iso()),
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+
+        def _finish_large(tag: str, thumb_local: str) -> None:
+            try:
+                large_local = _fetch_large_and_cache(tag, thumb_local)
+                _write_thumb_row(tag, thumb_local, large_local)
+                _enforce_cache_limit(protected={Path(thumb_local).name, Path(large_local).name})
+            except Exception:  # noqa: BLE001
+                # 缩略图已经可用，大图失败不影响首屏。
+                pass
+
         def _bg(tag: str) -> None:
             try:
                 pair = _fetch_and_cache(tag)
                 if not pair[0]:
                     return
-                conn2 = _conn()
-                try:
-                    conn2.execute(
-                        "INSERT INTO tag_thumbs (tag_name, thumb_url, thumb_large_url, fetched_at) "
-                        "VALUES (?,?,?,?) "
-                        "ON CONFLICT(tag_name) DO UPDATE SET thumb_url=excluded.thumb_url, "
-                        "thumb_large_url=excluded.thumb_large_url, fetched_at=excluded.fetched_at",
-                        (tag, pair[0], pair[1], db.now_iso()),
-                    )
-                    conn2.commit()
-                finally:
-                    conn2.close()
-                _enforce_cache_limit(protected={Path(pair[0]).name, Path(pair[1]).name})
+                # 先写缩略图，前端下一轮轮询即可显示。
+                _write_thumb_row(tag, pair[0], pair[1])
+                _enforce_cache_limit(protected={Path(pair[0]).name})
+                image_ex = getattr(app.state, "image_executor", None)
+                if image_ex:
+                    image_ex.submit(_finish_large, tag, pair[0])
+                else:
+                    _finish_large(tag, pair[0])
             finally:
                 with _pending_lock:
                     _pending.discard(tag)

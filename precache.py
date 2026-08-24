@@ -46,12 +46,10 @@ def collect_candidates() -> list[str]:
     """按优先级收集待缓存 tag（去重、跳过已缓存完整对的）。"""
     conn = db.get_conn()
     try:
-        # 已缓存 tag（thumb 或 large 非空）→ 跳过；净空占位视为已尝试，不重复请求远端。
+        # 已写入 tag_thumbs 的 tag（包括失败净空占位）→ 跳过，支持断点续传。
         done = {
             r["tag_name"]
-            for r in conn.execute(
-                "SELECT tag_name FROM tag_thumbs WHERE thumb_url != '' OR thumb_large_url != ''"
-            ).fetchall()
+            for r in conn.execute("SELECT tag_name FROM tag_thumbs").fetchall()
         }
         # 1. 收藏
         fav = [r["tag_name"] for r in conn.execute("SELECT tag_name FROM favorites").fetchall()]
@@ -80,23 +78,8 @@ def collect_candidates() -> list[str]:
 
 
 def fetch_post_images(tag: str):
-    """直接按热度查 posts.json 取一张代表图（单请求），返回 (thumb_url, large_url)。
-
-    相比逐 tag 查 wiki（2-3 次请求），更适合大批量预缓存。
-    """
-    cfg = sync_danbooru._settings()["danbooru"]
-    base = cfg["base_url"].rstrip("/")
-    q = urllib.parse.urlencode({"tags": db.underscore(tag), "limit": 1, "search[order]": "score"})
-    try:
-        data = sync_danbooru._http_json(f"{base}/posts.json?{q}", timeout=20)
-        if not isinstance(data, list) or not data:
-            return None, None
-        p = data[0]
-        thumb = p.get("preview_file_url") or p.get("large_file_url") or p.get("file_url")
-        large = p.get("sample_file_url") or thumb
-        return thumb, large
-    except Exception:  # noqa: BLE001
-        return None, None
+    """直接按热度查 posts.json 取一张代表图（单请求）。"""
+    return sync_danbooru.fetch_fast_images(tag, timeout=20)
 
 
 def cache_one(tag: str) -> tuple[str, int]:

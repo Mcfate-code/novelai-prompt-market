@@ -227,7 +227,7 @@ function tagCardHtml(t) {
   const fav = state.favorites.has(t.tag);
   const meta = t.post_count ? `Danbooru posts: ${t.post_count.toLocaleString()}` : (t.is_deprecated ? "deprecated" : "");
   return `<div class="tag-card ${t.is_deprecated ? "tag-deprecated" : ""}" data-tag="${esc(t.tag)}">` +
-    `<img class="tag-thumb" data-thumb="${esc(t.tag)}" alt="" loading="lazy" />` +
+    `<div class="tag-thumb-wrap" data-thumb-wrap="${esc(t.tag)}"><img class="tag-thumb" data-thumb="${esc(t.tag)}" alt="" loading="lazy" decoding="async" /></div>` +
     `<button class="fav-toggle ${fav ? "on" : ""}" data-fav="${esc(t.tag)}" title="${fav ? "取消收藏" : "收藏"}">${fav ? "★" : "☆"}</button>` +
     `<div class="tag-en">${esc(t.tag)}</div>` +
     (t.zh ? `<div class="tag-zh">${esc(t.zh)}</div>` : "") +
@@ -314,6 +314,8 @@ function renderTagCards(tags) {
 // ===== 例图懒加载 =====
 const thumbMap = {};   // tag -> 缩略图本地 URL
 const largeMap = {};   // tag -> 大图本地 URL
+let thumbLoadSeq = 0;
+let thumbLoadState = null;
 
 // 卡片默认显示缩略图（小、加载快）；悬停预览时才用大图（清晰）
 function cardImgUrl(tag) {
@@ -324,36 +326,81 @@ function cardLargeUrl(tag) {
   return largeMap[tag] || thumbMap[tag] || "";
 }
 
-async function loadThumbs(tags, retry = true) {
-  const missing = [...new Set(tags.filter((t) => !cardImgUrl(t)))];
-  if (!missing.length) return;
+function updateThumbProgress() {
+  const s = thumbLoadState;
+  const box = $("#thumb-load-status");
+  if (!s || !box) return;
+  const done = s.loaded.size + s.failed.size;
+  const pct = s.total ? Math.round(done / s.total * 100) : 100;
+  box.hidden = false;
+  $("#thumb-load-count").textContent = `${s.loaded.size} / ${s.total}`;
+  $("#thumb-load-bar").style.width = pct + "%";
+  if (done >= s.total) {
+    $("#thumb-load-text").textContent = s.failed.size ? `例图加载完成（${s.failed.size} 个暂无图片）` : "例图加载完成";
+    setTimeout(() => { if (thumbLoadState === s) box.hidden = true; }, 1800);
+  } else {
+    $("#thumb-load-text").textContent = `正在加载例图…${pct}%`;
+  }
+}
+
+async function loadThumbs(tags, attempt = 0, seq = null) {
+  const unique = [...new Set(tags)];
+  if (seq == null) {
+    seq = ++thumbLoadSeq;
+    thumbLoadState = { seq, total: unique.length, loaded: new Set(), failed: new Set() };
+    updateThumbProgress();
+  }
+  if (seq !== thumbLoadSeq) return;
+  const missing = unique.filter((t) => !cardImgUrl(t));
+  if (!missing.length) { applyThumbs(seq); return; }
   const batches = [];
   for (let i = 0; i < missing.length; i += 40) batches.push(missing.slice(i, i + 40));
-  // API 每批最多 40 个 tag；批次并发请求，避免页面逐批等待。
   for (let i = 0; i < batches.length; i += 4) {
-    const group = batches.slice(i, i + 4);
-    await Promise.all(group.map(async (batch) => {
+    if (seq !== thumbLoadSeq) return;
+    await Promise.all(batches.slice(i, i + 4).map(async (batch) => {
       try {
         const data = await api(`/api/thumbs?tags=${encodeURIComponent(batch.join(","))}`);
         Object.assign(thumbMap, data.thumbs || {});
         Object.assign(largeMap, data.large || {});
-      } catch { /* 忽略网络错误，无图不显示 */ }
+      } catch { /* 忽略短时网络错误，下一轮继续 */ }
     }));
+    applyThumbs(seq);
   }
-  applyThumbs();
-  // 异步补抓：已提交后台下载的 tag 此时仍无图，短暂等待后重拉一次
-  if (retry) {
-    const stillMissing = tags.filter((t) => !cardImgUrl(t));
-    if (stillMissing.length) {
-      setTimeout(() => loadThumbs(stillMissing, false), 4000);
-    }
+  const stillMissing = unique.filter((t) => !cardImgUrl(t));
+  if (stillMissing.length && attempt < 5 && seq === thumbLoadSeq) {
+    const delay = [900, 1400, 2200, 3200, 4500][attempt] || 4500;
+    setTimeout(() => loadThumbs(unique, attempt + 1, seq), delay);
+  } else if (stillMissing.length && seq === thumbLoadSeq) {
+    stillMissing.forEach((tag) => {
+      thumbLoadState.failed.add(tag);
+      document.querySelector(`[data-thumb-wrap="${CSS.escape(tag)}"]`)?.classList.add("failed");
+    });
+    updateThumbProgress();
   }
 }
 
-function applyThumbs() {
+function applyThumbs(seq = thumbLoadSeq) {
+  if (seq !== thumbLoadSeq) return;
   document.querySelectorAll("img[data-thumb]").forEach((img) => {
-    const url = cardImgUrl(img.dataset.thumb);
-    if (url) { img.src = url; img.classList.add("loaded"); }
+    const tag = img.dataset.thumb;
+    const url = cardImgUrl(tag);
+    if (!url || img.dataset.srcApplied === url) return;
+    img.dataset.srcApplied = url;
+    img.onload = () => {
+      if (seq !== thumbLoadSeq) return;
+      img.classList.add("loaded");
+      img.closest(".tag-thumb-wrap")?.classList.add("loaded");
+      thumbLoadState?.loaded.add(tag);
+      thumbLoadState?.failed.delete(tag);
+      updateThumbProgress();
+    };
+    img.onerror = () => {
+      if (seq !== thumbLoadSeq) return;
+      thumbLoadState?.failed.add(tag);
+      img.closest(".tag-thumb-wrap")?.classList.add("failed");
+      updateThumbProgress();
+    };
+    img.src = url;
   });
 }
 

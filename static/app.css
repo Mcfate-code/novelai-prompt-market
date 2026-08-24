@@ -132,6 +132,11 @@ button.primary:hover { background: #2f5cc9; }
 
 .tag-list { overflow-y: auto; flex: 1; padding: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; align-content: start; }
 .browse-head { display: flex; align-items: center; justify-content: space-between; padding-right: 12px; }
+.thumb-load-status { padding: 7px 12px 8px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: #f8fafc; }
+.thumb-load-status[hidden] { display: none; }
+.thumb-load-row { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
+.thumb-load-track { height: 5px; overflow: hidden; border-radius: 999px; background: #e6eaf0; }
+.thumb-load-bar { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), #67a4ff); transition: width .22s ease; }
 .browse-head h3 { border: none; background: none; }
 .browse-controls { padding-top: 10px; display: flex; align-items: center; gap: 6px; }
 #back-btn { white-space: nowrap; }
@@ -148,16 +153,21 @@ button.primary:hover { background: #2f5cc9; }
   background: #fff;
   position: relative;
 }
-.tag-thumb {
-  display: none;
-  width: 100%;
-  height: 150px;
-  object-fit: contain;
-  border-radius: 6px;
+.tag-thumb-wrap {
+  position: relative;
+  height: 92px;
   margin-bottom: 6px;
-  background: var(--chip);
+  overflow: hidden;
+  border-radius: 6px;
+  background: linear-gradient(110deg, #edf0f5 25%, #f7f8fa 45%, #edf0f5 65%);
+  background-size: 240% 100%;
+  animation: thumb-skeleton 1.15s linear infinite;
 }
+.tag-thumb-wrap.loaded { height: 150px; animation: none; background: var(--chip); }
+.tag-thumb-wrap.failed { height: 0; margin-bottom: 0; animation: none; }
+.tag-thumb { display: none; width: 100%; height: 100%; object-fit: contain; border-radius: 6px; background: var(--chip); }
 .tag-thumb.loaded { display: block; }
+@keyframes thumb-skeleton { from { background-position: 160% 0; } to { background-position: -80% 0; } }
 .tag-card:hover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .fav-toggle {
   position: absolute;
