@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "default_model": "v5",
+  "models": {
+    "v5": {
+      "id": "nai-diffusion-v5-full",
+      "label": "V5 Full",
+      "released": "2026-08-21",
+      "supports": {
+        "numeric_weight": true,
+        "negative_weight": true,
+        "multi_character": true,
+        "max_characters": null,
+        "natural_language": true,
+        "alpha_channel": true,
+        "bracket_emphasis": true,
+        "randomizer": true
+      },
+      "character_note": "官方测试曾用 Character Positioning 做到约 22 个独立角色；不设硬性上限。",
+      "special_tags": [
+        "depthness",
+        "attractive male",
+        "low complexity",
+        "medium complexity",
+        "high complexity",
+        "ultra complexity",
+        "has alpha",
+        "transparent background",
+        "alpha transparency",
+        "meta:novel era",
+        "meta:golden era",
+        "visual novel art",
+        "visual novel bg",
+        "visual novel cg",
+        "visual novel chibi",
+        "visual novel sprite"
+      ],
+      "quality_presets": {
+        "Full Quality": "location, very aesthetic, masterpiece, no text",
+        "Visual Novel Sprite": "full body, visual novel sprite, transparent background, has alpha, high complexity",
+        "Alpha Magic": "alpha transparency, has alpha"
+      },
+      "uc_presets": {}
+    },
+    "v4.5": {
+      "id": "nai-diffusion-4.5-full",
+      "label": "V4.5 Full",
+      "supports": {
+        "numeric_weight": true,
+        "negative_weight": true,
+        "multi_character": true,
+        "max_characters": 6,
+        "natural_language": true,
+        "alpha_channel": false,
+        "bracket_emphasis": true,
+        "randomizer": true
+      },
+      "character_note": "V4 时代文档常用 6 角色上限提示。",
+      "special_tags": [],
+      "quality_presets": {
+        "Full Quality": "location, very aesthetic, masterpiece, no text",
+        "Curated Quality": "location, masterpiece, no text, -0.8::feet::, rating:general"
+      },
+      "uc_presets": {
+        "Full Heavy UC": "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, blurry, out of focus, logo, watermark, text"
+      }
+    },
+    "v4": {
+      "id": "nai-diffusion-4-full",
+      "label": "V4 Full",
+      "supports": {
+        "numeric_weight": true,
+        "negative_weight": false,
+        "multi_character": true,
+        "max_characters": 6,
+        "natural_language": true,
+        "alpha_channel": false,
+        "bracket_emphasis": true,
+        "randomizer": true
+      },
+      "character_note": "V4 时代文档常用 6 角色上限提示。",
+      "special_tags": [],
+      "quality_presets": {
+        "Full Quality": "no text, best quality, very aesthetic, absurdres"
+      },
+      "uc_presets": {}
+    }
+  },
+  "special_tags": {
+    "quality": [
+      "best quality",
+      "amazing quality",
+      "great quality",
+      "normal quality",
+      "bad quality",
+      "worst quality"
+    ],
+    "aesthetic": [
+      "masterpiece",
+      "top aesthetic",
+      "very aesthetic",
+      "aesthetic",
+      "displeasing",
+      "very displeasing"
+    ],
+    "year": ["year XXXX"],
+    "dataset": ["fur dataset", "background dataset"]
+  },
+  "renamed_tags": {
+    "v": "peace sign",
+    "double v": "double peace",
+    "|_|": "bar eyes",
+    ":|": "neutral face",
+    ";|": "neutral face",
+    "eyepatch bikini": "square bikini",
+    "tachi-e": "character image"
+  },
+  "conflict_hints": [
+    ["black hair", "blonde hair"],
+    ["short hair", "very long hair"],
+    ["day", "night"],
+    ["indoors", "outdoors"],
+    ["white background", "black background"],
+    ["monochrome", "vibrant colors"]
+  ],
+  "dataset_note": {
+    "fur dataset": "V4+",
+    "background dataset": "V4.5+",
+    "masterpiece": "V4.5",
+    "top aesthetic": "V4"
+  }
+}

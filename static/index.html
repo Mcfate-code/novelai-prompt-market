@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NovelAI V5 本地提示词标签超市</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">NovelAI Prompt Builder</div>
+    <div class="model-picker">
+      <label>模型</label>
+      <select id="model-select"></select>
+    </div>
+    <div class="searchbox">
+      <input id="search-input" type="text" placeholder="搜索：蓝眼 / blue eyes / 长发 …" autocomplete="off" />
+    </div>
+    <div class="syncbox">
+      <button id="sync-btn" title="从 Danbooru 更新标签库">更新标签库</button>
+      <button id="settings-btn" class="icon-btn" title="设置">⚙ 设置</button>
+    </div>
+  </header>
+
+  <div class="subbar">
+    <div class="target-picker">
+      加入目标：
+      <select id="target-select"></select>
+    </div>
+    <div class="cat-filter">
+      过滤：
+      <select id="cat-filter">
+        <option value="">全部类别</option>
+        <option value="0">General</option>
+        <option value="4">Character</option>
+        <option value="1">Artist</option>
+        <option value="3">Copyright</option>
+        <option value="5">Meta</option>
+      </select>
+    </div>
+    <div class="view-tabs">
+      <button class="tab active" data-view="browse">分类浏览</button>
+      <button class="tab" data-view="favorites">收藏</button>
+      <button class="tab" data-view="recent">最近使用</button>
+      <button class="tab" data-view="gallery">图库</button>
+      <button class="tab" data-view="generate">生图</button>
+      <button id="gallery-import-btn" class="tab-import" title="导入 NovelAI 图包 zip">导入图包</button>
+    </div>
+  </div>
+
+  <!-- 生图视图（三栏：生成控制 / Output Viewer / History） -->
+  <main id="generate-view" class="nai-layout" style="display:none">
+    <section class="panel nai-left">
+      <div class="nai-section-title">Generation</div>
+      <label class="nai-label">Model</label>
+      <select id="nai-model" class="nai-select">
+        <option value="">沿用 NovelAI 当前</option>
+        <option value="V5">NovelAI Diffusion V5</option>
+        <option value="V4.5">NovelAI Diffusion V4.5</option>
+      </select>
+      <label class="nai-label">Resolution</label>
+      <select id="nai-resolution" class="nai-select">
+        <option value="">沿用 NovelAI 当前</option>
+        <option value="Portrait">Portrait 832×1216</option>
+        <option value="Landscape">Landscape 1216×832</option>
+        <option value="Square">Square 1024×1024</option>
+      </select>
+      <label class="nai-label">Seed</label>
+      <div class="nai-seed-row">
+        <input id="nai-seed" class="nai-seed-input" placeholder="Random" autocomplete="off" />
+        <button id="nai-seed-random" class="nai-icon-btn" title="随机">🎲</button>
+      </div>
+
+      <div class="nai-tabs">
+        <button class="nai-tab active" data-tab="prompt">Prompt</button>
+        <button class="nai-tab" data-tab="undesired">Undesired</button>
+        <button id="nai-split-neg" class="nai-split-btn" title="分离负面提示词（Tab 切换 / 并排显示）">⇱</button>
+      </div>
+      <textarea id="nai-prompt" class="nai-prompt" placeholder="1girl, masterpiece, …（也可从购物车填入）"></textarea>
+      <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
+      <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
+
+      <details class="nai-advanced">
+        <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value">Uses NovelAI defaults</span></summary>
+        <div class="nai-adv-row"><span>Sampler</span><span class="nai-adv-value">NovelAI 当前设置</span></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" placeholder="NovelAI 默认" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Guidance</span><input id="nai-guidance" type="number" step="0.5" min="1" max="15" placeholder="NovelAI 默认" /></div>
+      </details>
+
+      <button id="nai-gen" class="nai-generate">✦ Generate</button>
+      <div id="nai-job" class="nai-job">Ready</div>
+
+      <div class="nai-preset-box">
+        <div class="nai-section-title">Presets</div>
+        <div class="nai-preset-row">
+          <input id="nai-preset-name" type="text" placeholder="预设名称" />
+          <button id="nai-preset-save" class="nai-btn-sm" title="把当前提示词存为预设">保存当前</button>
+        </div>
+        <div id="nai-preset-list" class="nai-preset-list"><div class="empty">暂无预设</div></div>
+        <div class="nai-batch-row">
+          <button id="nai-batch-run" class="nai-btn-sm primary">批量生成勾选项</button>
+          <button id="nai-batch-cancel" class="nai-btn-sm" disabled>取消批次</button>
+        </div>
+        <div id="nai-batch-status" class="nai-job">批次空闲</div>
+      </div>
+    </section>
+
+    <section class="panel nai-center">
+      <div class="nai-viewer-toolbar">
+        <span id="nai-navi" class="nai-navi"></span>
+        <div class="nai-viewer-actions">
+          <button id="nai-pin" class="nai-btn-sm" title="收藏当前图">♡ Pin</button>
+          <button id="nai-reuse" class="nai-btn-sm" title="把当前图的提示词与参数恢复到左侧面板">复用设置</button>
+          <button id="nai-zoom-out" class="nai-btn-sm" title="缩小">−</button>
+          <button id="nai-zoom-fit" class="nai-btn-sm" title="适应窗口">Fit</button>
+          <button id="nai-zoom-in" class="nai-btn-sm" title="放大">+</button>
+        </div>
+      </div>
+      <div id="nai-viewer" class="nai-viewer"><div class="empty">生成后图片显示在这里，点击可 100% 查看</div></div>
+      <div id="nai-viewer-meta" class="nai-viewer-footer"></div>
+    </section>
+
+    <section class="panel nai-right">
+      <div class="nai-section-title">History <button id="nai-history-refresh" class="nai-btn-sm" style="margin-left:auto">刷新</button></div>
+      <div id="nai-history" class="nai-history"><div class="empty">暂无生成历史</div></div>
+    </section>
+  </main>
+
+  <!-- 图库视图 -->
+  <main id="gallery-view" class="gallery-layout" style="display:none">
+    <aside class="panel gallery-dirs">
+      <h3>图包目录</h3>
+      <div id="gallery-dir-list" class="tree"></div>
+      <button id="gallery-refresh" class="ghost" style="margin-top:8px">刷新</button>
+    </aside>
+    <section class="panel gallery-main">
+      <div class="browse-head">
+        <h3 id="gallery-title">图库</h3>
+        <div class="browse-controls">
+          <button id="gallery-del-btn" class="ghost" style="display:none">删除该目录</button>
+        </div>
+      </div>
+      <div id="gallery-grid" class="gallery-grid"></div>
+    </section>
+    <aside class="panel gallery-preview">
+      <h3>预览</h3>
+      <div id="gallery-preview-body" class="gallery-preview-body">
+        <div class="empty">点击图片查看大图与提示词</div>
+      </div>
+    </aside>
+  </main>
+
+  <main class="layout">
+    <aside class="panel categories">
+      <h3>目录</h3>
+      <div id="category-tree" class="tree"></div>
+    </aside>
+
+    <section class="panel browse">
+      <div class="browse-head">
+        <h3 id="browse-title">标签</h3>
+        <div class="browse-controls">
+          <button id="back-btn" class="ghost" style="display:none" title="回到上次浏览的位置">← 返回</button>
+          <select id="sort-select" title="排序方式">
+            <option value="hot">按热度</option>
+            <option value="preference">我的偏好</option>
+          </select>
+        </div>
+      </div>
+      <div id="tag-list" class="tag-list"></div>
+      <div id="pagination" class="pagination"></div>
+    </section>
+
+    <aside class="panel cart">
+      <div class="cart-header">
+        <h3>Prompt 购物车</h3>
+        <div class="cart-actions">
+          <button id="import-btn" title="粘贴一段 NovelAI 提示词导入">导入</button>
+          <button id="add-character">+ 角色</button>
+          <button id="undo-btn">撤销</button>
+          <button id="clear-btn">清空</button>
+        </div>
+      </div>
+      <div id="cart" class="cart-body"></div>
+      <div class="cart-footer">
+        <button id="export-btn" class="primary">导出并复制</button>
+        <button id="save-preset">保存 Preset</button>
+      </div>
+      <div id="export-output" class="export-output" style="display:none">
+        <pre id="export-text"></pre>
+        <div id="export-warnings"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="settings-modal" class="modal" style="display:none">
+    <div class="modal-box settings-box">
+      <div class="modal-title">设置</div>
+      <section class="settings-section">
+        <h4>内容安全</h4>
+        <label class="setting-toggle">
+          <input id="setting-adolescent" type="checkbox" checked />
+          <span>青少年模式</span>
+        </label>
+        <p class="setting-help">开启时默认隐藏成人与受限标签、目录和例图。关闭后才显示相关内容。</p>
+      </section>
+      <section class="settings-section">
+        <h4>缓存</h4>
+        <label class="setting-field"><span>例图缓存上限（MB）</span><input id="setting-cache-limit" type="number" min="0" max="102400" step="128" value="1024" /></label>
+        <p class="setting-help">当前设置为 1024MB。达到上限后自动清理最久未使用的缓存文件；设为 0 表示不保留新缓存。</p>
+        <button id="clear-thumb-cache" class="ghost settings-clear-cache">清理例图缓存</button>
+      </section>
+      <section class="settings-section">
+        <h4>网络与账号</h4>
+        <label class="setting-toggle"><input id="setting-proxy-enabled" type="checkbox" checked /><span>使用代理</span></label>
+        <label class="setting-field"><span>代理地址</span><input id="setting-proxy-url" type="url" placeholder="http://127.0.0.1:7890" /></label>
+        <label class="setting-field"><span>Danbooru 用户名</span><input id="setting-login" type="text" autocomplete="username" /></label>
+        <label class="setting-field"><span>Danbooru API Key</span><input id="setting-api-key" type="password" autocomplete="new-password" placeholder="留空表示保持原 Key" /></label>
+        <p class="setting-help">Danbooru 使用用户名 + API Key，不需要保存网站密码。凭据仅保存在本机用户目录，不写入项目文件。</p>
+      </section>
+      <div class="modal-actions">
+        <div id="settings-status" class="settings-status"></div>
+        <div class="spacer"></div>
+        <button id="settings-cancel">取消</button>
+        <button id="settings-save" class="primary">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="import-modal" class="modal" style="display:none">
+    <div class="modal-box import-box">
+      <div class="modal-title">导入提示词</div>
+      <textarea id="import-text" placeholder="粘贴 NovelAI 提示词，例如：&#10;1girl, long black hair, 1.4::red eyes::, {{masterpiece}}, high complexity, rainy street&#10;&#10;支持多角色分段：&#10;Base: 2girls, cafe&#10;Character 1: girl, blonde hair&#10;Character 2: girl, purple hair&#10;Global UC: worst quality"></textarea>
+      <div class="modal-target">
+        默认导入到：
+        <select id="import-target"></select>
+      </div>
+      <div class="modal-actions">
+        <label><input type="radio" name="import-mode" value="replace" checked /> 替换</label>
+        <label><input type="radio" name="import-mode" value="append" /> 追加到目标</label>
+        <div class="spacer"></div>
+        <button id="import-preview" class="primary">解析预览</button>
+      </div>
+      <div id="import-preview-box" class="import-preview-box" style="display:none"></div>
+      <div class="modal-actions">
+        <div class="spacer"></div>
+        <button id="import-cancel">取消</button>
+        <button id="import-ok" class="primary">导入</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="gallery-file" accept=".zip" style="display:none" />
+
+<div id="thumb-preview" class="thumb-preview" style="display:none">
+    <img id="thumb-preview-img" alt="" />
+    <div id="thumb-preview-tag" class="thumb-preview-tag"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

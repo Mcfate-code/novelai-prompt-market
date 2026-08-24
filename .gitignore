@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Data files (DB, user data)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Logs
+*.log
+
+# Runtime
+nohup.out
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (settings file lives at ~/.workbuddy/)
+config/app_settings.json
+
+# Thumb cache (regenerated on demand)
+static/thumbs/
+
+# IDE
+.idea/
+.vscode/
