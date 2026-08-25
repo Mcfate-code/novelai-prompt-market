@@ -3,72 +3,111 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NovelAI V5 本地提示词标签超市</title>
+  <title>NovelAI 提示词超市 V2</title>
   <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">NovelAI Prompt Builder</div>
+    <div class="brand">NovelAI 提示词超市 V2</div>
     <div class="model-picker">
       <label>模型</label>
       <select id="model-select"></select>
     </div>
     <div class="searchbox">
       <input id="search-input" type="text" placeholder="搜索：蓝眼 / blue eyes / 长发 …" autocomplete="off" />
+      <button id="semantic-search-btn" class="semantic-search-btn" type="button" title="使用中文自然语言查找英文标签">语义找词</button>
     </div>
-    <div class="syncbox">
-      <button id="sync-btn" title="从 Danbooru 更新标签库">更新标签库</button>
-      <button id="settings-btn" class="icon-btn" title="设置">⚙ 设置</button>
-    </div>
+    <nav class="top-actions module-nav" aria-label="主要功能">
+      <button class="top-action primary" data-module="generate" data-view="generate">生图 <span>主工作台</span></button>
+      <button class="top-action active" data-module="market" data-view="browse">标签超市 <span>准备 Prompt</span></button>
+      <button class="top-action" data-module="gallery" data-view="gallery">图库 <span>整理结果</span></button>
+      <button id="settings-btn" class="top-action top-settings" title="打开项目设置">设置</button>
+    </nav>
   </header>
 
   <div class="subbar">
-    <div class="target-picker">
-      加入目标：
-      <select id="target-select"></select>
-    </div>
-    <div class="cat-filter">
-      过滤：
-      <select id="cat-filter">
-        <option value="">全部类别</option>
-        <option value="0">General</option>
-        <option value="4">Character</option>
-        <option value="1">Artist</option>
-        <option value="3">Copyright</option>
-        <option value="5">Meta</option>
-      </select>
-    </div>
-    <div class="view-tabs">
-      <button class="tab active" data-view="browse">分类浏览</button>
-      <button class="tab" data-view="favorites">收藏</button>
-      <button class="tab" data-view="recent">最近使用</button>
-      <button class="tab" data-view="gallery">图库</button>
-      <button class="tab" data-view="generate">生图</button>
-      <button id="gallery-import-btn" class="tab-import" title="导入 NovelAI 图包 zip">导入图包</button>
+    <div class="module-context"><span class="module-context-kicker">当前工作流</span><strong id="module-context-title">标签超市</strong></div>
+    <nav class="context-nav" aria-label="标签超市工具">
+      <button class="context-action active" data-view="browse">标签目录</button>
+      <button class="context-action" data-view="favorites">收藏</button>
+      <button class="context-action" data-view="recent">最近使用</button>
+      <span class="context-divider" aria-hidden="true"></span>
+      <button id="top-import-btn" class="context-action">导入提示词</button>
+      <button id="bundles-btn" class="context-action">标签模板</button>
+      <button id="prompt-history-btn" class="context-action">Prompt 历史</button>
+      <button id="sync-btn" class="context-action" title="从 Danbooru 更新标签库">更新标签库</button>
+    </nav>
+    <div class="subbar-controls">
+      <div class="target-picker">
+        加入目标：
+        <select id="target-select"></select>
+      </div>
+      <div class="cat-filter">
+        过滤：
+        <select id="cat-filter">
+          <option value="">全部类别</option>
+          <option value="0">General</option>
+          <option value="4">Character</option>
+          <option value="1">Artist</option>
+          <option value="3">Copyright</option>
+          <option value="5">Meta</option>
+        </select>
+      </div>
     </div>
   </div>
+
 
   <!-- 生图视图（三栏：生成控制 / Output Viewer / History） -->
   <main id="generate-view" class="nai-layout" style="display:none">
     <section class="panel nai-left">
       <div class="nai-section-title">Generation</div>
+      <div id="nai-api-status" class="nai-live"><span class="nai-live-dot"></span><span>正在检查官方 API…</span></div>
       <label class="nai-label">Model</label>
-      <select id="nai-model" class="nai-select">
-        <option value="">沿用 NovelAI 当前</option>
-        <option value="V5">NovelAI Diffusion V5</option>
-        <option value="V4.5">NovelAI Diffusion V4.5</option>
-      </select>
+      <select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 Full</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 Curated</option></select>
+      <div class="nai-current-line"><span>通道</span><strong id="nai-mode">官方 API</strong></div>
+      <div class="nai-mode-switch" role="group" aria-label="生成模式">
+        <button type="button" class="active" data-nai-mode="txt2img">文生图</button>
+        <button type="button" data-nai-mode="img2img">图生图</button>
+      </div>
+      <section id="nai-img2img-panel" class="nai-img2img-panel" hidden>
+        <input id="nai-img2img-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+        <button id="nai-img2img-pick" type="button" class="nai-source-picker">选择基础图</button>
+        <div id="nai-img2img-preview" class="nai-source-preview"><span>尚未选择图片</span></div>
+        <div class="nai-range-grid">
+          <label><span>Strength <output id="nai-strength-value">0.70</output></span><input id="nai-strength" type="range" min="0.01" max="0.99" step="0.01" value="0.70" /></label>
+          <label><span>Noise <output id="nai-noise-value">0.00</output></span><input id="nai-noise" type="range" min="0" max="0.99" step="0.01" value="0" /></label>
+        </div>
+      </section>
       <label class="nai-label">Resolution</label>
-      <select id="nai-resolution" class="nai-select">
-        <option value="">沿用 NovelAI 当前</option>
-        <option value="Portrait">Portrait 832×1216</option>
-        <option value="Landscape">Landscape 1216×832</option>
-        <option value="Square">Square 1024×1024</option>
+      <div class="nai-resolution-row">
+        <input id="nai-width" type="number" min="64" step="64" aria-label="宽度" value="832" placeholder="W" />
+        <span>×</span>
+        <input id="nai-height" type="number" min="64" step="64" aria-label="高度" value="1216" placeholder="H" />
+      </div>
+      <div class="nai-inline-grid">
+        <label><span>尺寸档位</span><select id="nai-resolution-category" class="nai-select">
+          <option value="small_portrait">Small · 纵向 512×768</option>
+          <option value="small_square">Small · 方形 640×640</option>
+          <option value="small_landscape">Small · 横向 768×512</option>
+          <option value="normal_portrait" selected>Normal · 纵向 832×1216</option>
+          <option value="normal_square">Normal · 方形 1024×1024</option>
+          <option value="normal_landscape">Normal · 横向 1216×832</option>
+          <option value="large_portrait">Large · 纵向 1024×1536</option>
+          <option value="large_square">Large · 方形 1472×1472</option>
+          <option value="large_landscape">Large · 横向 1536×1024</option>
+          <option value="custom">自定义宽高</option>
+        </select></label>
+        <label><span>批次图片数</span><input id="nai-count" class="nai-select" type="number" min="1" max="6" step="1" value="1" inputmode="numeric" /></label>
+      </div>
+      <label class="nai-label">Seed 模式</label>
+      <select id="nai-seed-mode" class="nai-select">
+        <option value="random">Random：每张随机</option>
+        <option value="fixed">Fixed：批次内固定</option>
+        <option value="increment">Increment：逐张递增</option>
       </select>
-      <label class="nai-label">Seed</label>
       <div class="nai-seed-row">
-        <input id="nai-seed" class="nai-seed-input" placeholder="Random" autocomplete="off" />
-        <button id="nai-seed-random" class="nai-icon-btn" title="随机">🎲</button>
+        <input id="nai-seed" class="nai-seed-input" placeholder="Random 模式无需填写" autocomplete="off" />
+        <button id="nai-seed-random" class="nai-icon-btn" title="生成基础 Seed">随机</button>
       </div>
 
       <div class="nai-tabs">
@@ -80,29 +119,25 @@
       <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
       <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
 
+      <section class="nai-characters">
+        <div class="nai-section-title"><span>Multi-Character</span><button id="nai-character-add" type="button" class="nai-link-btn">添加角色</button></div>
+        <div id="nai-character-list" class="nai-character-list"><div class="empty">暂无独立角色</div></div>
+      </section>
+
       <details class="nai-advanced">
-        <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value">Uses NovelAI defaults</span></summary>
-        <div class="nai-adv-row"><span>Sampler</span><span class="nai-adv-value">NovelAI 当前设置</span></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" placeholder="NovelAI 默认" /></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Guidance</span><input id="nai-guidance" type="number" step="0.5" min="1" max="15" placeholder="NovelAI 默认" /></div>
+        <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value">等待同步</span></summary>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Sampler</span><select id="nai-sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option><option value="k_dpmpp_2m">DPM++ 2M</option></select></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" value="28" placeholder="NovelAI 默认" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Guidance</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="5" placeholder="NovelAI 默认" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Quality Tags</span><select id="nai-quality"><option value="on">On</option><option value="off">Off</option></select></div>
       </details>
 
-      <button id="nai-gen" class="nai-generate">✦ Generate</button>
-      <div id="nai-job" class="nai-job">Ready</div>
-
-      <div class="nai-preset-box">
-        <div class="nai-section-title">Presets</div>
-        <div class="nai-preset-row">
-          <input id="nai-preset-name" type="text" placeholder="预设名称" />
-          <button id="nai-preset-save" class="nai-btn-sm" title="把当前提示词存为预设">保存当前</button>
-        </div>
-        <div id="nai-preset-list" class="nai-preset-list"><div class="empty">暂无预设</div></div>
-        <div class="nai-batch-row">
-          <button id="nai-batch-run" class="nai-btn-sm primary">批量生成勾选项</button>
-          <button id="nai-batch-cancel" class="nai-btn-sm" disabled>取消批次</button>
-        </div>
-        <div id="nai-batch-status" class="nai-job">批次空闲</div>
+      <div id="nai-cost" class="nai-cost unknown"><span>Opus 本地预估</span><strong>正在读取参数</strong></div>
+      <div class="nai-run-actions">
+        <button id="nai-gen" class="nai-generate" disabled>Generate</button>
+        <button id="nai-cancel" class="nai-cancel" type="button" disabled title="停止尚未发送的图片请求">取消</button>
       </div>
+      <div id="nai-job" class="nai-job">Ready</div>
     </section>
 
     <section class="panel nai-center">
@@ -110,7 +145,8 @@
         <span id="nai-navi" class="nai-navi"></span>
         <div class="nai-viewer-actions">
           <button id="nai-pin" class="nai-btn-sm" title="收藏当前图">♡ Pin</button>
-          <button id="nai-reuse" class="nai-btn-sm" title="把当前图的提示词与参数恢复到左侧面板">复用设置</button>
+          <button id="nai-reuse" class="nai-btn-sm" title="恢复当前图的完整生成设置">恢复设置</button>
+          <button id="nai-use-img2img" class="nai-btn-sm" title="以当前历史图作为图生图基础图">图生图</button>
           <button id="nai-zoom-out" class="nai-btn-sm" title="缩小">−</button>
           <button id="nai-zoom-fit" class="nai-btn-sm" title="适应窗口">Fit</button>
           <button id="nai-zoom-in" class="nai-btn-sm" title="放大">+</button>
@@ -131,16 +167,30 @@
     <aside class="panel gallery-dirs">
       <h3>图包目录</h3>
       <div id="gallery-dir-list" class="tree"></div>
+      <div class="gallery-cleanup-box">
+        <strong>待清理</strong>
+        <span>已移入项目文件夹</span>
+        <button id="gallery-open-cleanup" class="ghost" type="button">打开待清理文件夹</button>
+      </div>
       <button id="gallery-refresh" class="ghost" style="margin-top:8px">刷新</button>
     </aside>
     <section class="panel gallery-main">
-      <div class="browse-head">
-        <h3 id="gallery-title">图库</h3>
+      <div class="browse-head gallery-head">
+        <div><span class="section-kicker">生成结果</span><h3 id="gallery-title">图库</h3></div>
         <div class="browse-controls">
+          <div class="gallery-density" role="group" aria-label="图片显示大小">
+            <button id="gallery-zoom-out" class="icon-btn" type="button" title="显示更多图片">−</button>
+            <span id="gallery-zoom-label">中</span>
+            <button id="gallery-zoom-in" class="icon-btn" type="button" title="图片放大">＋</button>
+          </div>
+          <button id="gallery-select-all" class="ghost" type="button">全选</button>
+          <button id="gallery-cleanup-btn" class="ghost danger-action" type="button" disabled>移入待清理</button>
+          <button id="gallery-import-btn" class="primary">导入图包</button>
           <button id="gallery-del-btn" class="ghost" style="display:none">删除该目录</button>
         </div>
       </div>
-      <div id="gallery-grid" class="gallery-grid"></div>
+      <div id="gallery-selection-status" class="gallery-selection-status" aria-live="polite"></div>
+      <div id="gallery-grid" class="gallery-grid gallery-grid-medium"></div>
     </section>
     <aside class="panel gallery-preview">
       <h3>预览</h3>
@@ -158,7 +208,7 @@
 
     <section class="panel browse">
       <div class="browse-head">
-        <h3 id="browse-title">标签</h3>
+        <div><span class="section-kicker">提示词素材</span><h3 id="browse-title">标签目录</h3></div>
         <div class="browse-controls">
           <button id="back-btn" class="ghost" style="display:none" title="回到上次浏览的位置">← 返回</button>
           <select id="sort-select" title="排序方式">
@@ -175,6 +225,14 @@
         <div class="thumb-load-track"><div id="thumb-load-bar" class="thumb-load-bar"></div></div>
       </div>
       <div id="tag-list" class="tag-list"></div>
+      <section id="semantic-results" class="semantic-results" hidden>
+        <div class="semantic-results-head"><span class="semantic-results-head-title"><strong>语义候选</strong><span id="semantic-status"></span></span><button id="semantic-close" class="semantic-close" type="button" title="关闭语义候选" aria-label="关闭语义候选">×</button></div>
+        <div id="semantic-list" class="semantic-list"></div>
+      </section>
+      <section id="recommendations" class="recommendations" hidden>
+        <div class="recommendations-head"><span class="recommendations-head-title"><strong>相关推荐</strong><span>根据当前 Prompt</span></span><button id="recommendations-close" class="recommendations-close" type="button" title="关闭相关推荐" aria-label="关闭相关推荐">×</button></div>
+        <div id="recommendation-list" class="recommendation-list"></div>
+      </section>
       <div id="pagination" class="pagination"></div>
     </section>
 
@@ -183,16 +241,34 @@
         <h3>Prompt 购物车</h3>
         <div class="cart-actions">
           <button id="import-btn" title="粘贴一段 NovelAI 提示词导入">导入</button>
-          <button id="add-character">+ 角色</button>
           <button id="undo-btn">撤销</button>
           <button id="clear-btn">清空</button>
+          <button id="cart-advanced-toggle" title="显示分区、权重与多角色编辑">高级编辑</button>
         </div>
       </div>
+      <div id="conflict-panel" class="conflict-panel" hidden></div>
       <div id="cart" class="cart-body"></div>
-      <div class="cart-footer">
-        <button id="export-btn" class="primary">导出并复制</button>
-        <button id="save-preset">保存 Preset</button>
-      </div>
+      <section class="prompt-preview-bar">
+        <div class="prompt-preview-head"><strong>Prompt Preview</strong><span id="prompt-preview-meta">0 tags</span></div>
+        <div id="prompt-preview-text" class="prompt-preview-text">当前 Prompt 为空</div>
+        <div class="prompt-preview-actions">
+          <button id="export-btn" class="primary">复制</button>
+          <button id="save-snapshot-btn">保存快照</button>
+          <button id="save-bundle-btn">保存为标签模板</button>
+          <button id="send-generate-btn">发送到生图</button>
+        </div>
+      </section>
+      <details class="legacy-preset-box">
+        <summary>Prompt Preset</summary>
+        <div class="cart-footer"><button id="save-preset">保存 Preset</button></div>
+        <div class="prompt-preset-row">
+          <select id="prompt-preset-select">
+            <option value="">选择已保存提示词</option>
+          </select>
+          <button id="prompt-preset-load" title="加载所选提示词仓库项">加载</button>
+          <button id="prompt-preset-delete" title="删除所选提示词仓库项">删除</button>
+        </div>
+      </details>
       <div id="export-output" class="export-output" style="display:none">
         <pre id="export-text"></pre>
         <div id="export-warnings"></div>
@@ -214,8 +290,30 @@
       <section class="settings-section">
         <h4>缓存</h4>
         <label class="setting-field"><span>例图缓存上限（MB）</span><input id="setting-cache-limit" type="number" min="0" max="102400" step="128" value="1024" /></label>
-        <p class="setting-help">当前设置为 1024MB。达到上限后自动清理最久未使用的缓存文件；设为 0 表示不保留新缓存。</p>
-        <button id="clear-thumb-cache" class="ghost settings-clear-cache">清理例图缓存</button>
+        <p class="setting-help">当前设置为 1024MB。达到上限后自动清理最久未使用的网上例图；设为 0 表示不保留新缓存。</p>
+        <div class="storage-usage-grid">
+          <span>网上例图</span><strong id="storage-web">0 MB</strong>
+          <span>NovelAI 标签例图</span><strong id="storage-novelai-example">0 MB</strong>
+          <span>NovelAI 图库</span><strong id="storage-gallery">0 MB</strong>
+        </div>
+        <div class="settings-cache-actions">
+          <button id="clear-thumb-cache" class="ghost">清理网上例图</button>
+          <button id="clear-novelai-example-cache" class="ghost">清理 NovelAI 标签例图</button>
+        </div>
+      </section>
+      <section class="settings-section">
+        <h4>NovelAI 生图</h4>
+        <label class="setting-field"><span>批处理上限</span><output id="setting-novelai-batch-max-value">6 张</output></label>
+        <input id="setting-novelai-batch-max" type="range" min="1" max="100" step="1" value="6" aria-label="NovelAI 批处理上限" />
+        <p class="setting-help">单个批次最多可排队 100 张；请求会严格串行发送。数值越大，潜在 Anlas 消耗越高。</p>
+        <label class="setting-toggle"><input id="setting-novelai-example-credit-warning" type="checkbox" checked /><span>生成 NovelAI 标签例图前提示可能使用积分</span></label>
+        <label class="setting-field-stack"><span>NovelAI 例图提示词模板</span><input id="setting-novelai-example-prompt" type="text" autocomplete="off" placeholder="{tag}, {rating}, masterpiece, best quality, very aesthetic, absurdres" /></label>
+        <p class="setting-help">生成标签例图时使用的默认提示词。{tag} 会被替换为目标标签（自动加双花括号强调），{rating} 替换为 safe / nsfw。必须保留 {tag} 占位符。</p>
+      </section>
+      <section class="settings-section">
+        <h4>自定义标签</h4>
+        <p class="setting-help">保存在本地的自定义标签（不在 Danbooru 词库中时使用）。也可在购物车点「＋ 自定义标签」直接添加并加入当前 Prompt。</p>
+        <div id="custom-tag-list" class="custom-tag-list"></div>
       </section>
       <section class="settings-section">
         <h4>网络与账号</h4>
@@ -223,13 +321,29 @@
         <label class="setting-field"><span>代理地址</span><input id="setting-proxy-url" type="url" placeholder="http://127.0.0.1:7890" /></label>
         <label class="setting-field"><span>Danbooru 用户名</span><input id="setting-login" type="text" autocomplete="username" /></label>
         <label class="setting-field"><span>Danbooru API Key</span><input id="setting-api-key" type="password" autocomplete="new-password" placeholder="留空表示保持原 Key" /></label>
-        <p class="setting-help">Danbooru 使用用户名 + API Key，不需要保存网站密码。凭据仅保存在本机用户目录，不写入项目文件。</p>
+        <label class="setting-field"><span>NovelAI API Key</span><input id="setting-novelai-api-key" type="password" autocomplete="new-password" placeholder="留空表示保持原 Key" /></label>
+        <p class="setting-help">Danbooru 使用用户名 + API Key；NovelAI API Key 用于官方生图接口。凭据仅保存在本机用户目录，不写入项目文件。</p>
       </section>
       <div class="modal-actions">
         <div id="settings-status" class="settings-status"></div>
         <div class="spacer"></div>
         <button id="settings-cancel">取消</button>
         <button id="settings-save" class="primary">保存设置</button>
+      </div>
+    </div>
+   </div>
+
+  <div id="custom-tag-modal" class="modal" style="display:none">
+    <div class="modal-box">
+      <div class="modal-title">添加自定义标签</div>
+      <p class="setting-help">自定义标签会保存到本地词库，之后在搜索中也能直接命中（via：自定义）。标签建议用英文（NovelAI 语法），例如 <code>original character</code>、<code>my_style</code>。</p>
+      <label class="setting-field-stack"><span>标签名（必填）</span><input id="custom-tag-name" type="text" autocomplete="off" placeholder="例如：original character, my_style" /></label>
+      <label class="setting-field-stack"><span>备注（选填）</span><input id="custom-tag-note" type="text" autocomplete="off" placeholder="可选，记录用途" /></label>
+      <div class="modal-actions">
+        <div id="custom-tag-status" class="settings-status"></div>
+        <div class="spacer"></div>
+        <button id="custom-tag-cancel" type="button">取消</button>
+        <button id="custom-tag-save" type="button" class="primary">保存并加入</button>
       </div>
     </div>
   </div>
@@ -254,6 +368,21 @@
         <button id="import-cancel">取消</button>
         <button id="import-ok" class="primary">导入</button>
       </div>
+    </div>
+  </div>
+
+  <div id="bundles-modal" class="modal" style="display:none">
+    <div class="modal-box workspace-modal-box">
+      <div class="modal-title-row"><div><span class="section-kicker">Prompt 组件</span><div class="modal-title">标签模板</div></div><button id="bundles-close" title="关闭">×</button></div>
+      <div class="bundle-create-row"><input id="bundle-name" placeholder="标签模板名称" /><button id="bundle-create" class="primary">用当前 Prompt 创建</button></div>
+      <div id="bundles-list" class="workspace-list"><div class="empty">正在加载标签模板…</div></div>
+    </div>
+  </div>
+
+  <div id="snapshot-modal" class="modal" style="display:none">
+    <div class="modal-box workspace-modal-box">
+      <div class="modal-title-row"><div class="modal-title">Prompt 历史</div><button id="snapshot-close" title="关闭">×</button></div>
+      <div id="snapshot-list" class="workspace-list"><div class="empty">正在加载历史…</div></div>
     </div>
   </div>
 

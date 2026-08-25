@@ -18,10 +18,24 @@ except ImportError:  # pragma: no cover
 
 MAX_EDGE = 512
 JPEG_QUALITY = 78
+NOVELAI_EXAMPLE_MAX_EDGE = 384
+NOVELAI_EXAMPLE_JPEG_QUALITY = 72
 
 
-def compress_image_bytes(data: bytes) -> bytes | None:
-    """把远端图片字节压缩为 JPEG 字节。失败/缺 Pillow 返回 None。"""
+def is_valid_image_bytes(data: bytes) -> bool:
+    """只校验图片是否可解码，不改变原始字节。"""
+    if Image is None:
+        return False
+    try:
+        with Image.open(BytesIO(data)) as im:
+            im.verify()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def compress_image_bytes(data: bytes, *, max_edge: int = MAX_EDGE, quality: int = JPEG_QUALITY) -> bytes | None:
+    """把图片字节压缩为 JPEG；标签例图可传更小的 max_edge/quality。"""
     if Image is None:
         return None
     try:
@@ -37,11 +51,13 @@ def compress_image_bytes(data: bytes) -> bytes | None:
             im = im.convert("RGB")
         # 等比缩小
         w, h = im.size
-        if max(w, h) > MAX_EDGE:
-            ratio = MAX_EDGE / max(w, h)
+        max_edge = max(64, int(max_edge))
+        quality = max(40, min(95, int(quality)))
+        if max(w, h) > max_edge:
+            ratio = max_edge / max(w, h)
             im = im.resize((max(1, round(w * ratio)), max(1, round(h * ratio))), Image.LANCZOS)
         out = BytesIO()
-        im.save(out, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
+        im.save(out, format="JPEG", quality=quality, optimize=True, progressive=True)
         return out.getvalue()
     except Exception:  # noqa: BLE001
         return None

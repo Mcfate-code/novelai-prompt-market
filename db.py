@@ -122,6 +122,23 @@ CREATE TABLE IF NOT EXISTS tag_thumbs (
     fetched_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tag_novelai_examples (
+    tag_name TEXT PRIMARY KEY,
+    prompt TEXT NOT NULL,
+    file_url TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    steps INTEGER NOT NULL,
+    seed INTEGER,
+    status TEXT NOT NULL DEFAULT 'ready',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tag_novelai_examples_status ON tag_novelai_examples(status);
+
 CREATE TABLE IF NOT EXISTS user_tags (
     tag_name TEXT PRIMARY KEY,
     note TEXT NOT NULL DEFAULT '',
@@ -148,6 +165,68 @@ CREATE TABLE IF NOT EXISTS gallery_favorites (
     created_at TEXT NOT NULL,
     PRIMARY KEY (dir_name, file_name)
 );
+
+CREATE TABLE IF NOT EXISTS tag_section_override (
+    tag_name TEXT PRIMARY KEY,
+    section TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tag_bundle (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tag_bundle_item (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bundle_id INTEGER NOT NULL REFERENCES tag_bundle(id) ON DELETE CASCADE,
+    tag_name TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    section TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_item_bundle ON tag_bundle_item(bundle_id, sort_order, id);
+
+CREATE TABLE IF NOT EXISTS tag_cooccurrence (
+    tag_a TEXT NOT NULL,
+    tag_b TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tag_a, tag_b),
+    CHECK (tag_a < tag_b)
+);
+
+CREATE TABLE IF NOT EXISTS tag_conflict (
+    tag_a TEXT NOT NULL,
+    tag_b TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tag_a, tag_b),
+    CHECK (tag_a < tag_b)
+);
+
+CREATE TABLE IF NOT EXISTS prompt_snapshot (
+    id TEXT PRIMARY KEY,
+    positive_prompt TEXT NOT NULL DEFAULT '',
+    negative_prompt TEXT NOT NULL DEFAULT '',
+    structured_state_json TEXT NOT NULL,
+    generation_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS generation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id TEXT REFERENCES prompt_snapshot(id) ON DELETE SET NULL,
+    gallery_id INTEGER REFERENCES gallery(id) ON DELETE SET NULL,
+    source_asset_id TEXT,
+    parameters_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_snapshot ON generation(snapshot_id);
 """
 
 
@@ -160,6 +239,7 @@ def get_conn(db_path: str | Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
@@ -180,6 +260,25 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute("ALTER TABLE gallery ADD COLUMN negative_prompt TEXT NOT NULL DEFAULT ''")
         if gcols and "parameters_json" not in gcols:
             conn.execute("ALTER TABLE gallery ADD COLUMN parameters_json TEXT")
+        if gcols and "snapshot_id" not in gcols:
+            conn.execute("ALTER TABLE gallery ADD COLUMN snapshot_id TEXT REFERENCES prompt_snapshot(id)")
+        if gcols and "source_asset_id" not in gcols:
+            conn.execute("ALTER TABLE gallery ADD COLUMN source_asset_id TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_gallery_source_asset "
+            "ON gallery(source_asset_id) WHERE source_asset_id IS NOT NULL"
+        )
+        for a, b, reason in (
+            ("long hair", "short hair", "发长描述互斥"),
+            ("closed eyes", "open eyes", "眼睛开合互斥"),
+            ("looking at viewer", "looking away", "视线方向互斥"),
+        ):
+            tag_a, tag_b = sorted((a, b))
+            conn.execute(
+                "INSERT OR IGNORE INTO tag_conflict (tag_a, tag_b, reason, created_at) VALUES (?,?,?,?)",
+                (tag_a, tag_b, reason, now_iso()),
+            )
+        conn.execute("PRAGMA user_version=3")
         conn.commit()
     finally:
         conn.close()

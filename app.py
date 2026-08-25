@@ -5,13 +5,21 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
+import math
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 import uuid
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -23,7 +31,7 @@ import db  # noqa: E402
 import imageutil  # noqa: E402
 import search  # noqa: E402
 from importer import build_catalog, import_aliases, import_danbooru_zh, import_restricted, import_taxonomy, sync_danbooru  # noqa: E402
-from prompt import composer, import_parser, novelai_export  # noqa: E402
+from prompt import composer, import_parser, novelai_export, sections as prompt_sections  # noqa: E402
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -33,7 +41,17 @@ from pydantic import BaseModel  # noqa: E402
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 THUMB_DIR = STATIC_DIR / "thumbs"
+NOVELAI_EXAMPLE_DIR = STATIC_DIR / "novelai-examples"
+NOVELAI_EXAMPLE_MODEL = "nai-diffusion-4-5-full"
+NOVELAI_EXAMPLE_WIDTH = 832
+NOVELAI_EXAMPLE_HEIGHT = 832
+NOVELAI_EXAMPLE_STEPS = 28
+NOVELAI_EXAMPLE_COOLDOWN_SECONDS = 8
+# 生成 NovelAI 标签例图时使用的默认提示词模板。
+# {tag} 会被替换为目标标签（自动加双花括号强调），{rating} 替换为 safe / nsfw。
+NOVELAI_EXAMPLE_PROMPT_TEMPLATE = "{tag}, {rating}, masterpiece, best quality, very aesthetic, absurdres"
 GALLERY_DIR = BASE_DIR / "data" / "gallery"
+GALLERY_TRASH_DIR = BASE_DIR / "待清理" / "图库"
 SETTINGS = db.load_json(BASE_DIR / "config" / "app_settings.json")
 USER_SETTINGS_PATH = Path.home() / ".workbuddy" / "tags-market-settings.json"
 DEFAULT_USER_SETTINGS = {
@@ -43,7 +61,123 @@ DEFAULT_USER_SETTINGS = {
     "proxy_url": "http://127.0.0.1:7890",
     "danbooru_login": "",
     "danbooru_api_key": "",
+    "novelai_api_token": "",
+    "novelai_batch_max_count": 6,
+    "novelai_example_credit_warning": True,
+    "novelai_example_prompt_template": NOVELAI_EXAMPLE_PROMPT_TEMPLATE,
 }
+NOVELAI_SERVICE_URL = "http://127.0.0.1:8787"
+NOVELAI_SERVICE_START_TIMEOUT = 12.0
+MANAGED_NODE_BIN = Path.home() / ".workbuddy" / "binaries" / "node" / "versions" / "22.12.0" / "bin" / "node"
+MANAGED_NODE_MODULES = Path.home() / ".workbuddy" / "binaries" / "node" / "workspace" / "node_modules"
+
+
+def _live_reload_enabled() -> bool:
+    """本地工作台默认热重载；部署或排障时可显式关闭。"""
+    return os.environ.get("TAGS_MARKET_RELOAD", "1").strip().lower() not in {"0", "false", "no"}
+
+
+def _novelai_service_ready(timeout: float = 0.5) -> bool:
+    try:
+        with urllib.request.urlopen(f"{NOVELAI_SERVICE_URL}/api/novelai/status?probe=0", timeout=timeout) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+        return False
+
+
+def _node_executable() -> str:
+    configured = os.environ.get("NODE_BIN", "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+    if MANAGED_NODE_BIN.is_file():
+        return str(MANAGED_NODE_BIN)
+    discovered = shutil.which("node")
+    if discovered:
+        return discovered
+    raise RuntimeError("未找到 Node.js 22+，无法自动启动 NovelAI 本地服务")
+
+
+def _start_novelai_service() -> tuple[subprocess.Popen | None, object | None]:
+    if os.environ.get("TAGS_MARKET_AUTOSTART_NAI", "1").strip().lower() in {"0", "false", "no"}:
+        return None, None
+    if _novelai_service_ready():
+        return None, None
+
+    node = _node_executable()
+    server_dir = BASE_DIR / "server"
+    server_entry = server_dir / "server.mjs"
+    if not server_entry.is_file():
+        raise RuntimeError(f"NovelAI 本地服务入口不存在：{server_entry}")
+
+    runtime_dir = BASE_DIR / ".workbuddy" / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    log_handle = (runtime_dir / "novelai-service.log").open("a", encoding="utf-8")
+    env = os.environ.copy()
+    env["NODE_OPTIONS"] = ""
+    env["PYTHON_APP_URL"] = f"http://{SETTINGS.get('host', '127.0.0.1')}:{SETTINGS.get('port', 8123)}"
+    if MANAGED_NODE_MODULES.is_dir():
+        env["NODE_PATH"] = str(MANAGED_NODE_MODULES)
+    node_args = [node]
+    if _live_reload_enabled():
+        node_args.append("--watch")
+    node_args.extend(["--experimental-sqlite", str(server_entry), "--port", "8787", "--no-boot"])
+    process = subprocess.Popen(
+        node_args,
+        cwd=server_dir,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+    deadline = time.monotonic() + NOVELAI_SERVICE_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            log_handle.close()
+            raise RuntimeError(
+                f"NovelAI 本地服务启动失败（退出码 {process.returncode}），"
+                "请查看 .workbuddy/runtime/novelai-service.log"
+            )
+        if _novelai_service_ready():
+            print(f"NovelAI 本地服务已自动启动：{NOVELAI_SERVICE_URL}")
+            return process, log_handle
+        time.sleep(0.1)
+
+    process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+    log_handle.close()
+    raise RuntimeError("NovelAI 本地服务启动超时，请查看 .workbuddy/runtime/novelai-service.log")
+
+
+def _stop_novelai_service(process: subprocess.Popen | None, log_handle: object | None) -> None:
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+    if log_handle is not None:
+        log_handle.close()
+
+
+def _parse_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return default
 
 
 def _load_user_settings() -> dict:
@@ -54,15 +188,25 @@ def _load_user_settings() -> dict:
             data.update(raw)
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         pass
-    data["adolescent_mode"] = bool(data.get("adolescent_mode", True))
+    data["adolescent_mode"] = _parse_bool(data.get("adolescent_mode"), True)
     try:
         data["cache_limit_mb"] = max(0, min(102400, int(data.get("cache_limit_mb", 1024))))
     except (TypeError, ValueError):
         data["cache_limit_mb"] = 1024
-    data["proxy_enabled"] = bool(data.get("proxy_enabled", True))
+    data["proxy_enabled"] = _parse_bool(data.get("proxy_enabled"), True)
     data["proxy_url"] = str(data.get("proxy_url") or DEFAULT_USER_SETTINGS["proxy_url"]).strip()
     data["danbooru_login"] = str(data.get("danbooru_login") or "").strip()
     data["danbooru_api_key"] = str(data.get("danbooru_api_key") or "").strip()
+    data["novelai_api_token"] = str(os.environ.get("NOVELAI_API_KEY") or data.get("novelai_api_token") or "").strip()
+    try:
+        data["novelai_batch_max_count"] = max(1, min(100, int(data.get("novelai_batch_max_count", 6))))
+    except (TypeError, ValueError):
+        data["novelai_batch_max_count"] = 6
+    data["novelai_example_credit_warning"] = _parse_bool(data.get("novelai_example_credit_warning"), True)
+    tpl = data.get("novelai_example_prompt_template")
+    if not isinstance(tpl, str) or "{tag}" not in tpl:
+        tpl = NOVELAI_EXAMPLE_PROMPT_TEMPLATE
+    data["novelai_example_prompt_template"] = tpl.strip()
     return data
 
 
@@ -204,9 +348,20 @@ async def lifespan(app: FastAPI):
     ensure_seeded()
     app.state.thumb_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="thumb-fetch")
     app.state.image_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="image-fetch")
+    app.state.novelai_service_process = None
+    app.state.novelai_service_log = None
+    app.state.novelai_service_error = None
+    try:
+        process, log_handle = _start_novelai_service()
+        app.state.novelai_service_process = process
+        app.state.novelai_service_log = log_handle
+    except RuntimeError as exc:
+        app.state.novelai_service_error = str(exc)
+        print(f"NovelAI 本地服务自动启动失败：{exc}", file=sys.stderr)
     try:
         yield
     finally:
+        _stop_novelai_service(app.state.novelai_service_process, app.state.novelai_service_log)
         app.state.thumb_executor.shutdown(wait=True, cancel_futures=True)
         app.state.image_executor.shutdown(wait=True, cancel_futures=True)
 
@@ -218,17 +373,19 @@ _cache_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".svg"
 
 @app.middleware("http")
 async def add_cache_headers(request, call_next):
-    """静态资源（含本地例图）加长缓存头，浏览器只下载一次。"""
+    """图库图片长缓存；应用 JS/CSS/HTML 始终重新验证，避免升级后卡在旧前端。"""
     response = await call_next(request)
     path = request.url.path
-    if path.startswith(("/static/", "/gallery/")):
-        ext = Path(path).suffix.lower()
-        if ext in _cache_exts:
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    ext = Path(path).suffix.lower()
+    if path.startswith("/gallery/") and ext in _cache_exts and response.status_code < 400:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static/") or path == "/":
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+NOVELAI_EXAMPLE_DIR.mkdir(parents=True, exist_ok=True)
 GALLERY_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/gallery", StaticFiles(directory=str(GALLERY_DIR)), name="gallery")
 
@@ -250,6 +407,15 @@ MAX_ZIP_BYTES = 1.5 * 1024 * 1024 * 1024
 MAX_ZIP_FILES = 10000
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "image/bmp"}
+GALLERY_MIME_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+}
 GALLERY_ROOT = GALLERY_DIR.resolve()
 
 
@@ -270,6 +436,17 @@ def _safe_gallery_path(dir_name: str) -> Path:
     if target.parent != GALLERY_ROOT:
         raise HTTPException(400, "非法图库目录")
     return target
+
+
+def _move_gallery_to_cleanup(path: Path, category: str) -> Path | None:
+    """把图库文件移入项目内待清理区，避免直接永久删除。"""
+    if not path.exists():
+        return None
+    cleanup_dir = GALLERY_TRASH_DIR / category
+    cleanup_dir.mkdir(parents=True, exist_ok=True)
+    destination = cleanup_dir / f"{path.name}-{uuid.uuid4().hex[:8]}"
+    os.replace(path, destination)
+    return destination
 
 
 def _prompt_from_filename(fname: str) -> str:
@@ -307,6 +484,7 @@ async def gallery_import(upload: UploadFile = File(...)):
         target = _safe_gallery_path(dir_name)
         target.mkdir(parents=True, exist_ok=True)
         imported = skipped = failed = 0
+        created_paths: list[Path] = []
         conn = _conn()
         try:
             with zipfile.ZipFile(temp_path) as zf:
@@ -336,24 +514,24 @@ async def gallery_import(upload: UploadFile = File(...)):
                     except Exception:  # noqa: BLE001
                         failed += 1
                         continue
-                    compressed = imageutil.compress_image_bytes(data)
-                    if compressed is None:
+                    if not imageutil.is_valid_image_bytes(data):
                         failed += 1
                         continue
                     prompt = _prompt_from_filename(fname)
                     short = re.sub(r'[\\/:*?"<>|,{}\[\]()\s]+', "_", prompt).strip("._ ") or "img"
                     short = short[:40].strip("_") or "img"
-                    # UUID 避免重复导入、跳过条目或同名提示词造成覆盖。
-                    out_name = f"{uuid.uuid4().hex}_{short}.jpg"
+                    # 保留 ZIP 中的原始图片字节与扩展名；列表/预览由 CSS 缩放，不再落盘低清 JPEG。
+                    out_name = f"{uuid.uuid4().hex}_{short}{ext}"
                     out_path = target / out_name
                     temp_out = target / f".{out_name}.tmp"
                     try:
-                        temp_out.write_bytes(compressed)
+                        temp_out.write_bytes(data)
                         os.replace(temp_out, out_path)
                     except OSError:  # noqa: BLE001
                         temp_out.unlink(missing_ok=True)
                         failed += 1
                         continue
+                    created_paths.append(out_path)
                     conn.execute(
                         "INSERT INTO gallery (dir_name, file_name, prompt, file_path, created_at) "
                         "VALUES (?,?,?,?,?)",
@@ -361,6 +539,14 @@ async def gallery_import(upload: UploadFile = File(...)):
                     )
                     imported += 1
             conn.commit()
+        except Exception:
+            conn.rollback()
+            for created_path in created_paths:
+                try:
+                    _move_gallery_to_cleanup(created_path, "ZIP导入失败")
+                except OSError:
+                    pass
+            raise
         finally:
             conn.close()
         return {"ok": True, "dir": dir_name, "imported": imported, "skipped": skipped, "failed": failed}
@@ -381,36 +567,56 @@ class GalleryItemBody(BaseModel):
     negative_prompt: str = ""
     parameters: dict | None = None
     dir_name: str = "nai_generated"
+    snapshot_id: str | None = None
+    source_asset_id: str | None = None
 
 
 @app.post("/api/gallery/item")
 async def gallery_item(body: GalleryItemBody):
     """单张图片入库：base64 → 压缩 → 存 data/gallery/<dir>/ → 建索引。
 
-    图库表只保留 prompt 正文字段；负面提示词与参数完整元数据由
-    NovelAI 联动层（Node library.db）持有，这里不冗余存储。
+    Python 图库保存正负提示词、完整参数与 Node 资产 ID，后者用于幂等同步。
     """
     dir_name = _sanitize_dir_name(body.dir_name)
+    conn = _conn()
+    try:
+        if body.source_asset_id:
+            existing = conn.execute(
+                "SELECT * FROM gallery WHERE source_asset_id=?", (body.source_asset_id,)
+            ).fetchone()
+            if existing:
+                return _gallery_item_dict(conn, existing)
+        if body.snapshot_id and not conn.execute(
+            "SELECT 1 FROM prompt_snapshot WHERE id=?", (body.snapshot_id,)
+        ).fetchone():
+            raise HTTPException(404, "snapshot not found")
+    finally:
+        conn.close()
     target = _safe_gallery_path(dir_name)
     target.mkdir(parents=True, exist_ok=True)
+    encoded = (body.image_base64 or "").strip()
+    if "," in encoded and encoded.lower().startswith("data:"):
+        header, encoded = encoded.split(",", 1)
+        if ";base64" not in header.lower():
+            raise HTTPException(400, "图片 base64 无效")
     try:
-        data = base64.b64decode(body.image_base64, validate=False)
-    except (ValueError, TypeError) as exc:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
         raise HTTPException(400, "图片 base64 无效") from exc
     if not data or len(data) > MAX_IMAGE_BYTES:
         raise HTTPException(400, "图片数据无效或过大（>50MB）")
-    if body.mime.split("/")[0] != "image":
+    mime = (body.mime or "").strip().lower()
+    if mime not in ALLOWED_IMAGE_MIME:
         raise HTTPException(400, "非法图片类型")
-    compressed = imageutil.compress_image_bytes(data)
-    if compressed is None:
-        raise HTTPException(400, "图片压缩失败")
     short = re.sub(r'[\\/:*?"<>|,{}\[\]()\s]+', "_", body.prompt).strip("._ ") or "img"
     short = short[:40].strip("_") or "img"
-    fname = f"{uuid.uuid4().hex}_{short}.jpg"
+    ext = GALLERY_MIME_EXT[mime]
+    fname = f"{uuid.uuid4().hex}_{short}{ext}"
     out_path = target / fname
     temp_out = target / f".{fname}.tmp"
     try:
-        temp_out.write_bytes(compressed)
+        # 保留 Node/NovelAI 返回的原始图片字节；前端只缩放显示，不降低源文件清晰度。
+        temp_out.write_bytes(data)
         os.replace(temp_out, out_path)
     except OSError:  # noqa: BLE001
         temp_out.unlink(missing_ok=True)
@@ -418,25 +624,58 @@ async def gallery_item(body: GalleryItemBody):
     prompt = body.prompt.strip()
     conn = _conn()
     try:
-        conn.execute(
-            "INSERT INTO gallery (dir_name, file_name, prompt, file_path, created_at, negative_prompt, parameters_json) "
-            "VALUES (?,?,?,?,?,?,?)",
+        cur = conn.execute(
+            "INSERT INTO gallery (dir_name, file_name, prompt, file_path, created_at, negative_prompt, "
+            "parameters_json, snapshot_id, source_asset_id) VALUES (?,?,?,?,?,?,?,?,?)",
             (dir_name, fname, prompt, str(out_path.relative_to(BASE_DIR)), db.now_iso(),
              (body.negative_prompt or "").strip(),
-             json.dumps(body.parameters, ensure_ascii=False) if body.parameters else None),
+             json.dumps(body.parameters, ensure_ascii=False) if body.parameters else None,
+             body.snapshot_id, body.source_asset_id),
+        )
+        conn.execute(
+            "INSERT INTO generation (snapshot_id, gallery_id, source_asset_id, parameters_json, created_at) "
+            "VALUES (?,?,?,?,?)",
+            (body.snapshot_id, cur.lastrowid, body.source_asset_id,
+             json.dumps(body.parameters, ensure_ascii=False) if body.parameters else None, db.now_iso()),
         )
         conn.commit()
+        created = conn.execute("SELECT * FROM gallery WHERE id=?", (cur.lastrowid,)).fetchone()
+        return _gallery_item_dict(conn, created)
+    except Exception:
+        conn.rollback()
+        try:
+            _move_gallery_to_cleanup(out_path, "入库失败")
+        except OSError:
+            pass
+        raise
     finally:
         conn.close()
-    return {
-        "ok": True,
-        "dir_name": dir_name,
-        "file_name": fname,
-        "file_path": str(out_path.relative_to(BASE_DIR)),
-        "prompt": prompt,
-        "negative_prompt": (body.negative_prompt or "").strip(),
-        "parameters": body.parameters,
-    }
+
+
+def _json_object(raw):
+    try:
+        value = json.loads(raw) if raw else None
+        return value if isinstance(value, dict) else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _gallery_item_dict(conn, row) -> dict:
+    item = dict(row)
+    item["parameters"] = _json_object(item.pop("parameters_json", None))
+    snapshot_id = item.get("snapshot_id")
+    snapshot = None
+    if snapshot_id:
+        snap = conn.execute(
+            "SELECT id, positive_prompt, negative_prompt, structured_state_json, created_at "
+            "FROM prompt_snapshot WHERE id=?", (snapshot_id,)
+        ).fetchone()
+        if snap:
+            snapshot = dict(snap)
+            snapshot["structured_state"] = _json_object(snapshot.pop("structured_state_json")) or {}
+    item["snapshot"] = snapshot
+    item["ok"] = True
+    return item
 
 
 @app.get("/api/gallery")
@@ -462,17 +701,14 @@ def gallery_dir(dir_name: str):
     try:
         rows = conn.execute(
             "SELECT g.id, g.file_name, g.prompt, g.negative_prompt, g.parameters_json, g.file_path, "
-            "(f.dir_name IS NOT NULL) favorite "
+            "g.snapshot_id, g.source_asset_id, (f.dir_name IS NOT NULL) favorite "
             "FROM gallery g LEFT JOIN gallery_favorites f USING (dir_name, file_name) "
             "WHERE g.dir_name=? ORDER BY g.id DESC",
             (dir_name,),
         ).fetchall()
         return {
             "dir": dir_name,
-            "items": [
-                {**dict(r), "parameters": json.loads(r["parameters_json"]) if r["parameters_json"] else None}
-                for r in rows
-            ],
+            "items": [_gallery_item_dict(conn, r) for r in rows],
         }
     finally:
         conn.close()
@@ -482,6 +718,15 @@ class GalleryFavRequest(BaseModel):
     dir_name: str
     file_name: str
     favorite: bool
+
+
+class GalleryItemRef(BaseModel):
+    dir_name: str
+    file_name: str
+
+
+class GalleryCleanupBody(BaseModel):
+    items: list[GalleryItemRef]
 
 
 @app.post("/api/gallery/favorite")
@@ -511,24 +756,105 @@ def gallery_favorite(req: GalleryFavRequest):
         conn.close()
 
 
+@app.post("/api/gallery/cleanup/open")
+def gallery_cleanup_open():
+    """创建并打开项目内待清理文件夹，交由用户手动审查和删除。"""
+    GALLERY_TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(GALLERY_TRASH_DIR)])
+        elif os.name == "nt":
+            os.startfile(str(GALLERY_TRASH_DIR))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(GALLERY_TRASH_DIR)])
+    except OSError as exc:
+        raise HTTPException(500, "无法打开待清理文件夹") from exc
+    return {"ok": True, "created": True, "path": str(GALLERY_TRASH_DIR.relative_to(BASE_DIR))}
+
+
+@app.post("/api/gallery/cleanup")
+def gallery_cleanup(body: GalleryCleanupBody):
+    """把选中的图库图片移入项目待清理文件夹，并移除活动索引。"""
+    items = body.items[:100]
+    if not items:
+        raise HTTPException(400, "请选择至少一张图片")
+    moved: list[dict] = []
+    conn = _conn()
+    try:
+        candidates = []
+        for item in items:
+            target = _safe_gallery_path(item.dir_name)
+            row = conn.execute(
+                "SELECT id, file_path FROM gallery WHERE dir_name=? AND file_name=?",
+                (item.dir_name, item.file_name),
+            ).fetchone()
+            if not row:
+                continue
+            file_path = Path(row["file_path"])
+            if not file_path.is_absolute():
+                file_path = BASE_DIR / file_path
+            file_path = file_path.resolve()
+            if file_path.parent != target.resolve() or not file_path.is_file():
+                continue
+            candidates.append((item, row, file_path))
+
+        # 先完整校验，再执行移动；中途失败时把已经移动的文件还原。
+        cleanup_paths: list[tuple[Path, Path]] = []
+        try:
+            for item, row, file_path in candidates:
+                cleanup_path = _move_gallery_to_cleanup(file_path, "用户待清理")
+                if not cleanup_path:
+                    raise OSError(f"文件不存在：{item.file_name}")
+                cleanup_paths.append((file_path, cleanup_path))
+                moved.append({"dir_name": item.dir_name, "file_name": item.file_name, "cleanup_path": str(cleanup_path.relative_to(BASE_DIR))})
+                conn.execute("DELETE FROM gallery WHERE id=?", (row["id"],))
+                conn.execute("DELETE FROM gallery_favorites WHERE dir_name=? AND file_name=?", (item.dir_name, item.file_name))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            for original, cleanup_path in reversed(cleanup_paths):
+                try:
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(cleanup_path, original)
+                except OSError:
+                    pass
+            raise
+    except OSError as exc:
+        raise HTTPException(500, "图片移动到待清理区失败，索引未修改") from exc
+    finally:
+        conn.close()
+    return {"ok": True, "moved": moved, "count": len(moved), "cleanup_dir": str(GALLERY_TRASH_DIR.relative_to(BASE_DIR))}
+
+
 @app.delete("/api/gallery/{dir_name}")
 def gallery_delete(dir_name: str):
-    """删除整个图库目录（项目副本与索引）。"""
+    """移走整个图库目录到待清理区，并删除活动索引。"""
     target = _safe_gallery_path(dir_name)
     conn = _conn()
+    cleanup_path = None
     try:
         exists = conn.execute("SELECT 1 FROM gallery WHERE dir_name=? LIMIT 1", (dir_name,)).fetchone()
         if not exists:
             raise HTTPException(404, "图库目录不存在")
+        try:
+            cleanup_path = _move_gallery_to_cleanup(target, "已移除目录")
+        except OSError as exc:
+            raise HTTPException(500, "图库目录移动到待清理区失败，索引未修改") from exc
         conn.execute("DELETE FROM gallery WHERE dir_name=?", (dir_name,))
         conn.execute("DELETE FROM gallery_favorites WHERE dir_name=?", (dir_name,))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        if cleanup_path and cleanup_path.exists() and not target.exists():
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(cleanup_path, target)
+            except OSError:
+                pass
+        raise
     finally:
         conn.close()
-    if target.exists():
-        import shutil
-        shutil.rmtree(target, ignore_errors=False)
-    return {"ok": True}
+    return {"ok": True, "cleanup_path": str(cleanup_path.relative_to(BASE_DIR)) if cleanup_path else None}
 
 
 # ---------- 模型 / overlay ----------
@@ -575,9 +901,10 @@ def taxonomy():
 def do_search(
     q: str = "",
     category: int | None = Query(default=None),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     deprecated: bool = False,
 ):
+    limit = max(1, min(200, int(limit)))
     conn = _conn()
     try:
         hidden = _hidden_tag_names(conn)
@@ -603,6 +930,153 @@ def resolve(q: str):
         return r
     finally:
         conn.close()
+
+
+DANBOORU_SEMANTIC_URL = "https://sakizuki-danboorusearch.hf.space/api/search"
+DANBOORU_SEMANTIC_TIMEOUT = 90
+DANBOORU_SEMANTIC_DEFAULTS = {
+    "top_k": 5,
+    "limit": 80,
+    "popularity_weight": 0.15,
+    "use_segmentation": True,
+    "target_layers": ["英文", "中文扩展词", "释义", "中文核心词"],
+    "target_categories": ["General", "Character", "Copyright"],
+    "group_mode": "off",
+    "max_per_group": 2,
+}
+
+
+class SemanticSearchBody(BaseModel):
+    query: str
+    category: int | None = None
+    top_k: int = 5
+    limit: int = 80
+
+
+def _semantic_proxy_handler(settings: dict):
+    if not settings.get("proxy_enabled"):
+        return urllib.request.ProxyHandler({})
+    proxy = str(settings.get("proxy_url") or "").strip()
+    return urllib.request.ProxyHandler({"http": proxy, "https": proxy}) if proxy else urllib.request.ProxyHandler({})
+
+
+def _semantic_request_payload(body: SemanticSearchBody, adolescent_mode: bool) -> dict:
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(400, "语义搜索词不能为空")
+    payload = dict(DANBOORU_SEMANTIC_DEFAULTS)
+    payload.update({
+        "query": query,
+        "top_k": max(1, min(20, int(body.top_k))),
+        "limit": max(1, min(200, int(body.limit))),
+        "show_nsfw": not adolescent_mode,
+    })
+    if body.category is not None and body.category in db.CATEGORY_NAMES:
+        payload["target_categories"] = [db.CATEGORY_NAMES[body.category]]
+    return payload
+
+
+def _semantic_category_id(value) -> int | None:
+    if isinstance(value, int):
+        return value if value in db.CATEGORY_NAMES else None
+    if isinstance(value, str):
+        return db.CATEGORY_IDS.get(value.strip())
+    return None
+
+
+def _normalize_semantic_response(raw, conn, hidden: set[str], category: int | None = None) -> list[dict]:
+    if not isinstance(raw, dict) or not isinstance(raw.get("results"), list):
+        raise ValueError("第三方响应缺少 results 列表")
+    output = []
+    seen = set()
+    for item in raw["results"]:
+        if not isinstance(item, dict) or not isinstance(item.get("tag"), str):
+            continue
+        tag = item["tag"].strip().replace("_", " ")
+        if not tag or tag in seen or tag in hidden:
+            continue
+        category_name = str(item.get("category") or "General").strip() or "General"
+        category_id = _semantic_category_id(category_name)
+        if category is not None and category_id != category:
+            continue
+        resolved = search.resolve_tag(conn, tag)
+        if resolved is not None and resolved.get("tag") in hidden:
+            continue
+        if resolved is not None:
+            local_status = "alias" if resolved.get("via", "").startswith("alias") or resolved.get("via") == "token_alias" else "canonical"
+            canonical_tag = resolved.get("tag", tag)
+            local_zh = resolved.get("zh") or resolved.get("zh_name") or ""
+            section = resolved.get("section")
+        else:
+            local_status = "candidate"
+            canonical_tag = tag
+            local_zh = ""
+            section = None
+        score = item.get("final_score", item.get("score", item.get("semantic_score", 0)))
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            score = 0.0
+        output.append({
+            "tag": canonical_tag,
+            "source_tag": tag,
+            "cn_name": str(item.get("cn_name") or local_zh or ""),
+            "zh": str(item.get("cn_name") or local_zh or ""),
+            "category": category_id if category_id is not None else category_name,
+            "category_name": category_name,
+            "score": score,
+            "final_score": score,
+            "semantic_score": item.get("semantic_score", score),
+            "post_count": item.get("count", 0),
+            "wiki": str(item.get("wiki") or ""),
+            "alias_from": item.get("alias_from"),
+            "layer": str(item.get("layer") or ""),
+            "local_status": local_status,
+            "resolved": resolved is not None,
+            "section": section,
+        })
+        seen.add(tag)
+    return output
+
+
+def _semantic_search(body: SemanticSearchBody) -> dict:
+    settings = _load_user_settings()
+    payload = _semantic_request_payload(body, settings["adolescent_mode"])
+    request = urllib.request.Request(
+        DANBOORU_SEMANTIC_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        opener = urllib.request.build_opener(_semantic_proxy_handler(settings))
+        with opener.open(request, timeout=DANBOORU_SEMANTIC_TIMEOUT) as response:
+            if response.status < 200 or response.status >= 300:
+                raise HTTPException(502, f"语义搜索服务返回 HTTP {response.status}")
+            raw = json.loads(response.read().decode("utf-8"))
+    except HTTPException:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(502, f"语义搜索服务返回 HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HTTPException(502, "语义搜索服务连接失败，请检查代理或稍后重试") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(502, "语义搜索服务返回的不是有效 JSON") from exc
+    conn = _conn()
+    try:
+        hidden = _hidden_tag_names(conn)
+        try:
+            results = _normalize_semantic_response(raw, conn, hidden, category=body.category)
+        except ValueError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {"query": payload["query"], "results": results, "show_nsfw": payload["show_nsfw"]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/semantic-search")
+def semantic_search(body: SemanticSearchBody):
+    return _semantic_search(body)
 
 
 @app.get("/api/zh")
@@ -718,10 +1192,11 @@ def _fetch_large_and_cache(tag: str, thumb_local: str) -> str:
 
 
 # 全局懒加载后台任务去重锁，线程池由应用 lifespan 管理
-import threading  # noqa: E402
-
 _pending_lock = threading.Lock()
 _pending = set()
+_novelai_example_lock = threading.Lock()
+_novelai_example_pending: set[str] = set()
+_novelai_example_last_started: dict[str, float] = {}
 
 
 @app.get("/api/thumbs")
@@ -818,11 +1293,27 @@ class UserSettingsBody(BaseModel):
     proxy_url: str = "http://127.0.0.1:7890"
     danbooru_login: str = ""
     danbooru_api_key: str = ""
+    novelai_api_token: str = ""
+    novelai_batch_max_count: int | None = None
+    novelai_example_credit_warning: bool | None = None
+    novelai_example_prompt_template: str | None = None
+
+
+def _dir_usage_mb(directory: Path) -> float:
+    files = [p for p in directory.rglob("*") if p.is_file()] if directory.exists() else []
+    return round(sum(p.stat().st_size for p in files) / 1024 / 1024, 1)
 
 
 def _cache_usage_mb() -> float:
-    files = [p for p in THUMB_DIR.iterdir() if p.is_file()] if THUMB_DIR.exists() else []
-    return round(sum(p.stat().st_size for p in files) / 1024 / 1024, 1)
+    return _dir_usage_mb(THUMB_DIR)
+
+
+def _novelai_example_usage_mb() -> float:
+    return _dir_usage_mb(NOVELAI_EXAMPLE_DIR)
+
+
+def _gallery_usage_mb() -> float:
+    return _dir_usage_mb(GALLERY_DIR)
 
 
 @app.get("/api/settings")
@@ -832,10 +1323,16 @@ def get_settings():
         "adolescent_mode": settings["adolescent_mode"],
         "cache_limit_mb": settings["cache_limit_mb"],
         "cache_usage_mb": _cache_usage_mb(),
+        "novelai_example_usage_mb": _novelai_example_usage_mb(),
+        "gallery_usage_mb": _gallery_usage_mb(),
         "proxy_enabled": settings["proxy_enabled"],
         "proxy_url": settings["proxy_url"],
         "danbooru_login": settings["danbooru_login"],
         "has_danbooru_api_key": bool(settings["danbooru_api_key"] or os.environ.get("DANBOORU_API_KEY")),
+        "novelai_configured": bool(settings["novelai_api_token"]),
+        "novelai_batch_max_count": settings["novelai_batch_max_count"],
+        "novelai_example_credit_warning": settings["novelai_example_credit_warning"],
+        "novelai_example_prompt_template": settings["novelai_example_prompt_template"],
     }
 
 
@@ -860,15 +1357,213 @@ def clear_thumb_cache():
     return {"ok": True, "removed": removed}
 
 
+@app.post("/api/novelai-examples/clear")
+def clear_novelai_example_cache():
+    removed = 0
+    if NOVELAI_EXAMPLE_DIR.exists():
+        for path in NOVELAI_EXAMPLE_DIR.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+    conn = _conn()
+    try:
+        conn.execute("DELETE FROM tag_novelai_examples")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/novelai-examples")
+def list_novelai_examples(tags: str = ""):
+    names = [t.strip() for t in tags.split(",") if t.strip()][:80]
+    if not names:
+        return {"examples": {}}
+    conn = _conn()
+    try:
+        placeholders = ",".join("?" for _ in names)
+        rows = conn.execute(
+            "SELECT tag_name, prompt, file_url, model, width, height, steps, seed, status, error_message "
+            f"FROM tag_novelai_examples WHERE tag_name IN ({placeholders})",
+            names,
+        ).fetchall()
+        return {"examples": {r["tag_name"]: dict(r) for r in rows if r["status"] == "ready" and r["file_url"]}}
+    finally:
+        conn.close()
+
+
+class NovelAIExampleBody(BaseModel):
+    # 兼容未重启的旧前端；服务端不会信任该值，而是按 taxonomy 重建提示词。
+    prompt: str = ""
+    confirm_anlas: bool = False
+    force: bool = False
+
+
+def _novelai_example_path(tag: str) -> Path:
+    digest = hashlib.sha256(tag.encode("utf-8")).hexdigest()
+    return NOVELAI_EXAMPLE_DIR / f"{digest}.jpg"
+
+
+def _is_nsfw_example_tag(conn, tag: str) -> bool:
+    """使用目录的受限 taxonomy 与 NSFW 分类判定例图的内容分级。"""
+    restricted = conn.execute(
+        "SELECT 1 FROM restricted_taxonomy_map m LEFT JOIN tags t ON t.danbooru_name=m.canonical_name "
+        "WHERE m.status != 'anomalous' AND (m.seed=? OR t.prompt_tag=?) LIMIT 1",
+        (tag, tag),
+    ).fetchone()
+    if restricted:
+        return True
+    classified = conn.execute(
+        "SELECT 1 FROM taxonomy_map WHERE tag_name=? AND ("
+        "lower(COALESCE(category_l1, '')) LIKE '%nsfw%' OR lower(COALESCE(category_l1, '')) LIKE '%成人%' "
+        "OR lower(COALESCE(category_l2, '')) LIKE '%nsfw%' OR lower(COALESCE(category_l2, '')) LIKE '%成人%' "
+        "OR lower(COALESCE(category_l3, '')) LIKE '%nsfw%' OR lower(COALESCE(category_l3, '')) LIKE '%成人%') LIMIT 1",
+        (tag,),
+    ).fetchone()
+    return bool(classified)
+
+
+def _novelai_example_prompt(tag: str, is_nsfw: bool, template: str | None = None) -> str:
+    if not template or "{tag}" not in template:
+        template = NOVELAI_EXAMPLE_PROMPT_TEMPLATE
+    template = template.strip()
+    rating = "nsfw" if is_nsfw else "safe"
+    emphasized = f"{{{{{tag}}}}}"  # 双花括号保留 NovelAI 强调语法
+    return template.replace("{tag}", emphasized).replace("{rating}", rating)
+
+
+@app.post("/api/novelai-examples/{tag:path}")
+def generate_novelai_example(tag: str, body: NovelAIExampleBody):
+    tag = tag.strip()
+    if not tag or len(tag) > 200:
+        raise HTTPException(400, "标签无效")
+
+    target = _novelai_example_path(tag)
+    conn = _conn()
+    try:
+        prompt = _novelai_example_prompt(
+            tag,
+            _is_nsfw_example_tag(conn, tag),
+            _load_user_settings().get("novelai_example_prompt_template"),
+        )
+        row = conn.execute(
+            "SELECT tag_name, prompt, file_url, model, width, height, steps, seed, status, error_message "
+            "FROM tag_novelai_examples WHERE tag_name=?", (tag,),
+        ).fetchone()
+        if not body.force and row and row["status"] == "ready" and row["file_url"] and target.exists():
+            return {"ok": True, "cached": True, "example": dict(row)}
+    finally:
+        conn.close()
+
+    if not body.confirm_anlas:
+        raise HTTPException(428, "生成 NovelAI 标签例图会消耗 Anlas，请明确确认后再请求")
+
+    now = time.monotonic()
+    with _novelai_example_lock:
+        if tag in _novelai_example_pending:
+            raise HTTPException(409, "该标签正在生成，请稍候")
+        if now - _novelai_example_last_started.get(tag, 0.0) < NOVELAI_EXAMPLE_COOLDOWN_SECONDS:
+            raise HTTPException(429, "该标签刚刚生成过，请稍后再试")
+        _novelai_example_pending.add(tag)
+        _novelai_example_last_started[tag] = now
+
+    try:
+        timestamp = db.now_iso()
+        conn = _conn()
+        try:
+            conn.execute(
+                "INSERT INTO tag_novelai_examples (tag_name,prompt,file_url,model,width,height,steps,status,error_message,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tag_name) DO UPDATE SET prompt=excluded.prompt,status='pending',error_message='',updated_at=excluded.updated_at",
+                (tag, prompt, "", NOVELAI_EXAMPLE_MODEL, NOVELAI_EXAMPLE_WIDTH, NOVELAI_EXAMPLE_HEIGHT, NOVELAI_EXAMPLE_STEPS, "pending", "", timestamp, timestamp),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        request = urllib.request.Request(
+            f"{NOVELAI_SERVICE_URL}/api/novelai/tag-example",
+            data=json.dumps({"prompt": prompt, "confirm_anlas": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=150) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        raw = base64.b64decode(result.get("image_base64", ""), validate=True)
+        compressed = imageutil.compress_image_bytes(
+            raw,
+            max_edge=imageutil.NOVELAI_EXAMPLE_MAX_EDGE,
+            quality=imageutil.NOVELAI_EXAMPLE_JPEG_QUALITY,
+        )
+        if not compressed:
+            raise HTTPException(502, "NovelAI 图片压缩失败")
+        NOVELAI_EXAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".jpg.tmp")
+        tmp.write_bytes(compressed)
+        os.replace(tmp, target)
+        example = {
+            "tag_name": tag,
+            "prompt": prompt,
+            "file_url": f"/static/novelai-examples/{target.name}",
+            "model": NOVELAI_EXAMPLE_MODEL,
+            "width": NOVELAI_EXAMPLE_WIDTH,
+            "height": NOVELAI_EXAMPLE_HEIGHT,
+            "steps": NOVELAI_EXAMPLE_STEPS,
+            "seed": result.get("seed"),
+            "status": "ready",
+            "error_message": "",
+        }
+        conn = _conn()
+        try:
+            conn.execute(
+                "UPDATE tag_novelai_examples SET file_url=?, seed=?, status='ready', error_message='', updated_at=? WHERE tag_name=?",
+                (example["file_url"], example["seed"], db.now_iso(), tag),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "cached": False, "example": example}
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)[:300]
+        conn = _conn()
+        try:
+            conn.execute(
+                "UPDATE tag_novelai_examples SET status='error', error_message=?, updated_at=? WHERE tag_name=?",
+                (str(detail), db.now_iso(), tag),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(502, f"NovelAI 标签例图生成失败：{str(exc)[:200]}") from exc
+    finally:
+        with _novelai_example_lock:
+            _novelai_example_pending.discard(tag)
+
+
 @app.post("/api/settings")
 def save_settings(body: UserSettingsBody):
     current = _load_user_settings()
-    incoming = body.model_dump()
+    incoming = body.model_dump(exclude_none=True)
     # 空 API Key 表示保持原值，避免用户只改青少年模式时意外清空凭据。
     if not incoming["danbooru_api_key"].strip():
         incoming["danbooru_api_key"] = current["danbooru_api_key"]
+    if not incoming["novelai_api_token"].strip():
+        incoming["novelai_api_token"] = current["novelai_api_token"]
     incoming["danbooru_login"] = incoming["danbooru_login"].strip()
+    incoming["novelai_api_token"] = incoming["novelai_api_token"].strip()
     incoming["proxy_url"] = incoming["proxy_url"].strip()
+    if "novelai_batch_max_count" in incoming:
+        incoming["novelai_batch_max_count"] = max(1, min(100, int(incoming["novelai_batch_max_count"])))
+    if "novelai_example_prompt_template" in incoming:
+        tpl = incoming["novelai_example_prompt_template"]
+        if not isinstance(tpl, str) or "{tag}" not in tpl:
+            raise HTTPException(400, "例图提示词模板必须包含 {tag} 占位符，否则生成的例图将不含目标标签")
+        incoming["novelai_example_prompt_template"] = tpl.strip()
     normalized = _load_user_settings()
     normalized.update(incoming)
     _save_user_settings(normalized)
@@ -1178,6 +1873,367 @@ def category_browse(cat_id: int, offset: int = Query(default=0), limit: int = Qu
         conn.close()
 
 
+# ---------- Prompt V2：分区 / Bundle / 推荐 / 快照 ----------
+
+
+class ClassifyRequest(BaseModel):
+    tags: list[str]
+
+
+class SectionOverrideRequest(BaseModel):
+    tag: str
+    section: str
+
+
+@app.get("/api/prompt/sections")
+def prompt_section_list():
+    return {"sections": prompt_sections.section_definitions()}
+
+
+@app.post("/api/prompt/classify")
+def prompt_classify(body: ClassifyRequest):
+    conn = _conn()
+    try:
+        items = prompt_sections.classify_tags(conn, body.tags)
+        return {"items": items, "results": items}
+    finally:
+        conn.close()
+
+
+@app.post("/api/prompt/section-override")
+def prompt_section_override(body: SectionOverrideRequest):
+    tag = body.tag.strip()
+    if not tag:
+        raise HTTPException(400, "tag is required")
+    try:
+        section = prompt_sections.validate_section(body.section)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO tag_section_override (tag_name, section, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(tag_name) DO UPDATE SET section=excluded.section, updated_at=excluded.updated_at",
+            (tag, section, db.now_iso()),
+        )
+        conn.commit()
+        return {"ok": True, "tag": tag, "section": section}
+    finally:
+        conn.close()
+
+
+class BundleItemBody(BaseModel):
+    tag: str
+    weight: float = 1.0
+    section: str = "other"
+    sort_order: int = 0
+
+
+class BundleBody(BaseModel):
+    name: str
+    items: list[BundleItemBody] = []
+
+
+def _validated_bundle(body: BundleBody) -> tuple[str, list[dict]]:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "bundle name is required")
+    items = []
+    for item in body.items:
+        tag = item.tag.strip()
+        if not tag:
+            raise HTTPException(400, "bundle item tag is required")
+        if not math.isfinite(item.weight) or not -10 <= item.weight <= 10:
+            raise HTTPException(400, "weight must be finite and between -10 and 10")
+        try:
+            section = prompt_sections.validate_section(item.section)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        items.append({"tag": tag, "weight": item.weight, "section": section, "sort_order": item.sort_order})
+    return name, items
+
+
+def _bundle_dict(conn, bundle_id: int) -> dict | None:
+    row = conn.execute("SELECT * FROM tag_bundle WHERE id=?", (bundle_id,)).fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out["items"] = [
+        {"tag": r["tag_name"], "weight": r["weight"], "section": r["section"], "sort_order": r["sort_order"]}
+        for r in conn.execute(
+            "SELECT tag_name, weight, section, sort_order FROM tag_bundle_item "
+            "WHERE bundle_id=? ORDER BY sort_order, id", (bundle_id,)
+        )
+    ]
+    return out
+
+
+@app.get("/api/bundles")
+def bundle_list():
+    conn = _conn()
+    try:
+        ids = [r["id"] for r in conn.execute("SELECT id FROM tag_bundle ORDER BY updated_at DESC, id DESC")]
+        return {"bundles": [_bundle_dict(conn, bundle_id) for bundle_id in ids]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/bundles")
+def bundle_create(body: BundleBody):
+    name, items = _validated_bundle(body)
+    conn = _conn()
+    try:
+        now = db.now_iso()
+        cur = conn.execute("INSERT INTO tag_bundle (name, created_at, updated_at) VALUES (?,?,?)", (name, now, now))
+        conn.executemany(
+            "INSERT INTO tag_bundle_item (bundle_id, tag_name, weight, section, sort_order) VALUES (?,?,?,?,?)",
+            ((cur.lastrowid, i["tag"], i["weight"], i["section"], i["sort_order"]) for i in items),
+        )
+        conn.commit()
+        return _bundle_dict(conn, cur.lastrowid)
+    finally:
+        conn.close()
+
+
+@app.get("/api/bundles/{bundle_id}")
+def bundle_get(bundle_id: int):
+    conn = _conn()
+    try:
+        result = _bundle_dict(conn, bundle_id)
+        if result is None:
+            raise HTTPException(404, "bundle not found")
+        return result
+    finally:
+        conn.close()
+
+
+@app.put("/api/bundles/{bundle_id}")
+def bundle_update(bundle_id: int, body: BundleBody):
+    name, items = _validated_bundle(body)
+    conn = _conn()
+    try:
+        if not conn.execute("SELECT 1 FROM tag_bundle WHERE id=?", (bundle_id,)).fetchone():
+            raise HTTPException(404, "bundle not found")
+        conn.execute("UPDATE tag_bundle SET name=?, updated_at=? WHERE id=?", (name, db.now_iso(), bundle_id))
+        conn.execute("DELETE FROM tag_bundle_item WHERE bundle_id=?", (bundle_id,))
+        conn.executemany(
+            "INSERT INTO tag_bundle_item (bundle_id, tag_name, weight, section, sort_order) VALUES (?,?,?,?,?)",
+            ((bundle_id, i["tag"], i["weight"], i["section"], i["sort_order"]) for i in items),
+        )
+        conn.commit()
+        return _bundle_dict(conn, bundle_id)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/bundles/{bundle_id}")
+def bundle_delete(bundle_id: int):
+    conn = _conn()
+    try:
+        cur = conn.execute("DELETE FROM tag_bundle WHERE id=?", (bundle_id,))
+        conn.commit()
+        if not cur.rowcount:
+            raise HTTPException(404, "bundle not found")
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+class TagsRequest(BaseModel):
+    tags: list[str]
+    limit: int = 20
+
+
+def _normalized_unique_tags(tags: list[str]) -> list[str]:
+    return list(dict.fromkeys(search._norm(tag) for tag in tags if search._norm(tag)))
+
+
+def _record_cooccurrence(conn, tags: list[str]) -> list[str]:
+    tags = _normalized_unique_tags(tags)
+    now = db.now_iso()
+    for tag in tags:
+        conn.execute(
+            "INSERT INTO recent_tags (tag_name, last_used_at, use_count) VALUES (?,?,1) "
+            "ON CONFLICT(tag_name) DO UPDATE SET last_used_at=excluded.last_used_at, use_count=recent_tags.use_count+1",
+            (tag, now),
+        )
+    for index, tag_a in enumerate(tags):
+        for tag_b in tags[index + 1:]:
+            a, b = sorted((tag_a, tag_b))
+            conn.execute(
+                "INSERT INTO tag_cooccurrence (tag_a, tag_b, count, updated_at) VALUES (?,?,1,?) "
+                "ON CONFLICT(tag_a, tag_b) DO UPDATE SET count=tag_cooccurrence.count+1, updated_at=excluded.updated_at",
+                (a, b, now),
+            )
+    return tags
+
+
+@app.post("/api/cooccurrence/record")
+def cooccurrence_record(body: TagsRequest):
+    conn = _conn()
+    try:
+        tags = _record_cooccurrence(conn, body.tags)
+        conn.commit()
+        return {"ok": True, "tags": tags, "pairs": len(tags) * (len(tags) - 1) // 2}
+    finally:
+        conn.close()
+
+
+@app.post("/api/recommendations")
+def recommendations(body: TagsRequest):
+    tags = _normalized_unique_tags(body.tags)
+    if not tags:
+        return {"recommendations": []}
+    conn = _conn()
+    try:
+        scores: dict[str, int] = {}
+        for tag in tags:
+            for row in conn.execute(
+                "SELECT tag_a, tag_b, count FROM tag_cooccurrence WHERE tag_a=? OR tag_b=?", (tag, tag)
+            ):
+                other = row["tag_b"] if row["tag_a"] == tag else row["tag_a"]
+                if other not in tags:
+                    scores[other] = scores.get(other, 0) + row["count"]
+        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:max(0, min(body.limit, 100))]
+        recommendations = []
+        for tag, count in ranked:
+            row = conn.execute(
+                "SELECT t.danbooru_name, t.prompt_tag, COALESCE(u.zh, t.zh_name, '') zh "
+                "FROM tags t LEFT JOIN user_zh u ON u.tag_name=t.prompt_tag "
+                "WHERE lower(t.prompt_tag)=lower(?) OR lower(t.danbooru_name)=lower(?) LIMIT 1",
+                (tag, tag),
+            ).fetchone()
+            canonical = row["danbooru_name"] if row else tag.replace(" ", "_")
+            prompt_tag = row["prompt_tag"] if row else tag
+            recommendations.append({
+                "tag": prompt_tag,
+                "canonical": canonical,
+                "zh": row["zh"] if row else "",
+                "section": prompt_sections.classify_tag(conn, prompt_tag),
+                "count": count,
+            })
+        return {"recommendations": recommendations}
+    finally:
+        conn.close()
+
+
+@app.get("/api/conflicts")
+def conflicts(tags: str = ""):
+    names = _normalized_unique_tags(tags.split(","))
+    if len(names) < 2:
+        return {"conflicts": []}
+    placeholders = ",".join("?" for _ in names)
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            f"SELECT tag_a, tag_b, reason FROM tag_conflict WHERE tag_a IN ({placeholders}) AND tag_b IN ({placeholders})",
+            (*names, *names),
+        ).fetchall()
+        return {"conflicts": [dict(row) for row in rows]}
+    finally:
+        conn.close()
+
+
+def _collect_structured_tags(value) -> list[str]:
+    """只收集 Prompt entry 的 tag 字段，不把 section 元数据或普通字符串当作标签。"""
+    found = []
+    if isinstance(value, dict):
+        tag = value.get("tag")
+        if isinstance(tag, str) and tag.strip():
+            found.append(tag.strip())
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                found.extend(_collect_structured_tags(child))
+    elif isinstance(value, list):
+        for child in value:
+            if isinstance(child, (dict, list)):
+                found.extend(_collect_structured_tags(child))
+    return found
+
+
+class SnapshotBody(BaseModel):
+    positive_prompt: str = ""
+    negative_prompt: str = ""
+    structured_state: dict
+    generation: dict = {}
+
+
+def _snapshot_dict(row) -> dict:
+    data = dict(row)
+    data["structured_state"] = _json_object(data.pop("structured_state_json", None)) or {}
+    data["generation"] = _json_object(data.pop("generation_json", None)) or {}
+    return data
+
+
+@app.post("/api/snapshots")
+def snapshot_create(body: SnapshotBody):
+    snapshot_id = str(uuid.uuid4())
+    conn = _conn()
+    try:
+        conn.execute(
+            "INSERT INTO prompt_snapshot (id, positive_prompt, negative_prompt, structured_state_json, generation_json, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (snapshot_id, body.positive_prompt, body.negative_prompt,
+             json.dumps(body.structured_state, ensure_ascii=False), json.dumps(body.generation, ensure_ascii=False), db.now_iso()),
+        )
+        _record_cooccurrence(conn, _collect_structured_tags(body.structured_state))
+        conn.commit()
+        return _snapshot_dict(conn.execute("SELECT * FROM prompt_snapshot WHERE id=?", (snapshot_id,)).fetchone())
+    finally:
+        conn.close()
+
+
+@app.get("/api/snapshots")
+def snapshot_list(limit: int = Query(default=50, ge=1, le=200)):
+    conn = _conn()
+    try:
+        rows = conn.execute("SELECT * FROM prompt_snapshot ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return {"snapshots": [_snapshot_dict(row) for row in rows]}
+    finally:
+        conn.close()
+
+
+@app.get("/api/snapshots/{snapshot_id}")
+def snapshot_get(snapshot_id: str):
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT * FROM prompt_snapshot WHERE id=?", (snapshot_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "snapshot not found")
+        return _snapshot_dict(row)
+    finally:
+        conn.close()
+
+
+def _filter_snapshot_sections(state: dict, wanted: set[str]) -> dict:
+    result = dict(state)
+    if isinstance(state.get("sections"), dict):
+        result["sections"] = {key: value for key, value in state["sections"].items() if key in wanted}
+    else:
+        for section in prompt_sections.SECTIONS:
+            if section not in wanted:
+                result.pop(section, None)
+    if isinstance(state.get("characters"), list):
+        result["characters"] = []
+        for character in state["characters"]:
+            copy = dict(character)
+            if isinstance(copy.get("prompt_sections"), dict):
+                copy["prompt_sections"] = {key: value for key, value in copy["prompt_sections"].items() if key in wanted}
+            result["characters"].append(copy)
+    return result
+
+
+@app.post("/api/snapshots/{snapshot_id}/restore")
+def snapshot_restore(snapshot_id: str, sections: str = ""):
+    snapshot = snapshot_get(snapshot_id)
+    wanted = {item.strip() for item in sections.split(",") if item.strip()}
+    if wanted - set(prompt_sections.SECTIONS):
+        raise HTTPException(400, "invalid sections")
+    if wanted:
+        snapshot["structured_state"] = _filter_snapshot_sections(snapshot["structured_state"], wanted)
+    return snapshot
+
+
 # ---------- Prompt 导入（对话 / 粘贴） ----------
 
 import threading  # noqa: E402
@@ -1242,7 +2298,16 @@ def _fuzzy_candidates(conn, raw_tag: str, limit: int = 5) -> list[dict]:
         key=lambda s: search.token_similarity_keys(q, s),
         reverse=True,
     )[:limit]
-    return [{"tag": s} for s in scored]
+    out = []
+    for candidate in scored:
+        evidence = search.match_evidence(raw_tag, candidate) or ("fuzzy", 0.0)
+        out.append({
+            "tag": candidate,
+            "match_type": evidence[0],
+            "reason": search.MATCH_REASON[evidence[0]],
+            "similarity": round(evidence[1], 6),
+        })
+    return out
 
 
 @app.post("/api/import/preview")
@@ -1267,21 +2332,33 @@ def import_preview(req: ImportPreviewRequest):
             out = []
             for e in entries:
                 tag = e.get("tag", "")
-                hit = search.resolve_tag(conn, tag)
-                candidates = []
+                custom = conn.execute(
+                    "SELECT tag_name FROM user_tags WHERE lower(tag_name)=lower(?)", (tag.strip(),)
+                ).fetchone()
+                exact = conn.execute(
+                    "SELECT * FROM tags WHERE lower(prompt_tag)=lower(?) OR lower(danbooru_name)=lower(?) LIMIT 1",
+                    (tag.strip(), tag.strip()),
+                ).fetchone()
+                hit = db.tag_dict(exact) if exact else None
+                status = "exact" if hit else None
                 if not hit:
-                    # 用户自定义库优先匹配
-                    custom = conn.execute(
-                        "SELECT tag_name FROM user_tags WHERE lower(tag_name)=?",
-                        (tag.strip().lower(),),
-                    ).fetchone()
-                    if custom:
-                        hit = {"tag": custom["tag_name"], "via": "user_tags"}
-                    else:
-                        candidates = _fuzzy_candidates(conn, tag)
+                    resolved = search.resolve_tag(conn, tag)
+                    if resolved and resolved.get("via") not in {"canonical_prefix", "alias_prefix"}:
+                        hit, status = resolved, "normalized"
+                candidates = []
+                if custom and not hit:
+                    hit = {"tag": custom["tag_name"], "canonical": custom["tag_name"], "via": "user_tags"}
+                    status = "custom"
+                elif not hit:
+                    status = "candidate"
+                    candidates = _fuzzy_candidates(conn, tag)
+                section = prompt_sections.classify_tag(conn, hit["tag"] if hit else tag)
                 out.append({
                     "raw": tag,
-                    "match": {"tag": hit["tag"], "via": hit.get("via", "canonical")} if hit else None,
+                    "status": status,
+                    "section": section,
+                    "match": ({"tag": hit["tag"], "canonical": hit.get("canonical", hit["tag"]),
+                               "via": hit.get("via", "canonical")} if hit else None),
                     "candidates": candidates,
                     "entry": e,
                 })
@@ -1345,6 +2422,23 @@ def del_user_tag(tag: str):
         conn.close()
 
 
+@app.get("/api/user-tags")
+def list_user_tags():
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT tag_name, note, created_at FROM user_tags ORDER BY created_at DESC"
+        ).fetchall()
+        return {
+            "tags": [
+                {"tag": r["tag_name"], "note": r["note"], "created_at": r["created_at"]}
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
 @app.get("/api/inbox")
 def inbox(since: int = 0):
     with _INBOX_LOCK:
@@ -1361,11 +2455,33 @@ class ExportRequest(BaseModel):
     characters: list = []
     global_uc: list = []
     free_text: str = ""
+    structured_state: dict | None = None
+
+
+def _flatten_section_state(structured_state: dict) -> list:
+    source = structured_state.get("sections") if isinstance(structured_state.get("sections"), dict) else structured_state
+    return [entry for section in prompt_sections.SECTIONS for entry in (source.get(section, []) or [])]
 
 
 @app.post("/api/export")
 def export(req: ExportRequest):
-    state = req.model_dump()
+    state = req.model_dump(exclude={"structured_state"})
+    if req.structured_state:
+        state["base_prompt"] = _flatten_section_state(req.structured_state)
+        if isinstance(req.structured_state.get("global_uc_sections"), dict):
+            state["global_uc"] = _flatten_section_state({"sections": req.structured_state["global_uc_sections"]})
+        if isinstance(req.structured_state.get("free_text"), str):
+            state["free_text"] = req.structured_state["free_text"]
+        structured_characters = req.structured_state.get("characters")
+        if isinstance(structured_characters, list):
+            state["characters"] = []
+            for character in structured_characters:
+                item = dict(character)
+                if isinstance(item.get("prompt_sections"), dict):
+                    item["prompt"] = _flatten_section_state({"sections": item["prompt_sections"]})
+                if isinstance(item.get("uc_sections"), dict):
+                    item["uc"] = _flatten_section_state({"sections": item["uc_sections"]})
+                state["characters"].append(item)
     return novelai_export.export(state)
 
 
@@ -1457,7 +2573,7 @@ def add_recent(body: TagBody):
 def list_presets():
     conn = _conn()
     try:
-        rows = conn.execute("SELECT id, name, kind, updated_at FROM presets ORDER BY updated_at DESC").fetchall()
+        rows = conn.execute("SELECT id, name, kind, payload_json, updated_at FROM presets ORDER BY updated_at DESC").fetchall()
         return {"presets": [dict(r) for r in rows]}
     finally:
         conn.close()
@@ -1474,10 +2590,17 @@ def save_preset(body: PresetBody):
     conn = _conn()
     try:
         import json
-
+        name = (body.name or "").strip()
+        if not name:
+            raise HTTPException(400, "preset name is required")
+        kind = (body.kind or "prompt").strip().lower()
+        if kind not in {"prompt", "nai"}:
+            raise HTTPException(400, "unsupported preset kind")
+        if not isinstance(body.payload, dict):
+            raise HTTPException(400, "payload must be an object")
         cur = conn.execute(
             "INSERT INTO presets (name, kind, payload_json, updated_at) VALUES (?, ?, ?, ?)",
-            (body.name.strip(), body.kind, json.dumps(body.payload, ensure_ascii=False), db.now_iso()),
+            (name, kind, json.dumps(body.payload, ensure_ascii=False), db.now_iso()),
         )
         conn.commit()
         return {"ok": True, "id": cur.lastrowid}
@@ -1495,7 +2618,11 @@ def get_preset(pid: int):
         if row is None:
             raise HTTPException(404, "preset not found")
         d = dict(row)
-        d["payload"] = json.loads(d.pop("payload_json"))
+        payload_raw = d.pop("payload_json")
+        try:
+            d["payload"] = json.loads(payload_raw)
+        except Exception:
+            d["payload"] = {}
         return d
     finally:
         conn.close()
@@ -1530,8 +2657,11 @@ def sync_hot():
 if __name__ == "__main__":
     import uvicorn
 
+    reload_enabled = _live_reload_enabled()
     uvicorn.run(
         "app:app",
         host=SETTINGS.get("host", "127.0.0.1"),
         port=SETTINGS.get("port", 8123),
+        reload=reload_enabled,
+        reload_dirs=[str(BASE_DIR)] if reload_enabled else None,
     )

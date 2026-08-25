@@ -17,16 +17,33 @@ data/
 
 # Runtime
 nohup.out
+library/
+server/.edge-profile/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Config with secrets (settings file lives at ~/.workbuddy/)
+# Config with secrets (settings files live at ~/.workbuddy/)
 config/app_settings.json
+key.docx
+*.key
+novelai*.json
 
 # Thumb cache (regenerated on demand)
 static/thumbs/
+
+# Runtime-generated example images (not source code)
+static/novelai-examples/
+
+# WorkBuddy local state, outputs & test cache
+.workbuddy/
+outputs/
+.pytest_cache/
+待清理/
+
+# Local project notes (not for publishing)
+AGENTS.md
 
 # IDE
 .idea/

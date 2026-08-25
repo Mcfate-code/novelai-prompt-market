@@ -51,11 +51,15 @@ class AliasResolutionTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_underscore_form_also_resolves(self):
+    def test_canonical_forms_resolve_equivalently(self):
         conn = self.conn()
         try:
-            r = search.resolve_tag(conn, "blue_eyes")
-            self.assertEqual(r["tag"], "blue eyes")
+            for query in ("blue_eyes", "blue eyes", "BLUE_EYES", "Blue Eyes"):
+                with self.subTest(query=query):
+                    resolved = search.resolve_tag(conn, query)
+                    self.assertIsNotNone(resolved)
+                    self.assertEqual(resolved["canonical"], "blue_eyes")
+                    self.assertEqual(resolved["tag"], "blue eyes")
         finally:
             conn.close()
 

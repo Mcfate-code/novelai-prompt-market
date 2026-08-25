@@ -11,7 +11,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import db  # noqa: E402
-import imageutil  # noqa: E402
 
 BASE_DIR = db.BASE_DIR
 GALLERY_DIR = BASE_DIR / "data" / "gallery"
@@ -61,17 +60,14 @@ def import_zip(zip_path: Path) -> dict:
                 except Exception:  # noqa: BLE001
                     failed += 1
                     continue
-                compressed = imageutil.compress_image_bytes(data)
-                if compressed is None:
-                    failed += 1
-                    continue
                 prompt = prompt_from_filename(fname)
                 short = re.sub(r'[\\/:*?"<>|,{}\[\]()\s]+', "_", prompt).strip("._ ") or "img"
                 short = short[:40].strip("_") or "img"
-                out_name = f"{imported + 1:04d}_{short}.jpg"
+                # 保留图包中的原始图片格式和字节，界面只缩放显示。
+                out_name = f"{imported + 1:04d}_{short}{ext}"
                 out_path = target / out_name
                 try:
-                    out_path.write_bytes(compressed)
+                    out_path.write_bytes(data)
                 except OSError:  # noqa: BLE001
                     failed += 1
                     continue

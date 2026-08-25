@@ -11,6 +11,7 @@ murata range），因此引入 token 感知相似度统一处理。
 from __future__ import annotations
 
 import difflib
+import re
 import sqlite3
 
 import db
@@ -18,8 +19,11 @@ from prompt import composer
 
 
 def _norm(s: str) -> str:
-    """统一规范化：trim + 小写 + 空白折叠。全项目 search/resolve/import 共用。"""
-    return " ".join((s or "").strip().lower().split())
+    """统一大小写、下划线、连字符、标点和连续空白。"""
+    value = (s or "").strip().lower().replace("_", " ")
+    value = re.sub(r"[-‐‑‒–—―]+", " ", value)
+    value = re.sub(r"[^\w\s]+", " ", value, flags=re.UNICODE)
+    return " ".join(value.split())
 
 
 def _like_escape(s: str) -> str:
@@ -101,19 +105,41 @@ def resolve_tag(conn: sqlite3.Connection, query: str) -> dict | None:
     if not q:
         return None
     favs = _favorite_tags(conn)
-    # 1) exact canonical（下划线或空格形式）
-    row = conn.execute(
-        "SELECT *, 'canonical' AS via FROM tags WHERE lower(danbooru_name)=? OR lower(prompt_tag)=? LIMIT 1",
-        (q, q),
-    ).fetchone()
+    # 1) exact canonical。SQL 只召回两种标准存储写法，最终用 _norm 判定，
+    # 避免为了规范化精确匹配而扫描全表。
+    variants = tuple(dict.fromkeys((q, q.replace(" ", "_"))))
+    placeholders = ",".join("?" for _ in variants)
+    row = next(
+        (
+            candidate
+            for candidate in conn.execute(
+                f"SELECT *, 'canonical' AS via FROM tags "
+                f"WHERE lower(danbooru_name) IN ({placeholders}) "
+                f"OR lower(prompt_tag) IN ({placeholders}) "
+                "ORDER BY post_count DESC LIMIT 20",
+                (*variants, *variants),
+            ).fetchall()
+            if _norm(candidate["danbooru_name"]) == q or _norm(candidate["prompt_tag"]) == q
+        ),
+        None,
+    )
     if row:
         return db.tag_dict(row, favorite=row["prompt_tag"] in favs)
-    # 2) exact alias
-    row = conn.execute(
-        "SELECT t.*, 'alias' AS via FROM tag_aliases a JOIN tags t ON t.danbooru_name=a.canonical_name "
-        "WHERE lower(a.alias)=? LIMIT 1",
-        (q,),
-    ).fetchone()
+    # 2) exact alias。别名也使用有限候选 + Python 规范化判定。
+    row = next(
+        (
+            candidate
+            for candidate in conn.execute(
+                f"SELECT t.*, a.alias AS src_alias, 'alias' AS via "
+                f"FROM tag_aliases a JOIN tags t ON t.danbooru_name=a.canonical_name "
+                f"WHERE lower(a.alias) IN ({placeholders}) "
+                "ORDER BY t.post_count DESC LIMIT 20",
+                variants,
+            ).fetchall()
+            if _norm(candidate["src_alias"]) == q
+        ),
+        None,
+    )
     if row:
         return db.tag_dict(row, favorite=row["prompt_tag"] in favs)
     # 3) token_key 词序无关全等：'Range Murata' -> 'murata range'
@@ -164,6 +190,134 @@ def resolve_tag(conn: sqlite3.Connection, query: str) -> dict | None:
     return None
 
 
+MATCH_RANK = {
+    "exact": 0,
+    "token_exact": 1,
+    "token_unordered": 2,
+    "prefix": 3,
+    "substring": 4,
+    "fuzzy": 5,
+}
+
+MATCH_REASON = {
+    "exact": "与标签或别名完全一致",
+    "token_exact": "规范化后与标签或别名一致",
+    "token_unordered": "词元完全一致，仅顺序不同",
+    "prefix": "匹配标签或别名前缀",
+    "substring": "包含查询文本",
+    "fuzzy": "与标签或别名相似",
+}
+
+
+def _simple_norm(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def match_evidence(query: str, candidate: str) -> tuple[str, float] | None:
+    q_simple, c_simple = _simple_norm(query), _simple_norm(candidate)
+    q, c = _norm(query), _norm(candidate)
+    if not q or not c:
+        return None
+    similarity = difflib.SequenceMatcher(None, q, c).ratio()
+    if q_simple == c_simple:
+        return "exact", 1.0
+    if q == c:
+        return "token_exact", 1.0
+    qt, ct = q.split(), c.split()
+    if len(qt) >= 2 and sorted(qt) == sorted(ct):
+        return "token_unordered", 1.0
+    if c.startswith(q):
+        return "prefix", similarity
+    if q in c:
+        return "substring", similarity
+    qset, cset = set(qt), set(ct)
+    token_overlap = len(qset & cset) / max(1, len(qset | cset))
+    score = max(similarity, token_overlap)
+    if score >= 0.35:
+        return "fuzzy", score
+    return None
+
+
+def _search_candidates(
+    conn: sqlite3.Connection,
+    query: str,
+    category: int | None,
+    deprecated: bool,
+    limit: int,
+) -> tuple[dict[str, sqlite3.Row], dict[str, list[str]]]:
+    """用 SQL 做有限召回，统一匹配判定仍由 match_evidence 完成。"""
+    normalized = _norm(query)
+    raw = _simple_norm(query)
+    tokens = normalized.split()
+    candidate_limit = max(200, min(2000, limit * 30))
+    tag_conditions = ["lower(t.prompt_tag)=?", "lower(t.danbooru_name)=?"]
+    tag_args: list = [raw, raw]
+    alias_conditions = ["lower(a.alias)=?"]
+    alias_args: list = [raw]
+    for token in tokens:
+        pattern = f"%{_like_escape(token)}%"
+        tag_conditions.extend((
+            "lower(t.prompt_tag) LIKE ? ESCAPE '\\'",
+            "lower(t.danbooru_name) LIKE ? ESCAPE '\\'",
+        ))
+        tag_args.extend((pattern, pattern))
+        alias_conditions.append("lower(a.alias) LIKE ? ESCAPE '\\'")
+        alias_args.append(pattern)
+
+    filters = []
+    filter_args: list = []
+    if category is not None:
+        filters.append("t.category=?")
+        filter_args.append(category)
+    if not deprecated:
+        filters.append("t.is_deprecated=0")
+    suffix = (" AND " + " AND ".join(filters)) if filters else ""
+    rows: dict[str, sqlite3.Row] = {}
+    for row in conn.execute(
+        "SELECT t.*, COALESCE(r.use_count, 0) use_count FROM tags t "
+        "LEFT JOIN recent_tags r ON r.tag_name=t.prompt_tag "
+        f"WHERE ({' OR '.join(tag_conditions)}){suffix} "
+        "ORDER BY t.post_count DESC, t.prompt_tag LIMIT ?",
+        (*tag_args, *filter_args, candidate_limit),
+    ):
+        rows[row["danbooru_name"]] = row
+
+    aliases: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT t.*, COALESCE(r.use_count, 0) use_count, a.alias matched_alias FROM tag_aliases a "
+        "JOIN tags t ON t.danbooru_name=a.canonical_name "
+        "LEFT JOIN recent_tags r ON r.tag_name=t.prompt_tag "
+        f"WHERE ({' OR '.join(alias_conditions)}){suffix} "
+        "ORDER BY t.post_count DESC, a.alias LIMIT ?",
+        (*alias_args, *filter_args, candidate_limit),
+    ):
+        canonical = row["danbooru_name"]
+        rows.setdefault(canonical, row)
+        aliases.setdefault(canonical, []).append(row["matched_alias"])
+
+    # 没有文本召回时，以有限热门集合支持拼写模糊匹配，避免扫描整个词库。
+    if len(rows) < limit:
+        fallback_where = ("WHERE " + " AND ".join(filters)) if filters else ""
+        for row in conn.execute(
+            "SELECT t.*, COALESCE(r.use_count, 0) use_count FROM tags t "
+            "LEFT JOIN recent_tags r ON r.tag_name=t.prompt_tag "
+            f"{fallback_where} ORDER BY t.post_count DESC, t.prompt_tag LIMIT ?",
+            (*filter_args, candidate_limit),
+        ):
+            rows.setdefault(row["danbooru_name"], row)
+        for row in conn.execute(
+            "SELECT t.*, COALESCE(r.use_count, 0) use_count, a.alias matched_alias FROM tag_aliases a "
+            "JOIN tags t ON t.danbooru_name=a.canonical_name "
+            "LEFT JOIN recent_tags r ON r.tag_name=t.prompt_tag "
+            f"{fallback_where} ORDER BY t.post_count DESC, a.alias LIMIT ?",
+            (*filter_args, candidate_limit),
+        ):
+            canonical = row["danbooru_name"]
+            rows.setdefault(canonical, row)
+            aliases.setdefault(canonical, []).append(row["matched_alias"])
+    return rows, aliases
+
+
 def search(
     conn: sqlite3.Connection,
     query: str,
@@ -171,100 +325,43 @@ def search(
     category: int | None = None,
     deprecated: bool = False,
 ) -> list[dict]:
-    q = _norm(query)
-    results: dict[str, dict] = {}
-    cat_sql = "AND category = ?" if category is not None else ""
-    cat_args = (category,) if category is not None else ()
+    if not _norm(query):
+        return []
+    rows, aliases = _search_candidates(conn, query, category, deprecated, limit)
+    results = []
+    for row in rows.values():
+        names = [row["prompt_tag"], row["danbooru_name"], *aliases.get(row["danbooru_name"], [])]
+        best = None
+        best_name = ""
+        for name in names:
+            evidence = match_evidence(query, name)
+            if evidence is None:
+                continue
+            key = (MATCH_RANK[evidence[0]], -evidence[1])
+            if best is None or key < (MATCH_RANK[best[0]], -best[1]):
+                best, best_name = evidence, name
+        if best is None:
+            continue
+        match_type, similarity = best
+        item = db.tag_dict(row)
+        item.update({
+            "rank": MATCH_RANK[match_type],
+            "match_type": match_type,
+            "match_reason": MATCH_REASON[match_type] + ("（通过别名）" if best_name not in (row["prompt_tag"], row["danbooru_name"]) else ""),
+            "similarity": round(similarity, 6),
+            "use_count": row["use_count"],
+            "category_name": db.CATEGORY_NAMES.get(row["category"], "General"),
+        })
+        results.append(item)
 
-    def add(row, rank: int, token_score: float = 0.0):
-        if row is None:
-            return
-        key = row["danbooru_name"]
-        if key in results and results[key]["rank"] <= rank:
-            return
-        d = db.tag_dict(row)
-        d["rank"] = rank
-        d["token_score"] = token_score
-        d["category_name"] = db.CATEGORY_NAMES.get(d.get("category"), "General")
-        results[key] = d
-
-    if q:
-        # 1 exact canonical
-        for row in conn.execute(
-            f"SELECT * FROM tags WHERE (lower(danbooru_name)=? OR lower(prompt_tag)=?) {cat_sql} LIMIT 5",
-            (q, q, *cat_args),
-        ).fetchall():
-            add(row, 0)
-        # 2 exact alias
-        for row in conn.execute(
-            f"SELECT t.* FROM tag_aliases a JOIN tags t ON t.danbooru_name=a.canonical_name "
-            f"WHERE lower(a.alias)=? {cat_sql} LIMIT 10",
-            (q, *cat_args),
-        ).fetchall():
-            add(row, 1)
-        # 2.5 token_key 词序无关全等（'range murata' -> 'murata range'，确定性等价，先于 prefix）
-        tokens = _tokens_in_layer(q)
-        if tokens:
-            tk = token_key(q)
-            like = [_like_escape(t) for t in tokens]
-            cond = " AND ".join(["lower(t.prompt_tag) LIKE ? ESCAPE '\\'"] * len(tokens))
-            for row in conn.execute(
-                f"SELECT t.* FROM tags t WHERE {cond} {cat_sql} ORDER BY t.post_count DESC LIMIT 50",
-                tuple(f"%{t}%" for t in like) + cat_args,
-            ).fetchall():
-                if token_key(row["prompt_tag"]) == tk:
-                    add(row, 1.5)
-        # 3 canonical prefix
-        for row in conn.execute(
-            f"SELECT * FROM tags WHERE lower(prompt_tag) LIKE ? {cat_sql} "
-            f"ORDER BY post_count DESC LIMIT 200",
-            (f"{q}%", *cat_args),
-        ).fetchall():
-            add(row, 2)
-        # 4 中文/日文 alias prefix
-        for row in conn.execute(
-            f"SELECT t.* FROM tag_aliases a JOIN tags t ON t.danbooru_name=a.canonical_name "
-            f"WHERE lower(a.alias) LIKE ? {cat_sql} ORDER BY length(a.alias) ASC LIMIT 200",
-            (f"{q}%", *cat_args),
-        ).fetchall():
-            add(row, 3)
-        # 5 substring
-        for row in conn.execute(
-            f"SELECT * FROM tags WHERE lower(prompt_tag) LIKE ? {cat_sql} "
-            f"ORDER BY post_count DESC LIMIT 200",
-            (f"%{q}%", *cat_args),
-        ).fetchall():
-            add(row, 4)
-        # 5.5 token 部分覆盖（仅当主路径结果不足时补跑，避免每次搜索都做全表扫描）
-        if len(results) < 5 and tokens:
-            cond_or = " OR ".join(["lower(t.prompt_tag) LIKE ? ESCAPE '\\'"] * len(tokens))
-            for row in conn.execute(
-                f"SELECT t.* FROM tags t WHERE {cond_or} {cat_sql} "
-                f"ORDER BY t.post_count DESC LIMIT 500",
-                tuple(f"%{t}%" for t in like) + cat_args,
-            ).fetchall():
-                score = token_similarity_keys(q, row["prompt_tag"])
-                if score[1] >= 2:  # 至少 2 个完整 token 交集才算部分覆盖
-                    add(row, 5, token_score=score)
-
-    rows = list(results.values())
-    # post_count>0 的真实 tag 优先，其次 rank，同 rank 内 token 证据强优先，最后按 post_count 降序
-    rows.sort(
-        key=lambda r: (
-            (r.get("post_count") or 0) == 0,
-            r["rank"],
-            _token_score_rank(r),
-            -(r.get("post_count") or 0),
-            r["tag"],
-        )
-    )
-    if not deprecated:
-        rows = [r for r in rows if not r.get("is_deprecated")]
-    # 统一 DTO：标记 favorite
+    results.sort(key=lambda item: (
+        item["rank"], -item["similarity"], -item["use_count"],
+        -(item.get("post_count") or 0), item["tag"].lower(),
+    ))
     favs = _favorite_tags(conn)
-    for r in rows:
-        r["favorite"] = r["tag"] in favs
-    return rows[:limit]
+    for item in results:
+        item["favorite"] = item["tag"] in favs
+    return results[:limit]
 
 
 def taxonomy_tree(conn: sqlite3.Connection) -> list[dict]:

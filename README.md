@@ -1,195 +1,234 @@
-# NovelAI V5 本地提示词「标签超市」
+# NovelAI 提示词超市 V2
 
-一个 **NovelAI V5-first** 的本地 Tag Prompt Builder：从 Danbooru 同步 canonical 全量词库，
-用人工整理的 77 类中文分类层做「标签超市」，叠加 V5 / V4.5 / V4 模型语义，最终拼装并导出
-NovelAI 原生语法 Prompt。
+本项目是一个本地优先的 NovelAI Prompt 工作台，技术栈保持为 **FastAPI + SQLite + 原生 JavaScript**。V2 的目标是把原来的“搜索 Tag → 加入购物车”扩展为完整闭环：
 
-只做「找 Tag → 组织 Tag → 输出 Prompt」，不做生图、不存 NovelAI 账号、不上云、只监听
-`127.0.0.1`。
+> 搜得到 → 选得快 → 自动整理 → 能复用 → 能从历史图片反向继续生成
 
----
+默认只监听 `127.0.0.1`。NovelAI Persistent API Token 只由本地 Node 服务读取，不返回浏览器、不写入项目源码。
 
 ## 快速开始
 
+### 启动应用
+
 ```bash
-# 1. 建虚拟环境并安装依赖
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt     # Windows
-# source .venv/bin/python -m pip install -r requirements.txt  # macOS/Linux
-
-# 2. 初始化本地词库（导入 77 类人工 Seed + 中文别名）
-.venv/Scripts/python -c "import db; from importer import import_taxonomy, import_aliases; db.init_db(); c=db.get_conn(); import_taxonomy.import_taxonomy(c); import_aliases.import_zh(c); c.close()"
-
-# 3. 启动（127.0.0.1:8123）
-.venv/Scripts/python app.py
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python app.py
 ```
 
-打开 <http://127.0.0.1:8123> 即可。
+Windows：
 
-> 首次启动 app 时若 `data/tags.sqlite` 为空，会自动导入 Seed 与中文别名，无需手动执行第 2 步。
-
-## 更新全量标签库（可选，需联网访问 Danbooru）
-
-Danbooru 需走代理（默认 `http://127.0.0.1:7890`，见 `config/app_settings.json` 的 `proxy`）。账号认证不要写入项目配置文件，使用环境变量：
-
-```bash
-export DANBOORU_LOGIN="你的 Danbooru 用户名"
-export DANBOORU_API_KEY="你的 Danbooru API Key"
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python app.py
 ```
 
-按热度同步热门 general / character / artist / copyright / meta 词库：
+启动 `app.py` 后会自动检测并拉起 NovelAI 本地服务 `127.0.0.1:8787`，无需再开第二个终端。统一从 <http://127.0.0.1:8787> 使用面板；该入口会把标签、例图、图库和设置请求转发给 FastAPI `8123`，NovelAI 官方 API 和进度事件由 Node 处理。生图只走官方 API，不需要 NovelAI 网页、Edge/CDP 或网页控件。退出 Python 应用时，本次自动启动的 Node 子服务也会一起退出；若 8787 已由用户手工启动，则会直接复用且不会关闭它。
 
-```bash
-# 经代理同步热门 tag（数量见 app_settings.json 的 hot_sync）
-.venv/Scripts/python -c "from importer.sync_danbooru import run_hot_sync; import json; print(json.dumps(run_hot_sync(), ensure_ascii=False, indent=2))"
+本地启动默认开启 Python 自动重载和 Node 文件监听，修改服务端或 Node 源码后会自动重启对应进程，避免新前端调用旧接口。需要稳定运行时可设置 `TAGS_MARKET_RELOAD=0` 后再启动。
+
+需要 Node.js 22+。Token 可通过环境变量 `NOVELAI_API_KEY` 提供，也可在应用设置中保存到本机用户配置 `~/.workbuddy/tags-market-settings.json`。自动启动失败时查看 `.workbuddy/runtime/novelai-service.log`。如需调试并关闭自动启动，可设置 `TAGS_MARKET_AUTOSTART_NAI=0`。
+
+## V2 核心能力
+
+### 搜索 V2
+
+输入会统一处理大小写、下划线、连字符、标点和空格。匹配优先级为：
+
+1. `exact`
+2. `token_exact`
+3. `token_unordered`
+4. `prefix`
+5. `substring`
+6. `fuzzy`
+
+结果返回 `match_type`、`match_reason` 和相似度。SQL 先分层召回有限候选，再执行相似度计算，避免全表 Python 模糊匹配。真实词库中 `range murata` 可将 `murata range` 排在首位，`orange hat` 不会抢到前面；本机基准约 `0.11s`。
+
+### PromptState V2
+
+草稿使用 `schema_version: 2`，固定分区为：
+
+```text
+character / appearance / clothing / expression / action
+composition / scene / style / quality / other
 ```
 
-或页面点「更新标签库」。同步后词库约 **5.2 万 tag**：
-general 1.3 万（含大量 NSFW）+ character 1.7 万 + artist 1.7 万 + copyright 0.4 万 + meta 0.1 万。
-**不随启动强制联网**；断网时本地 Seed 照常可用。
-
-## 导入中文对照表（一次性，需联网）
-
-下载 ffdkj 的 32 万条中英对照表并批量填充中文名（手动别名优先，不覆盖）：
-
-```bash
-curl -x http://127.0.0.1:7890 -o data/danbooru_zh.sqlite \
-  "https://raw.githubusercontent.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table/main/tag.sqlite"
-.venv/Scripts/python -c "import db; from importer import import_danbooru_zh; db.init_db(); c=db.get_conn(); print(import_danbooru_zh.import_danbooru_zh(c)); c.close()"
-```
-
-对照表每日更新，数据源与许可见 https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table 。
-
-## 数据与文件
-
-| 路径 | 说明 |
-|---|---|
-| `data/tags.sqlite` | 本地词库（tags / tag_aliases / taxonomy_map / restricted_taxonomy_map / favorites / recent_tags / presets / tag_catalog / user_zh / tag_thumbs） |
-| `data/taxonomy_seed.json` | 人工浏览层（数据分类）：77 类 / 2836 成员 / 2543 去重 Seed |
-| `data/navigation.json` | UI 导航（一级折叠目录 + 二级引用）；只影响 UI，不重写底层 taxonomy |
-| `../adult_curated_taxonomy_seed.json` | 受限标签 curated taxonomy（用户预置，24 分区 / 655 成员 / 583 去重）；路径见 `app_settings.json` 的 `restricted_taxonomy_path`，不复制第二份数据 |
-| `data/zh_aliases.json` | 通用 tag 中文别名层（2543 条全覆盖） |
-| `data/zh_characters.json` | 热门角色（Character）中文名：nahida→纳西妲、silver wolf→银狼 等（裸名自动解析到带版权后缀的规范 tag） |
-| `data/danbooru_zh.sqlite` | ffdkj Danbooru 中英对照表（32 万条，post_count≥10，Gemini 机翻+人工校对），批量填充中文名 |
-| `config/model_overlays.json` | V5 / V4.5 / V4 语义：特殊标签、质量/UC 预设、renamed tags、权重与多角色能力 |
-| `config/app_settings.json` | 端口、代理、Danbooru 源、热门同步数量、受限 taxonomy 路径配置 |
-
-## 数据分层
-
-1. **Canonical Machine Corpus** —— Danbooru API → SQLite，是「尽可能全」的来源（含 alias / category / post_count / deprecated）。
-2. **Curated Browse Taxonomy** —— 本文档的 77 类中文分类 + 2543 个 Seed，负责「好找」（数据分类）。
-3. **Restricted Curated Taxonomy** —— 用户预置的受限标签（24 分区），独立的成人 curated 目录层，程序化 resolve 后接入（resolved / unresolved 分离，不静默丢弃）。
-4. **NovelAI Model Overlay** —— V5 / V4.5 / V4 的特殊标签、预设、renamed、权重与多角色能力。
-
-人工 Seed 不与 canonical 混为一谈：导入时做存在性校验，标记 `canonical` / `alias` /
-`overlay_only` / `unresolved`，不把不存在的标签冒充 canonical。
-
-> `navigation.json`（UI 导航）与 `taxonomy_seed.json`（数据分类）分离：导航只决定一级目录如何折叠、
-> 二级如何引用分类/受限标签；底层 taxonomy 不被导航重写。
-
-## Tag API DTO（统一契约）
-
-搜索 / 目录 / 收藏 / 最近 / 受限标签 全部返回同一公开结构，前端不再做字段兼容：
+每个 Tag 内部保存 `tag`、`weight`、`section`、顺序和来源。权重统一存 float，导出时再转换成 NovelAI 原生语法，如 `1.25::blue eyes::`。
 
 ```json
 {
-  "tag": "blue eyes",       // 最终写入 Prompt 的字符串（空格形式，英文显示名）
-  "canonical": "blue_eyes", // 数据库 canonical（下划线形式，alias 解析 / 调试）
-  "zh": "蓝眼睛",            // 中文显示名（无则空串）
-  "category": 0,            // Danbooru category 编号
-  "post_count": 123456,     // 热度
-  "favorite": false         // 是否已收藏
+  "schema_version": 2,
+  "sections": {},
+  "characters": [
+    {
+      "name": "Character 1",
+      "prompt_sections": {},
+      "uc_sections": {}
+    }
+  ],
+  "global_uc_sections": {},
+  "free_text": ""
 }
 ```
 
-内部字段 `prompt_tag` / `tag_name` / `zh_name` / `danbooru_name` 一律不出现在 API 响应中。
+分类只使用 Danbooru category、本地 taxonomy/关键词规则和用户覆盖，不调用 AI。优先级为：用户覆盖 → Danbooru Artist/Character → 本地规则 → `other`。
 
-## 功能
+### 导入四态
 
-- 中 / 英 / 日 alias 搜索，最终输出英文 canonical；中文如「蓝眼」→ `blue eyes`、「纳西妲」→ `nahida (genshin impact)`。
-- 一级折叠目录（9 组：我的 / 人物 / 服装 / 镜头与构图 / 场景 / 风格与画面 / 道具与主题 / Danbooru 词库 / 受限标签 / NovelAI），二级引用分类与受限标签，受限标签默认折叠。
-- **受限标签（成人 curated taxonomy）**：程序化接入用户预置的 24 分区 taxonomy，逐条 resolve（canonical / alias / normalized），unresolved 保留原始值不丢弃、不猜、不 LLM 补词。
-- 分类树浏览（77 类）+ General / Character / Artist / Copyright / Meta 过滤。
-- **左侧 Danbooru 词库分组**：可直接选「角色 / 画师 / 系列 / Meta」浏览对应类别的热门 tag（按 post_count 降序）。
-- **词库规模**：Danbooru 热门同步后约 5.2 万 tag（character 1.7 万含 nahida/silver wolf 等角色、artist 1.7 万、general 1.3 万含大量 NSFW）。
-- **中文覆盖 99.4%**：手动别名 2543 条 + 热门角色名 + ffdkj 32 万对照表批量填充，5.2 万 tag 中 5.2 万有中文名（画师名保持原名）。
-- **角色/画师中文名**：热门角色自动解析到规范 tag 并显示中文（nahida→纳西妲、silver wolf→银狼、raiden shogun→雷电将军…）。
-- Base Prompt + 多 Character（每角色独立 Prompt 与 UC）+ 全局 UC + 自由自然语言。
-- `{}` / `[]` 逐层强调、数值权重 `1.5::tag::`、V4.5+ 负数权重 `-1::hat::`。
-- 多角色关系前缀 `source#` / `target#` / `mutual#`。
-- V5 不硬编码旧 6 角色上限（官方测试曾做到约 22 个角色）。
-- 收藏 / 最近使用 / 本地 Preset 持久化；一键复制导出；轻量冲突提示（不禁止导出）。
-- **收藏与购物车分离**：卡片右上角 ☆ 收藏/取消，点击卡片正文才加入购物车。
-- **自定义标签备注中文**：购物车里任何 tag（含自己加的 / 未解析的）都可点「中文」按钮备注中文，备注持久化并覆盖默认中文。
-- **例图缩略图**：浏览卡片自动加载 Danbooru 180×180 预览图（懒加载 + 本地缓存，无图则不显示，离线降级）。
-- **购物车中文显示**：右侧每个 tag 旁自动显示中文名（有中文名则显示，无则仅英文）。
-- **Prompt 导入（可选目标）**：粘贴一段 NovelAI 提示词（或直接在对话里发给 WorkBuddy），自动解析成
-  tag 并填充右侧购物车。支持 `1.5::tag::` 数值权重、`-1::hat::` 负数权重、`{{}}`/`[[]]` 强调、
-  `source#`/`target#`/`mutual#` 关系前缀、`Base:`/`Character N:`/`Character N UC:`/`Global UC:`
-  多角色分段，以及自然语言自由文本自动识别。两种用法：
-  1. **页面内**：右上「导入」按钮 → 选择「导入到」（Base / Global UC / 某角色 Prompt / 某角色 UC）→ 粘贴 → 替换或追加；
-  2. **对话内**：直接把提示词发给 WorkBuddy，让它调用 `/api/import`，页面轮询 `/api/inbox` 自动接收并填充。
+Prompt 导入预览将条目标记为：
 
-## NovelAI 语法要点（规格第 4–5 节）
+- `exact`：直接命中。
+- `normalized`：规范化后命中。
+- `candidate`：仅提供候选，用户确认前不写入 Prompt。
+- `custom`：已存在的本地自定义 Tag，或用户明确选择“保留原文”。
 
-- 输出小写、`, ` 分隔；不输出 SD WebUI 的 `(tag:1.2)`。
-- 每层 `{}` ≈ ×1.05，每层 `[]` ≈ ÷1.05。
-- 数值权重：`1.5::rain, night::`；负数权重：`-1::hat::`（仅 V4.5+）。
-- 多角色：人数放 Base（`2girls`），每个角色 Prompt 不再写 `1girl`；互动用 `source#hug` 等。
+除导入流程外，也可在购物车的「＋ 自定义标签」按钮直接新增本地自定义 Tag（同时写入 `user_tags` 词库并加入当前 Prompt）；设置页「自定义标签」区块可查看与删除已添加的本地自定义标签。本地自定义 Tag 在搜索时作为 `via: "user_tags"` 命中。
 
-## 目录结构
+支持 `Base:`、`Character N:`、`Character N UC:`、`Global UC:` 多段输入；角色 UC 会进入对应 `char:n:uc`，不会混入角色正向 Prompt。
+
+### Bundle 与 Preset 分离
+
+- `TagBundle`：只保存 Tag、分区、权重和顺序，适合复用角色外观、画风、构图等组合。
+- `Preset`：保存生图参数和生成工作台设置。
+
+二者职责分离，避免“想复用一组 Tag”时连尺寸、Seed 等参数一起覆盖。
+
+### 推荐与冲突
+
+- `tag_cooccurrence` 记录本地历史共现。
+- `recent_tags.use_count` 记录个人使用频率。
+- `tag_conflict` 提供轻量冲突提醒，例如长发/短发、睁眼/闭眼。
+
+推荐与冲突只用于提示，不自动改写 Prompt。
+
+### Snapshot 与图库闭环
+
+正式生成通过 Prompt、API、参数和 Seed 校验后，恰好创建一次 `PromptSnapshot`。Snapshot 保存失败会阻止生成，旧 `snapshot_id` 不会被复用。
 
 ```text
-app.py                    FastAPI 后端（127.0.0.1 only）
-db.py                     SQLite 数据底座（schema + upsert + 统一 DTO serialize_tag）
-search.py                 搜索 / alias 解析 / 分类浏览 / Seed 状态
-config/model_overlays.json
-config/app_settings.json
-data/navigation.json      UI 一级导航（9 组折叠目录）
-importer/import_taxonomy.py
-importer/import_aliases.py
-importer/import_restricted.py   受限标签 taxonomy 程序化接入 + resolve
-importer/sync_danbooru.py
-prompt/composer.py
-prompt/novelai_export.py
-prompt/import_parser.py     Prompt 导入解析器（语法感知）
-static/index.html app.js app.css
-tests/                    alias / export / overlay / import / catalog 契约 / 收藏 / 受限 taxonomy
+PromptState
+  → PromptSnapshot
+  → Node 串行生成（1-6 张）
+  → Node Asset
+  → Python Gallery（snapshot_id + source_asset_id）
+  → 全部 / 角色 / 画风 / 构图分区恢复
 ```
+
+`source_asset_id` 在 Python 图库建立唯一索引，保证 Node 重试回写时幂等。Node 原图已保存但 Python 图库同步失败时，保留已经写入的 Node asset，并将该图片记录标记为 `gallery_sync: failed`、广播 `asset.sync` 告警；批次继续按“原图已安全保存”处理，避免把可恢复的图库索引故障误报为付费生成失败。
+
+## 主要 API
+
+| API | 用途 |
+| --- | --- |
+| `GET /api/search?q=` | 搜索 V2，返回匹配类型、原因和相似度 |
+| `GET /api/prompt/sections` | 固定 Prompt 分区定义 |
+| `POST /api/prompt/classify` | 本地确定性分类 |
+| `POST /api/prompt/section-override` | 保存用户分区覆盖 |
+| `GET/POST /api/bundles` | Bundle 列表与创建 |
+| `GET/PUT/DELETE /api/bundles/{id}` | Bundle 读取、更新、删除 |
+| `POST /api/import/preview` | 导入四态预览 |
+| `POST /api/cooccurrence/record` | 记录本地共现 |
+| `POST /api/recommendations` | 本地推荐 |
+| `GET /api/conflicts` | 冲突规则 |
+| `POST/GET /api/snapshots` | 创建与列出 Snapshot |
+| `GET /api/snapshots/{id}` | 读取 Snapshot |
+| `POST /api/snapshots/{id}/restore` | 全部或指定分区恢复 |
+| `POST /api/gallery/item` | Node 图片回写 Python 图库 |
+
+## 数据表
+
+V2 在原词库和收藏表之外新增：
+
+```text
+tag_section_override
+tag_bundle
+tag_bundle_item
+tag_cooccurrence
+tag_conflict
+prompt_snapshot
+generation
+```
+
+`gallery` 增加 `snapshot_id` 与 `source_asset_id`。SQLite 使用 `PRAGMA user_version=2`，迁移可重复执行。
+
+## NovelAI 生图规则
+
+- 生图主链使用 NovelAI 官方 API，正式模型为 `nai-diffusion-5-full` 和 `nai-diffusion-5-curated`。
+- 官方文档公开 `Small`、`Normal`、`Large` 三类尺寸：Small 最多 6 张，Normal/Large 最多 4 张；面板尺寸档位映射为官方 API 的 `width`/`height` 参数。
+- 每次官方请求固定生成一张，批次严格串行；Seed 支持 `Random`、`Fixed`、`Increment`，每张结果保存该图实际使用的 Seed。
+- 积分提示只展示可由官方规则确认的结论：连接到 Opus 后，文生图、Normal 尺寸、Steps 不高于 28 的本地串行队列会按单张请求显示为预计 `0 Image Anlas`；V5 仍可能受 Opus 使用额度限制。其他套餐、图生图、Small/Large/自定义尺寸或更高 Steps 不显示臆测数值，均以 NovelAI 实际扣费为准。
+- 任意一张失败即停止后续请求；取消只阻止未发送的请求，当前已发送请求允许完成。
+- Multi-Character 保持 Base Prompt、各角色 Prompt、各角色 UC 和 Global UC 分离，支持排序、Auto Position 和手动 X/Y 坐标。
+- Img2Img 支持本地上传或历史图作为基础图，并透传 Strength、Noise。上传的基础图先保存到本地 `library/assets/`，Recipe 只记录可恢复 URL、文件名和参数，不记录 base64。
+- 每张结果保存独立 Recipe。历史缩略图点击只切换预览，只有“恢复设置”或“以此图进行图生图”会改写编辑区。
+- 用户手工修改生图文本后，自动退化为平面 Prompt，避免旧结构暗中混入。
+- `references` 仅为 Vibe Transfer、Character Reference、Style Reference 预留；当前版本非空即拒绝，不显示 UI，也不发送 NovelAI 请求。
+- 生图运行链路为官方 API-only：Node 不等待或连接 Edge/CDP，不读取 NovelAI 网页状态，不通过网页控件同步设置，也没有网页兼容 fallback。
+- UC Preset、Transparent BG 和旧网页批量入口已从生图面板移除；官方 API 未验证的字段不会发送。
+- 官方 `/user/subscription` 只读探针仅验证 Token、代理和网络，不调用 `/ai/generate-image`，不会消耗 Anlas。
+- 新生成的标签例图默认 Prompt 由服务端按 taxonomy 生成：普通标签为 `{{目标标签}}, safe, masterpiece, best quality, very aesthetic, absurdres`，NSFW taxonomy 标签为 `{{目标标签}}, nsfw, masterpiece, best quality, very aesthetic, absurdres`。目标标签采用 NovelAI 双花括号强调，且不预设人物、场景或画风。该默认提示词可在设置页的「NovelAI 例图提示词模板」中自定义，模板支持 `{tag}`（目标标签，自动加双花括号强调）与 `{rating}`（`safe` / `nsfw`）两个占位符，保存时强制要求包含 `{tag}`。已缓存例图保持原样，避免无提示地额外消耗 Anlas；可在卡片上选择“重新生成”以明确覆盖旧图。
+
+当前状态为 `PARTIAL`：已完成 API-only 改造、尺寸规则、失败详情持久化和非付费测试；真实 Token 下的单张/多张付费 Gate、401/429 实网映射仍未执行。
+
+## 数据与目录
+
+| 路径 | 说明 |
+| --- | --- |
+| `data/tags.sqlite` | 标签、别名、分类、收藏、V2 状态和图库索引 |
+| `data/taxonomy_seed.json` | 人工浏览 taxonomy |
+| `data/navigation.json` | UI 导航结构 |
+| `data/zh_aliases.json` | 中文别名 |
+| `config/model_overlays.json` | V5 / V4.5 / V4 模型语义 |
+| `config/app_settings.json` | 端口、代理和数据源设置 |
+| `prompt/sections.py` | 固定分区与本地分类器 |
+| `server/generation-request.mjs` | GenerationRequest 规范化和单图 Recipe |
+| `server/novelai-provider.mjs` | V5 txt2img、Multi-Character、Img2Img 官方 API payload |
+| `server/api-batch.mjs` | 1-6 张严格串行批次 |
+| `server/server.mjs` | 8787 API、SSE、基础图/结果资产保存和图库同步 |
+| `tests/test_v2_backend.py` | V2 schema、搜索、Bundle、导入、Snapshot、图库测试 |
+
+图库目录删除不会永久删除文件，而是先移动到项目 `待清理/图库/`，再移除活动索引。
 
 ## 测试
 
 ```bash
-.venv/Scripts/python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
+env -u NODE_OPTIONS node --test server/*.test.mjs
+env -u NODE_OPTIONS node --check static/app.js
+git diff --check
 ```
 
-## 边界说明
+当前非付费回归基线：
 
-- `post_count` 只代表 Danbooru 使用量，**不代表** NovelAI 熟悉度，UI 只显示 `Danbooru posts: N`。
-- V5 于 2026-08-21 发布，其 preset 作为独立 overlay，随官方页面后续更新，不擅自沿用 V4.5 固定值。
-- 成人 NSFW 分类仅保留「成人角色之间自愿」的内容；不纳入未成年 / 非自愿 / 人兽性内容。
-- 中文别名层为人工整理，全量多语言可后续接入 `danbooru-tag-index` 增补（注意确认其许可证）。
+- Python：`65/65` 通过。
+- Node：`17/17` 通过，覆盖 GenerationRequest、V5 payload、严格串行、取消、Recipe、图库同步和 Img2Img 基础图持久化路由。
+- `static/app.js`、`server/server.mjs`、`server/api-batch.mjs` 语法通过。
+- 桌面与移动端布局数据以最近一次浏览器验收结果为准。
 
-### canonical / alias 解析规则
+## 预留接口与明确边界
 
-受限 taxonomy 的每个 seed 按 `exact_canonical → exact_alias → normalized_canonical → unresolved_seed` 顺序解析：
+当前仅为 References 保留统一数组字段：
 
-1. `exact_canonical`：`prompt_tag`（空格）或 `danbooru_name`（下划线）精确命中 tags；
-2. `exact_alias`：`tag_aliases.alias` 精确命中；
-3. `normalized_canonical`：下划线 ↔ 空格互转后再精确命中；
-4. `unresolved_seed`：以上都不中，**保留原始值、标记 unresolved，不自动猜、不静默修改、不 LLM 补词**。
+```json
+{
+  "references": []
+}
+```
 
-`resolved` 的 seed 显示 canonical + 中文；`unresolved` 的 seed 以原始值展示（post_count=0），可直接加入购物车（可能是 NovelAI 特有或本地未同步的 tag）。同一 canonical 不因多个 alias 展示成重复卡片。
+非空 `references` 会在 GenerationRequest 规范化阶段直接拒绝。当前不显示 Vibe Transfer、Character Reference 或 Style Reference UI，也不会把这些数据发送到 NovelAI。
 
-### 中文策略
+当前明确不实现：
 
-- General：有可靠中文 → 中文；没有 → 英文。
-- Character：优先官方 / 稳定中文名，显示「中文名 + canonical + [角色]」。
-- Copyright：显示「中文作品名 + canonical + [作品]」。
-- Artist：保留原文，显示「artist name + [画师]」，不自行发明译名。
+- Provider 框架或多供应商路由
+- 并发生成、Scene Queue
+- Canvas、Inpaint、图片 Hash 管理
+- LLM 自动优化 Prompt
+- 向量数据库或 embedding 搜索
+- 节点编辑器
+- Prompt Git
+- 自动质量评分
+- React/Vue/Electron 重构
 
-### 当前明确不做的能力
-
-React/Vue 重构、Electron、Elasticsearch、向量数据库、embedding 搜索、用户系统、云同步、
-LLM 全库翻译、推荐模型、协同过滤、复杂用户画像、数据库 schema 大迁移、例图本地缓存与图源爬取。
-保持 FastAPI + SQLite + 原生 JS。
+保持本地、确定性、可解释的 FastAPI + SQLite + 原生 JavaScript 架构。

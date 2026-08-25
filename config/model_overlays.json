@@ -3,7 +3,7 @@
   "default_model": "v5",
   "models": {
     "v5": {
-      "id": "nai-diffusion-v5-full",
+      "id": "nai-diffusion-5-full",
       "label": "V5 Full",
       "released": "2026-08-21",
       "supports": {
@@ -43,7 +43,7 @@
       "uc_presets": {}
     },
     "v4.5": {
-      "id": "nai-diffusion-4.5-full",
+      "id": "nai-diffusion-4-5-full",
       "label": "V4.5 Full",
       "supports": {
         "numeric_weight": true,
