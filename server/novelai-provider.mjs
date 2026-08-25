@@ -369,6 +369,91 @@ function isStructuredPromptModel(model) {
   return /^nai-diffusion-(?:4|5)/.test(model);
 }
 
+/**
+ * Build V5-specific parameters to match NovelAI website behavior.
+ * Called only for structured models (nai-diffusion-4/5-*).
+ * Merges into the existing parameters object in-place.
+ */
+function buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords) {
+  // Structured prompt fields (already partially set by buildPayload for V4/V5)
+  parameters.prompt = null;
+  parameters.params_version = model.startsWith("nai-diffusion-5-") ? 4 : 3;
+  parameters.use_coords = useCoords;
+  parameters.v4_prompt = {
+    caption: {
+      base_caption: prompt,
+      char_captions: characters.map((character) => characterCaption(character, "prompt")),
+    },
+    use_coords: useCoords,
+    use_order: true,
+  };
+  parameters.v4_negative_prompt = {
+    caption: {
+      base_caption: negativePrompt,
+      char_captions: characters.map((character) => characterCaption(character, "negative_prompt")),
+    },
+    legacy_uc: false,
+  };
+  parameters.characterPrompts = characters.map((character) => ({
+    prompt: character.prompt,
+    uc: character.negative_prompt,
+    center: centerFor(character),
+    enabled: true,
+  }));
+
+  // V5 behavioral flags (match website defaults)
+  parameters.prefer_brownian = true;
+  parameters.straight_alpha = true;
+  parameters.autoSmea = false;
+  parameters.dynamic_thresholding = false;
+  parameters.cfg_rescale = 0;
+  parameters.deliberate_euler_ancestral_bug = false;
+  parameters.legacy = false;
+  parameters.legacy_v3_extend = false;
+
+  // Quality & UC presets
+  parameters.qualityPresetId = "standard";
+  parameters.ucPresetId = "heavy";
+
+  // Tag hints
+  parameters.tag_hint_qt = 1;
+  parameters.tag_hint_uc_preset = 2;
+  parameters.tag_hint_transparent_background = true;
+
+  // Controlnet / reference defaults
+  parameters.controlnet_strength = 1;
+  parameters.add_original_image = true;
+  parameters.normalize_reference_strength_multiple = true;
+  parameters.inpaintImg2ImgStrength = 1;
+
+  // Image format
+  parameters.image_format = "png";
+}
+
+/**
+ * Returns a locked-down request object matching the NovelAI website V5 Full txt2img baseline.
+ * Useful for integration testing: ensures v4_prompt, qualityPresetId, ucPresetId,
+ * prefer_brownian, straight_alpha, etc. are all sent through the V5 construction path.
+ */
+export function buildWebUiBaselineRequest() {
+  return {
+    prompt: "nahida\n, transparent background, very aesthetic, masterpiece, no text",
+    negative_prompt:
+      "nsfw, lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page",
+    quality_toggle: true,
+    settings: {
+      model: "nai-diffusion-5-full",
+      sampler: "k_euler_ancestral",
+      steps: 23,
+      guidance: 7,
+      seed: 167394568,
+      width: 1216,
+      height: 832,
+    },
+    characters: [],
+  };
+}
+
 export class NovelAIProvider {
   constructor({ endpoint = ENDPOINT, fetchImpl = null } = {}) {
     this.endpoint = endpoint;
@@ -438,30 +523,7 @@ export class NovelAIProvider {
     };
 
     if (isStructuredPromptModel(model)) {
-      parameters.prompt = null;
-      parameters.params_version = model.startsWith("nai-diffusion-5-") ? 4 : 3;
-      parameters.use_coords = useCoords;
-      parameters.v4_prompt = {
-        caption: {
-          base_caption: prompt,
-          char_captions: characters.map((character) => characterCaption(character, "prompt")),
-        },
-        use_coords: useCoords,
-        use_order: true,
-      };
-      parameters.v4_negative_prompt = {
-        caption: {
-          base_caption: negativePrompt,
-          char_captions: characters.map((character) => characterCaption(character, "negative_prompt")),
-        },
-        legacy_uc: false,
-      };
-      parameters.characterPrompts = characters.map((character) => ({
-        prompt: character.prompt,
-        uc: character.negative_prompt,
-        center: centerFor(character),
-        enabled: true,
-      }));
+      buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords);
     }
 
     let action = "generate";

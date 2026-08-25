@@ -170,6 +170,41 @@ generation
 - 官方 `/user/subscription` 只读探针仅验证 Token、代理和网络，不调用 `/ai/generate-image`，不会消耗 Anlas。
 - 新生成的标签例图默认 Prompt 由服务端按 taxonomy 生成：普通标签为 `{{目标标签}}, safe, masterpiece, best quality, very aesthetic, absurdres`，NSFW taxonomy 标签为 `{{目标标签}}, nsfw, masterpiece, best quality, very aesthetic, absurdres`。目标标签采用 NovelAI 双花括号强调，且不预设人物、场景或画风。该默认提示词可在设置页的「NovelAI 例图提示词模板」中自定义，模板支持 `{tag}`（目标标签，自动加双花括号强调）与 `{rating}`（`safe` / `nsfw`）两个占位符，保存时强制要求包含 `{tag}`。已缓存例图保持原样，避免无提示地额外消耗 Anlas；可在卡片上选择“重新生成”以明确覆盖旧图。
 
+### Character Prompt Editor
+
+生图面板的「角色设置 (Multi-Character)」是高级功能，默认折叠，点击标题展开；折叠态的标题右侧实时显示角色数量。
+
+- **职责划分**：Base / Scene Prompt 负责全局的场景、环境、构图与画风；Character Prompt 负责单个角色的身份、服装、动作。二者在 payload 中分属 `base_caption` 与 `char_captions`，不互相拼接。
+- **单一数据链**：UI `naiCharacters[]` → `naiCollectCharacters()`（产出 `{prompt, negative_prompt, position}`）→ 请求顶层 `characters[]` → 服务端 `normalizeGenerationRequest` / `normalizeCharacter` → V5 payload。角色负面提示进入 `v4_negative_prompt.caption.char_captions`，与 Global UC（`base_caption`）分离，绝不拼进全局 UC。位置使用真实的 `{x,y}` 字段：Auto = `null`（服务端以 `{0.5, 0.5}` 作为默认中心），手动 = X/Y，对应 NovelAI 的 `use_coords` 与每个 `char_caption.centers`。
+- **图库往返无损**：角色数量、每个角色的 prompt / negative / position / 顺序在恢复时全部还原，无第二套参数结构。
+- **下一步**：Tag 目标选择器（Base / Character N）——本轮未实现。
+
+### Metadata Restore（图库恢复）
+
+图库 → 富生成元数据 → `extractMetaFromGalleryItem()` → `applyGenerationConfig()` → 单一 GenerationConfig 是唯一恢复路径：
+
+- `rawPrompt` 还原到编辑框，`effectivePrompt` 由 Prompt Compiler 重新推导。
+- Negative / 各开关 / preset / advanced 参数 / seed / characters 一并恢复；不创建第二套参数，也不在图库恢复路径中散落 `.value = …` 的 DOM 赋值。
+- 带角色的恢复会自动展开「角色设置」分区并显示还原的角色。
+
+当前暴露的 V5 Full 与 V5 Curated 在现有 UI 功能上能力相同，因此暂不需要独立 capability gating。未来若引入能力不同模型，应直接以 `config/model_overlays.json` 的 `supports` 为事实来源，不在前端维护重复 capability 表。
+
+### Tag Target Selector
+
+标签超市新增一个始终可见的小型目标选择器「添加到：[Base / Scene ▼]」，用于决定点击标签写入哪里：
+
+- **Base / Scene**：写入主 Prompt（`#nai-prompt`），与历史行为完全一致。
+- **Character 1..N**：写入对应 `naiCharacters[N].prompt`（角色正向 Prompt），不触碰 Base、其他角色、角色 Negative 或 Global Negative。
+
+规则与边界：
+
+- 默认目标为 Base / Scene；不操作选择器时，标签点击行为与本版之前完全相同。
+- 角色增删 / 排序时选择器同步：删除目标角色回退到 Base；删除更早角色时索引自动前移；上移 / 下移时目标跟随被移动角色，不会写错对象。
+- 标签复用既有规范化与去重（购物车 `addEntry` 的结构化去重 + 真实 Prompt 文本的逗号去重），同一目标重复点击不产生重复。
+- 该选择器只是前端编辑态，不进入 GenerationConfig / metadata / recipe / NovelAI payload / `characterPrompts[]`；图库恢复只还原 Prompt 文本，不还原此前选中的目标（恢复后默认 Base）。
+- 未引入第二份 Tag / Prompt 状态；标签超市只读取并修改现有 Base Prompt 与 `naiCharacters[]` 两套真实文本来源。
+- 本阶段 Target Selector 只针对正向 Tag；Character Negative / Global Negative 仍由手工编辑，暂不支持 Tag 直接写入。
+
 当前状态为 `PARTIAL`：已完成 API-only 改造、尺寸规则、失败详情持久化和非付费测试；真实 Token 下的单张/多张付费 Gate、401/429 实网映射仍未执行。
 
 ## 数据与目录
@@ -187,6 +222,7 @@ generation
 | `server/novelai-provider.mjs` | V5 txt2img、Multi-Character、Img2Img 官方 API payload |
 | `server/api-batch.mjs` | 1-6 张严格串行批次 |
 | `server/server.mjs` | 8787 API、SSE、基础图/结果资产保存和图库同步 |
+| `static/prompt-compiler.js` | Prompt Compiler 纯函数（Quality Tags、Heavy UC、去重） |
 | `tests/test_v2_backend.py` | V2 schema、搜索、Bundle、导入、Snapshot、图库测试 |
 
 图库目录删除不会永久删除文件，而是先移动到项目 `待清理/图库/`，再移除活动索引。
@@ -203,8 +239,9 @@ git diff --check
 当前非付费回归基线：
 
 - Python：`65/65` 通过。
-- Node：`17/17` 通过，覆盖 GenerationRequest、V5 payload、严格串行、取消、Recipe、图库同步和 Img2Img 基础图持久化路由。
-- `static/app.js`、`server/server.mjs`、`server/api-batch.mjs` 语法通过。
+- Node：`28/28` 通过，覆盖 GenerationRequest、V5 payload、严格串行、取消、Recipe、图库同步、Img2Img 基础图持久化路由和 Payload 回归。
+- Prompt Compiler：`14/14` 通过，覆盖 Quality Tags、Heavy UC、去重、透明背景。
+- `static/app.js`、`server/server.mjs`、`server/api-batch.mjs`、`static/prompt-compiler.js` 语法通过。
 - 桌面与移动端布局数据以最近一次浏览器验收结果为准。
 
 ## 预留接口与明确边界
@@ -232,3 +269,124 @@ git diff --check
 - React/Vue/Electron 重构
 
 保持本地、确定性、可解释的 FastAPI + SQLite + 原生 JavaScript 架构。
+
+## NovelAI V5 API Compatibility
+
+本项目生图链路与 NovelAI 官网 V5 Full txt2img 保持 payload 级等价。以下说明关键设计决策。
+
+1. **params_version=4**：V5 Full（`nai-diffusion-5-*`）使用 `params_version: 4`，V4 系列使用 `params_version: 3`。该字段由 `buildV5Parameters` 根据模型名自动设置。
+
+2. **Effective Prompt 生成**：对于结构化模型，`buildPayload` 将 `prompt` 设为 `null`，实际提示词通过 `v4_prompt.caption.base_caption` 传递。用户输入的原始 prompt 即为 effective prompt。
+
+3. **Quality Tags 进入 effective prompt 的方式**：Quality Tags 不再作为独立字段发送。`qualityPresetId: "standard"` 告知 NovelAI 服务端使用标准质量预设，服务端自行将对应 quality tags 注入 effective prompt。
+
+4. **Heavy UC 进入 effective negative 的方式**：`ucPresetId: "heavy"` 告知 NovelAI 服务端使用重型 UC 预设。用户提供的 `negative_prompt` 通过 `v4_negative_prompt.caption.base_caption` 传递，服务端将 heavy UC 预设内容合并到最终 UC 中。
+
+5. **v4_prompt / v4_negative_prompt 在 V5 中仍会发送**：尽管命名为 `v4_*`，这两个结构化 prompt 对象在 V5 模型中仍然使用，是 NovelAI API 的标准格式。
+
+6. **sampler 与 noise_schedule 是两个独立参数**：`sampler`（如 `k_euler_ancestral`）控制采样算法，`noise_schedule`（如 `karras`）控制噪声调度策略。两者独立设置，不能互换。
+
+7. **WebUI Baseline Test 的用途**：`buildWebUiBaselineRequest()` 返回一个锁死官网全部参数的 request 对象，用于集成测试。它经过与生产代码相同的 `buildV5Parameters` 路径，确保 `v4_prompt`、`qualityPresetId`、`ucPresetId`、`prefer_brownian`、`straight_alpha` 等字段全部正确发送。可配合 `debug/run_web_baseline.mjs` 进行真实 API 验证。
+
+8. **调试 payload 文件位置**：所有调试产物位于 `debug/` 目录（已加入 `.gitignore`）：
+   - `api_actual_payload.json` — 修复前当前代码实际发送的 payload
+   - `api_actual_test.png` — 修复前生成的图片
+   - `web_baseline_payload.json` — 官网基准 payload（完整字段）
+   - `web_baseline_test_api_payload.json` — 修复后实际发送的 payload
+   - `web_baseline_test_api.png` — 修复后生成的图片
+   - `payload_diff.json` — 字段差异比较结果
+
+## NovelAI V5 Generation Pipeline
+
+本节描述从用户输入到 NovelAI API 调用的完整数据流，确保普通用户只写 `nahida` 也能默认接近官网质量。
+
+### 架构流程图
+
+```text
+UI (index.html)
+  │
+  ├─ Generation Preset (官网一致 / 高质量 / 高级自定义)
+  │    └─ 控制 Steps/CFG/Sampler/Scheduler 等参数默认值
+  │
+  ├─ Quality Tags Toggle (☑ 自动质量标签, 默认 ON)
+  ├─ Heavy UC Toggle (☑ 推荐负面提示词, 默认 ON)
+  ├─ Transparent Background Toggle (□ 透明背景, 默认 OFF)
+  │
+  ▼
+Prompt Compiler (static/prompt-compiler.js, 纯函数)
+  │
+  ├─ compilePrompt(raw, {qualityTags, transparentBackground})
+  │    → effectivePrompt = raw + transparent bg? + very aesthetic + masterpiece + no text
+  │    → token 级去重（不重复用户已手写的 tag）
+  │
+  ├─ compileNegative(raw, {heavyUc})
+  │    → effectiveNegative = Heavy UC + raw
+  │    → token 级去重
+  │
+  ▼
+naiGenerate() → POST /api/novelai/generate
+  │
+  ├─ prompt = effectivePrompt
+  ├─ negative_prompt = effectiveNegative
+  │
+  ▼
+Backend normalizeGenerationRequest()
+  │
+  ├─ 按模型选择默认值：V5 → steps=23, guidance=7; 非V5 → steps=28, guidance=5
+  ├─ noise_schedule 透传
+  │
+  ▼
+NovelAIProvider.buildPayload()
+  │
+  ├─ buildV5Parameters() — V5 专用字段（已固化，不改）
+  │    ├─ params_version=4, prefer_brownian=true, straight_alpha=true
+  │    ├─ qualityPresetId="standard", ucPresetId="heavy"
+  │    ├─ v4_prompt.caption.base_caption = effectivePrompt
+  │    ├─ v4_negative_prompt.caption.base_caption = effectiveNegative
+  │    └─ autoSmea=false, dynamic_thresholding=false, cfg_rescale=0
+  │
+  ▼
+NovelAI API (https://image.novelai.net/ai/generate-image)
+  │
+  ▼
+Gallery + Metadata (SQLite: gallery + generation 表)
+```
+
+### Generation Preset（生成预设）
+
+| 预设 | Steps | CFG | Sampler | Scheduler | Quality Tags | Heavy UC | 说明 |
+|------|-------|-----|---------|-----------|-------------|----------|------|
+| 官网一致（默认） | 23 | 7 | Euler Ancestral | Karras | ON | ON | 与 NovelAI 官网 V5 默认行为一致 |
+| 高质量（实验） | 28 | 7 | Euler Ancestral | Karras | ON | ON | 仅增加 Steps，标记"实验" |
+| 高级自定义 | 用户控制 | 用户控制 | 用户控制 | 用户控制 | 用户控制 | 用户控制 | 展开全部底层参数 |
+
+预设选择保存在 `localStorage`，下次打开自动恢复。
+
+### Prompt Compiler
+
+纯函数，无 DOM 依赖，可独立测试。static/prompt-compiler.js 在 static/app.js 之前以 `<script type="module">` 加载，为 Effective Preview 与 Generate 提供唯一的 `window.PromptCompiler` 实现。
+
+- **Quality Tags**（V5 Standard）：`very aesthetic, masterpiece, no text`
+- **Heavy UC**：NovelAI 官网 `ucPresetId=heavy` 展开的 18 个负面标签
+- **去重规则**：逗号分隔 → trim → 小写比较，不引入 fuzzy matching
+
+示例：
+
+| 输入 | Quality Tags | Transparent | Heavy UC | 输出 |
+|------|-------------|-------------|----------|------|
+| `nahida` | ON | OFF | ON | `nahida, very aesthetic, masterpiece, no text` |
+| `nahida` | ON | ON | ON | `nahida, transparent background, very aesthetic, masterpiece, no text` |
+| `nahida, masterpiece` | ON | OFF | ON | `nahida, masterpiece, very aesthetic, no text`（不重复 masterpiece） |
+| `nahida` | OFF | OFF | OFF | `nahida`（原样） |
+
+### 关键文件
+
+| 文件 | 职责 |
+|------|------|
+| `static/prompt-compiler.js` | Prompt Compiler 纯函数（compilePrompt, compileNegative） |
+| `static/app.js` | UI 状态、Preset 切换、Effective Preview、naiGenerate 集成 |
+| `static/index.html` | 生成面板 UI（Preset Radio、Toggles、Effective Preview 折叠） |
+| `server/generation-request.mjs` | 请求规范化、V5/非V5 默认值分离 |
+| `server/novelai-provider.mjs` | V5 payload 构建（buildV5Parameters 已固化） |
+| `debug/test_prompt_compiler.mjs` | Prompt Compiler 单元测试（14 项） |
+| `debug/test_payload_regression.mjs` | Payload 回归测试（5 项） |

@@ -263,6 +263,78 @@ function rebuildTargetSelect() {
   sel.innerHTML = options.map((o) => `<option value="${o.value}" ${o.value === state.target ? "selected" : ""}>${esc(o.label)}</option>`).join("");
 }
 
+// ===== 标签目标选择器（超市点击标签写入 Base / 指定角色） =====
+function insertTagIntoString(text, tag) {
+  const raw = String(tag ?? "").trim();
+  if (!raw) return text;
+  const tokens = String(text || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const existing = new Set(tokens.map((t) => t.toLowerCase()));
+  if (existing.has(raw.toLowerCase())) return text;
+  tokens.push(raw);
+  return tokens.join(", ");
+}
+
+function remapNaiTagTarget(target, op, a, b) {
+  if (typeof target !== "string" || !target.startsWith("char:")) return target;
+  const m = target.match(/^char:(\d+)$/);
+  if (!m) return target; // char:N:uc 等非正向目标不改
+  const n = Number(m[1]);
+  if (op === "remove") {
+    const i = a;
+    if (n === i) return "base";
+    if (n > i) return `char:${n - 1}`;
+    return target;
+  }
+  if (op === "move") {
+    const from = a, to = b;
+    if (n === from) return `char:${to}`;   // 被移动的角色跟随
+    if (n === to)   return `char:${from}`; // 被挤占（交换）的角色也跟随
+    return target;
+  }
+  return target;
+}
+
+function rebuildNaiTagTarget() {
+  const sel = $("#nai-tag-target");
+  if (!sel) return;
+  const options = [`<option value="base">Base / Scene</option>`];
+  naiCharacters.forEach((_, i) => options.push(`<option value="char:${i}">Character ${i + 1}</option>`));
+  sel.innerHTML = options.join("");
+  const m = String(state.target || "").match(/^char:(\d+)$/);
+  if (m && naiCharacters[Number(m[1])]) {
+    sel.value = state.target;
+  } else {
+    sel.value = "base";
+    if (m) state.target = "base"; // 悬空的 char:N 回退到 base
+  }
+}
+
+function addTagToTarget(tag) {
+  const sel = document.getElementById("nai-tag-target");
+  state.target = sel?.value || "base";
+  const m = state.target.match(/^char:(\d+)$/);
+  if (m && !naiCharacters[Number(m[1])]) state.target = "base";
+  addEntry(tag);
+  if (state.target === "base") {
+    const promptEl = $("#nai-prompt");
+    promptEl.value = insertTagIntoString(promptEl.value, tag);
+    updateNaiPromptMeta();
+    if (typeof naiUpdateEffectivePreview === "function") naiUpdateEffectivePreview();
+  } else {
+    const cm = state.target.match(/^char:(\d+)$/);
+    if (cm) {
+      const character = naiCharacters[Number(cm[1])];
+      if (character) {
+        character.prompt = insertTagIntoString(character.prompt, tag);
+        naiRenderCharacters();
+      }
+    }
+  }
+}
+
 // ===== 初始化 =====
 async function init() {
   loadDraft();
@@ -272,6 +344,7 @@ async function init() {
   if (!state.model || !m.models.some((x) => x.id === state.model)) state.model = m.default;
   $("#model-select").innerHTML = m.models.map((x) => `<option value="${x.id}" ${x.id === state.model ? "selected" : ""}>${esc(x.label)}</option>`).join("");
   rebuildTargetSelect();
+  rebuildNaiTagTarget();
   await Promise.all([loadTaxonomy(), loadFavorites(), loadRecent(), loadPromptSections()]);
   await loadZh();
   await loadPromptPresets();
@@ -464,7 +537,7 @@ function renderTagCards(tags) {
   if (!tags.length) { el.innerHTML = `<div class="empty">暂无标签</div>`; return; }
   el.innerHTML = tags.map(tagCardHtml).join("");
   el.querySelectorAll(".tag-card").forEach((n) =>
-    n.addEventListener("click", () => addEntry(n.dataset.tag))
+    n.addEventListener("click", () => addTagToTarget(n.dataset.tag))
   );
   el.querySelectorAll(".fav-toggle").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); toggleFavorite(b.dataset.fav); })
@@ -1763,6 +1836,11 @@ const bind = (id, event, handler) => {
 
 $("#model-select").addEventListener("change", (e) => { state.model = e.target.value; persistDraft(); });
 $("#target-select").addEventListener("change", (e) => { state.target = e.target.value; });
+$("#nai-tag-target")?.addEventListener("change", (e) => {
+  const v = e.target.value;
+  const m = v.match(/^char:(\d+)$/);
+  state.target = v === "base" || (m && naiCharacters[Number(m[1])]) ? v : "base";
+});
 $("#search-input").addEventListener("input", (e) => doSearch(e.target.value));
 $("#cat-filter").addEventListener("change", () => doSearch($("#search-input").value));
 bind("#semantic-search-btn", "click", runSemanticSearch);
@@ -1949,6 +2027,11 @@ async function openGalleryDir(dirName) {
       `<img src="/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}" loading="lazy" alt="" />` +
       `<button class="gallery-fav ${it.favorite ? "on" : ""}" title="${it.favorite ? "取消收藏" : "收藏"}">★</button>` +
       `<div class="gallery-card-prompt">${esc(it.prompt)}</div>` +
+      `<div class="gallery-card-actions">` +
+      `<button class="gallery-action-btn" data-action="restore" title="恢复参数">恢复参数</button>` +
+      `<button class="gallery-action-btn" data-action="seed" title="复用 Seed">复用 Seed</button>` +
+      `<button class="gallery-action-btn" data-action="copy" title="复制 Prompt">复制 Prompt</button>` +
+      `</div>` +
       `</div>`
     ).join("");
     updateGallerySelectionUi();
@@ -1961,13 +2044,41 @@ async function openGalleryDir(dirName) {
       checkbox.addEventListener("click", (e) => e.stopPropagation());
       checkbox.addEventListener("change", () => toggleGalleryFile(dirName, card.dataset.file, checkbox.checked));
       card.addEventListener("click", (e) => {
-        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
+        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select") || e.target.closest(".gallery-action-btn")) return;
         showGalleryPreview(dirName, card.dataset.file);
       });
       card.querySelector(".gallery-fav").addEventListener("click", (e) => {
         e.stopPropagation();
         const fav = !card.classList.contains("fav");
         toggleGalleryFav(dirName, card.dataset.file, fav);
+      });
+      // Metadata restore action buttons
+      card.querySelectorAll(".gallery-action-btn").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const fileName = card.dataset.file;
+          const item = galleryItems.find((x) => x.file_name === fileName);
+          if (!item) return;
+          const action = btn.dataset.action;
+          if (action === "restore") {
+            const meta = extractMetaFromGalleryItem(item);
+            await showView("generate");
+            applyGenerationConfig(meta);
+          } else if (action === "seed") {
+            const meta = extractMetaFromGalleryItem(item);
+            if (meta.seed != null) {
+              await showView("generate");
+              $("#nai-seed").value = String(meta.seed);
+              $("#nai-seed-mode").value = "fixed";
+              toast(`Seed ${meta.seed} 已填入（Fixed 模式）`);
+            } else { toast("该图无 Seed 信息"); }
+          } else if (action === "copy") {
+            const meta = extractMetaFromGalleryItem(item);
+            const text = meta.effectivePrompt || meta.rawPrompt || item.prompt || "";
+            try { await navigator.clipboard.writeText(text); toast("Prompt 已复制"); }
+            catch { $("#nai-prompt").value = text; toast("已填入 Prompt 框"); }
+          }
+        });
       });
     });
   } catch (e) { toast("目录加载失败：" + e.message); }
@@ -1984,7 +2095,7 @@ async function showGalleryPreview(dirName, fileName) {
       `<img src="${imgPath}" class="gallery-preview-img" alt="" />` +
       (() => { const recipe = naiRecipeFromItem(it), settings = recipe.settings || recipe; return `<dl class="gallery-meta"><dt>Prompt</dt><dd>${esc(it.prompt || "")}</dd><dt>Negative</dt><dd>${esc(it.negative_prompt || "")}</dd><dt>Seed</dt><dd>${esc(settings.seed ?? it.seed ?? "-")}</dd><dt>Model</dt><dd>${esc(settings.model ?? it.model ?? "-")}</dd></dl>`; })() +
       `<div class="gallery-preview-actions"><button class="primary" id="gallery-copy-btn">复制提示词</button><button class="ghost" id="gallery-fav-btn">${it.favorite ? "取消收藏 ★" : "收藏 ☆"}</button></div>` +
-      `<div class="gallery-recipe-actions"><button id="gallery-recipe-restore">恢复生成设置</button><button id="gallery-recipe-img2img">以此图进行图生图</button></div>` +
+      `<div class="gallery-recipe-actions"><button id="gallery-recipe-restore">恢复参数</button><button id="gallery-recipe-seed">复用 Seed</button><button id="gallery-recipe-copy-prompt">复制 Prompt</button><button id="gallery-recipe-img2img">以此图进行图生图</button></div>` +
       (it.snapshot_id ? `<div class="gallery-restore-actions"><button data-restore-sections="">全部加载</button><button data-restore-sections="character,appearance,clothing,expression,action">加载角色</button><button data-restore-sections="style,quality">加载画风</button><button data-restore-sections="composition,scene">加载构图</button></div>` : "");
     $("#gallery-copy-btn").addEventListener("click", async () => {
       try {
@@ -1996,7 +2107,26 @@ async function showGalleryPreview(dirName, fileName) {
       toggleGalleryFav(dirName, it.file_name, !it.favorite);
       showGalleryPreview(dirName, it.file_name);
     });
-    $("#gallery-recipe-restore").addEventListener("click", async () => { await showView("generate"); await naiRestoreItem(it); });
+    $("#gallery-recipe-restore").addEventListener("click", async () => {
+      const meta = extractMetaFromGalleryItem(it);
+      await showView("generate");
+      applyGenerationConfig(meta);
+    });
+    $("#gallery-recipe-seed").addEventListener("click", async () => {
+      const meta = extractMetaFromGalleryItem(it);
+      if (meta.seed != null) {
+        await showView("generate");
+        $("#nai-seed").value = String(meta.seed);
+        $("#nai-seed-mode").value = "fixed";
+        toast(`Seed ${meta.seed} 已填入（Fixed 模式）`);
+      } else { toast("该图无 Seed 信息"); }
+    });
+    $("#gallery-recipe-copy-prompt").addEventListener("click", async () => {
+      const meta = extractMetaFromGalleryItem(it);
+      const text = meta.effectivePrompt || meta.rawPrompt || it.prompt || "";
+      try { await navigator.clipboard.writeText(text); toast("Prompt 已复制"); }
+      catch { $("#nai-prompt").value = text; toast("已填入 Prompt 框"); }
+    });
     $("#gallery-recipe-img2img").addEventListener("click", async () => { await showView("generate"); await naiUseImageSource(imgPath, it.file_name || "图库图片"); toast("已设为图生图基础图"); });
     body.querySelectorAll("[data-restore-sections]").forEach((b) => b.addEventListener("click", () => restoreSnapshot(it.snapshot_id, b.dataset.restoreSections)));
   } catch (e) { toast("预览失败：" + e.message); }
@@ -2065,6 +2195,11 @@ let naiStructuredDraft = null;
 let naiGenerationMode = "txt2img";
 let naiImg2ImgSource = null;
 let naiCharacters = [];
+// P0: Generation Preset & Prompt Compiler state
+let naiPresetMode = localStorage.getItem("nai_preset_mode") || "website"; // website | high_quality | custom
+let naiQualityTagsEnabled = true;
+let naiHeavyUcEnabled = true;
+let naiTransparentBg = false;
 
 function naiNormalizeNumberInput(v, fallback = null) {
   const s = String(v ?? "").trim();
@@ -2181,6 +2316,9 @@ async function naiUseImageSource(url, name = "历史图") {
 
 function naiRenderCharacters() {
   const list = $("#nai-character-list");
+  const count = document.getElementById("nai-character-count");
+  if (count) count.textContent = String(naiCharacters.length);
+  rebuildNaiTagTarget();
   if (!naiCharacters.length) {
     list.innerHTML = `<div class="empty">暂无独立角色</div>`;
     return;
@@ -2230,13 +2368,79 @@ function naiCollectParameters() {
     seed: Number.isInteger(seed) ? seed : null,
     steps: number("#nai-steps"), guidance: number("#nai-guidance"),
     sampler: $("#nai-sampler").value,
+    scheduler: $("#nai-scheduler")?.value || "karras",
+    cfg_rescale: number("#nai-cfg-rescale", 0),
+    auto_smea: $("#nai-auto-smea")?.value === "true",
     quality_preset: $("#nai-quality").value,
+    preset_mode: naiPresetMode,
+    quality_tags: naiQualityTagsEnabled,
+    heavy_uc: naiHeavyUcEnabled,
+    transparent_bg: naiTransparentBg,
   };
 }
 
 function naiQualityEnabled(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
   return !["off", "false", "0", "disabled"].includes(normalized);
+}
+
+// ---- P0: Generation Preset Mode ----
+const NAI_PRESET_CONFIGS = Object.freeze({
+  website: { steps: 23, guidance: 7, sampler: "k_euler_ancestral", scheduler: "karras", cfg_rescale: 0, auto_smea: false, qualityTags: true, heavyUc: true },
+  high_quality: { steps: 28, guidance: 7, sampler: "k_euler_ancestral", scheduler: "karras", cfg_rescale: 0, auto_smea: false, qualityTags: true, heavyUc: true },
+  custom: null, // custom = user controls everything
+});
+
+function naiApplyPresetMode(mode) {
+  naiPresetMode = mode;
+  localStorage.setItem("nai_preset_mode", mode);
+  // Update radio UI
+  document.querySelectorAll('input[name="nai-preset"]').forEach((r) => { r.checked = r.value === mode; });
+  const advanced = $("#nai-advanced-section");
+  if (mode === "custom") {
+    advanced.classList.remove("nai-advanced-locked");
+  } else {
+    advanced.classList.add("nai-advanced-locked");
+    // Apply preset values to hidden fields
+    const cfg = NAI_PRESET_CONFIGS[mode];
+    if (cfg) {
+      $("#nai-steps").value = cfg.steps;
+      $("#nai-guidance").value = cfg.guidance;
+      naiSetSelectValue("#nai-sampler", cfg.sampler, "k_euler_ancestral");
+      if ($("#nai-scheduler")) $("#nai-scheduler").value = cfg.scheduler;
+      if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").value = cfg.cfg_rescale;
+      if ($("#nai-auto-smea")) $("#nai-auto-smea").value = String(cfg.auto_smea);
+      naiQualityTagsEnabled = cfg.qualityTags;
+      naiHeavyUcEnabled = cfg.heavyUc;
+      $("#nai-quality-tags").checked = cfg.qualityTags;
+      $("#nai-heavy-uc").checked = cfg.heavyUc;
+    }
+  }
+  naiUpdateEffectivePreview();
+  naiRenderCost();
+  updateAdvSummary(naiCollectParameters());
+}
+
+// ---- P0: Effective Preview ----
+function naiUpdateEffectivePreview() {
+  const rawPrompt = $("#nai-prompt").value;
+  const rawNeg = $("#nai-neg").value;
+  const { compilePrompt, compileNegative } = window.PromptCompiler;
+  const effectivePrompt = compilePrompt(rawPrompt, { qualityTags: naiQualityTagsEnabled, transparentBackground: naiTransparentBg });
+  const effectiveNegative = compileNegative(rawNeg, { heavyUc: naiHeavyUcEnabled });
+  const params = naiCollectParameters();
+  const preset = NAI_RESOLUTION_PRESETS[params.resolution_category];
+  const resolutionStr = preset ? `${preset.width}×${preset.height}` : `${params.width}×${params.height}`;
+  const seedStr = params.seed_mode === "random" ? "Random" : String(params.seed ?? "-");
+  if ($("#nai-effective-prompt")) $("#nai-effective-prompt").textContent = effectivePrompt || "(空)";
+  if ($("#nai-effective-negative")) $("#nai-effective-negative").textContent = effectiveNegative || "(空)";
+  if ($("#nai-eff-model")) $("#nai-eff-model").textContent = params.model;
+  if ($("#nai-eff-resolution")) $("#nai-eff-resolution").textContent = resolutionStr;
+  if ($("#nai-eff-sampler")) $("#nai-eff-sampler").textContent = params.sampler;
+  if ($("#nai-eff-scheduler")) $("#nai-eff-scheduler").textContent = params.scheduler || "karras";
+  if ($("#nai-eff-steps")) $("#nai-eff-steps").textContent = params.steps;
+  if ($("#nai-eff-cfg")) $("#nai-eff-cfg").textContent = params.guidance;
+  if ($("#nai-eff-seed")) $("#nai-eff-seed").textContent = seedStr;
 }
 
 function naiStructuredRequest(prompt, negativePrompt) {
@@ -2361,6 +2565,9 @@ function initGenerateView() {
   naiRenderCost();
   loadNaiGallery();
   loadNaiApiStatus();
+  // P0: Initialize preset mode & toggles
+  naiApplyPresetMode(naiPresetMode);
+  naiUpdateEffectivePreview();
   if (!naiSSEOpened) { naiSSEOpened = true; naiSSE(); }
 }
 
@@ -2371,8 +2578,12 @@ async function naiGenerate() {
   if (!naiApiConfigured) { toast("未配置 NovelAI 官方 API Token，已阻止生成"); return; }
   const parameters = naiCollectParameters();
   const structured = naiStructuredRequest(prompt, negativePrompt);
-  const generationPrompt = structured?.prompt || prompt.trim();
-  const generationNegative = structured?.negative_prompt ?? negativePrompt;
+  // P0: Apply Prompt Compiler to get effective prompt/negative
+  const { compilePrompt, compileNegative } = window.PromptCompiler;
+  const rawGenerationPrompt = structured?.prompt || prompt.trim();
+  const rawGenerationNegative = structured?.negative_prompt ?? negativePrompt;
+  const generationPrompt = compilePrompt(rawGenerationPrompt, { qualityTags: naiQualityTagsEnabled, transparentBackground: naiTransparentBg });
+  const generationNegative = compileNegative(rawGenerationNegative, { heavyUc: naiHeavyUcEnabled });
   const editorCharacters = naiCollectCharacters();
   const characters = editorCharacters.length ? editorCharacters : (structured?.characters || []);
   const maxCount = naiBatchMaxCount();
@@ -2397,6 +2608,31 @@ async function naiGenerate() {
   updateAdvSummary(parameters);
   naiSetPhase("submitting");
   try {
+    const meta = {
+      rawPrompt: $("#nai-prompt").value,
+      effectivePrompt: generationPrompt,
+      rawNegative: $("#nai-neg").value,
+      effectiveNegative: generationNegative,
+      model: parameters.model,
+      width: parameters.width,
+      height: parameters.height,
+      sampler: parameters.sampler,
+      scheduler: parameters.scheduler || "karras",
+      steps: parameters.steps,
+      cfg: parameters.guidance,
+      cfgRescale: parameters.cfg_rescale ?? 0,
+      seed: parameters.seed,
+      seed_mode: parameters.seed_mode,
+      qualityPreset: parameters.quality_preset,
+      ucPreset: naiHeavyUcEnabled ? "heavy" : "off",
+      transparentBackground: naiTransparentBg,
+      presetMode: naiPresetMode,
+      qualityTags: naiQualityTagsEnabled,
+      heavyUc: naiHeavyUcEnabled,
+      resolution_category: parameters.resolution_category,
+      mode: naiGenerationMode,
+      ...(characters.length ? { characterPrompts: characters } : {}),
+    };
     const res = await fetch(`${NAI_SERVER}/api/novelai/generate`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2415,11 +2651,13 @@ async function naiGenerate() {
           guidance: parameters.guidance,
           seed_mode: parameters.seed_mode,
           seed: parameters.seed,
+          noise_schedule: parameters.scheduler || "karras",
         },
         count,
         quality_toggle: naiQualityEnabled(parameters.quality_preset),
         snapshot_id: snapshotId,
         name: "manual",
+        meta,
       }),
     });
     const j = await res.json().catch(() => ({}));
@@ -2515,6 +2753,7 @@ async function naiFillFromCart() {
     naiCharacters = characters.map((character) => ({ ...character, position: character.position === "auto" ? null : character.position }));
     naiRenderCharacters();
     updateNaiPromptMeta();
+    naiUpdateEffectivePreview();
     toast(characters.length ? `已填入结构化 Prompt（${characters.length} 个角色）` : "已填入购物车提示词");
   } catch (e) { toast("填入失败：" + e.message); }
 }
@@ -2546,8 +2785,15 @@ function renderViewer() {
   const recipe = naiRecipeFromItem(it);
   const settings = recipe.settings || recipe;
   meta.innerHTML = `<div><strong>Prompt</strong> ${esc(it.prompt || "-")}</div><div><strong>Negative</strong> ${esc(it.negative_prompt || "-")}</div><div><strong>Seed</strong> ${esc(settings.seed ?? it.seed ?? "-")} · <strong>Model</strong> ${esc(settings.model ?? it.model ?? "-")} · <strong>Mode</strong> ${esc(recipe.mode || "txt2img")}</div>` +
+    `<div class="viewer-meta-actions"><button data-meta-action="restore">恢复参数</button><button data-meta-action="seed">复用 Seed</button><button data-meta-action="copy">复制 Prompt</button></div>` +
     (it.snapshot_id ? `<div class="viewer-restore-actions"><button data-viewer-restore="">全部加载</button><button data-viewer-restore="character,appearance,clothing,expression,action">加载角色</button><button data-viewer-restore="style,quality">加载画风</button><button data-viewer-restore="composition,scene">加载构图</button></div>` : "");
   meta.querySelectorAll("[data-viewer-restore]").forEach((b) => b.addEventListener("click", () => restoreSnapshot(it.snapshot_id, b.dataset.viewerRestore)));
+  meta.querySelectorAll("[data-meta-action]").forEach((b) => b.addEventListener("click", () => {
+    const itemMeta = extractMetaFromGalleryItem(it);
+    if (b.dataset.metaAction === "restore") { applyGenerationConfig(itemMeta); }
+    else if (b.dataset.metaAction === "seed" && itemMeta.seed != null) { $("#nai-seed").value = String(itemMeta.seed); $("#nai-seed-mode").value = "fixed"; toast(`Seed ${itemMeta.seed} 已填入`); }
+    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { $("#nai-prompt").value = t; toast("已填入 Prompt 框"); }); }
+  }));
   $("#nai-pin").textContent = it.favorite ? "♥ Pin" : "♡ Pin";
   $("#nai-pin").classList.toggle("on", !!it.favorite);
   const img = $("#nai-viewer-img");
@@ -2593,7 +2839,8 @@ function updateAdvSummary(parameters) {
   const parts = [];
   if (p.sampler) parts.push(p.sampler);
   if (p.steps) parts.push(`Steps ${p.steps}`);
-  if (p.guidance) parts.push(`Guidance ${p.guidance}`);
+  if (p.guidance) parts.push(`CFG ${p.guidance}`);
+  if (p.scheduler && p.scheduler !== "karras") parts.push(p.scheduler);
   $("#nai-adv-summary").textContent = parts.length ? parts.join(" · ") : "NovelAI 当前";
 }
 
@@ -2629,6 +2876,9 @@ async function naiRestoreItem(it) {
   $("#nai-steps").value = p.steps != null ? String(p.steps) : "28";
   $("#nai-guidance").value = p.guidance != null ? String(p.guidance) : "5";
   naiSetSelectValue("#nai-sampler", p.sampler, "k_euler_ancestral");
+  if ($("#nai-scheduler")) $("#nai-scheduler").value = p.scheduler || "karras";
+  if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").value = p.cfg_rescale ?? 0;
+  if ($("#nai-auto-smea")) $("#nai-auto-smea").value = String(p.auto_smea ?? false);
   naiSetSelectValue("#nai-quality", recipe.quality_toggle === false ? "off" : p.quality_preset, "on");
   naiCharacters = Array.isArray(recipe.characters) ? recipe.characters.map((character) => ({
     prompt: character.prompt || "",
@@ -2656,12 +2906,123 @@ async function naiRestoreItem(it) {
   }
   updateAdvSummary(p);
   updateNaiPromptMeta();
+  naiUpdateEffectivePreview();
   naiRenderCost();
   toast("已恢复此图的完整生成设置");
 }
 
 function naiReuse() {
   return naiRestoreItem(naiImages[naiIdx]);
+}
+
+/**
+ * 集中恢复 Generation Config 到 UI 控件。唯一入口，禁止散落直接操作 DOM .value。
+ * @param {object} cfg — meta 对象（来自 image metadata）
+ */
+function applyGenerationConfig(cfg) {
+  if (!cfg || typeof cfg !== "object") { toast("无可恢复的参数"); return; }
+  // Prompt
+  if (cfg.rawPrompt != null) $("#nai-prompt").value = cfg.rawPrompt;
+  if (cfg.rawNegative != null) $("#nai-neg").value = cfg.rawNegative;
+  // Model
+  naiSetSelectValue("#nai-model", cfg.model, "nai-diffusion-5-full");
+  // Resolution
+  const w = Number(cfg.width) || 832;
+  const h = Number(cfg.height) || 1216;
+  $("#nai-width").value = w;
+  $("#nai-height").value = h;
+  $("#nai-resolution-category").value = naiResolutionPresetForSize(w, h);
+  naiSyncCountOptions();
+  // Sampler / Scheduler
+  naiSetSelectValue("#nai-sampler", cfg.sampler, "k_euler_ancestral");
+  if ($("#nai-scheduler")) $("#nai-scheduler").value = cfg.scheduler || "karras";
+  // Steps / CFG / CFG Rescale
+  if (cfg.steps != null) $("#nai-steps").value = String(cfg.steps);
+  if (cfg.cfg != null) $("#nai-guidance").value = String(cfg.cfg);
+  if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").value = String(cfg.cfgRescale ?? 0);
+  // Seed
+  if (cfg.seed_mode) $("#nai-seed-mode").value = cfg.seed_mode;
+  if (cfg.seed != null) $("#nai-seed").value = String(cfg.seed);
+  // Quality / UC toggles
+  if (cfg.qualityPreset) naiSetSelectValue("#nai-quality", cfg.qualityPreset, "on");
+  if (cfg.presetMode) {
+    naiPresetMode = cfg.presetMode;
+    localStorage.setItem("nai_preset_mode", cfg.presetMode);
+    document.querySelectorAll('input[name="nai-preset"]').forEach((r) => { r.checked = r.value === cfg.presetMode; });
+  }
+  if (cfg.qualityTags != null) {
+    naiQualityTagsEnabled = !!cfg.qualityTags;
+    if ($("#nai-quality-tags")) $("#nai-quality-tags").checked = naiQualityTagsEnabled;
+  }
+  if (cfg.heavyUc != null) {
+    naiHeavyUcEnabled = !!cfg.heavyUc;
+    if ($("#nai-heavy-uc")) $("#nai-heavy-uc").checked = naiHeavyUcEnabled;
+  }
+  if (cfg.transparentBackground != null) {
+    naiTransparentBg = !!cfg.transparentBackground;
+    if ($("#nai-transparent")) $("#nai-transparent").checked = naiTransparentBg;
+  }
+  // Mode
+  if (cfg.mode) naiSetMode(cfg.mode);
+  // Characters
+  if (Array.isArray(cfg.characterPrompts)) {
+    naiCharacters = cfg.characterPrompts.map((c) => ({
+      prompt: c.prompt || "",
+      negative_prompt: c.negative_prompt || "",
+      position: c.position ? { ...c.position } : null,
+    }));
+    naiRenderCharacters();
+    if (naiCharacters.length > 0) {
+      const section = document.getElementById("nai-characters-section");
+      if (section) section.open = true;
+    }
+  }
+  // Refresh UI
+  naiStructuredDraft = null;
+  updateAdvSummary(naiCollectParameters());
+  updateNaiPromptMeta();
+  naiUpdateEffectivePreview();
+  naiRenderCost();
+  toast("已恢复生成参数");
+}
+
+/**
+ * 从图库 item 提取 meta（兼容新旧格式）。
+ * 新格式：item.parameters.meta 存在。
+ * 旧格式：从 item.parameters.recipe 或 item.parameters 重建。
+ */
+function extractMetaFromGalleryItem(item) {
+  const params = item?.parameters && typeof item.parameters === "object" ? item.parameters : {};
+  // 新格式：直接有 meta 字段
+  if (params.meta && typeof params.meta === "object") return params.meta;
+  // 旧格式：从 recipe 或 parameters 重建 meta
+  const recipe = params.recipe && typeof params.recipe === "object" ? params.recipe : params;
+  const s = recipe.settings || recipe;
+  return {
+    rawPrompt: recipe.prompt || item.prompt || "",
+    effectivePrompt: recipe.prompt || item.prompt || "",
+    rawNegative: recipe.negative_prompt ?? item.negative_prompt ?? "",
+    effectiveNegative: recipe.negative_prompt ?? item.negative_prompt ?? "",
+    model: s.model,
+    width: s.width,
+    height: s.height,
+    sampler: s.sampler,
+    scheduler: s.scheduler || s.noise_schedule || "karras",
+    steps: s.steps,
+    cfg: s.guidance,
+    cfgRescale: s.cfg_rescale ?? 0,
+    seed: s.seed,
+    seed_mode: s.seed_mode || "fixed",
+    qualityPreset: recipe.quality_toggle === false ? "off" : "on",
+    ucPreset: "heavy",
+    transparentBackground: false,
+    presetMode: "custom",
+    qualityTags: true,
+    heavyUc: true,
+    resolution_category: recipe.resolution_category || null,
+    mode: recipe.mode || "txt2img",
+    characterPrompts: Array.isArray(recipe.characters) ? recipe.characters : [],
+  };
 }
 
 async function naiUseCurrentAsImg2Img() {
@@ -2702,7 +3063,12 @@ $("#nai-img2img-file").addEventListener("change", async (event) => {
 });
 $("#nai-strength").addEventListener("input", () => { naiUpdateRangeLabels(); naiRenderCost(); });
 $("#nai-noise").addEventListener("input", () => { naiUpdateRangeLabels(); naiRenderCost(); });
-$("#nai-character-add").addEventListener("click", () => naiAddCharacter());
+$("#nai-character-add").addEventListener("click", (e) => {
+  e.stopPropagation();
+  naiAddCharacter();
+  const section = document.getElementById("nai-characters-section");
+  if (section) section.open = true;
+});
 $("#nai-character-list").addEventListener("input", (event) => {
   const article = event.target.closest("[data-character-index]");
   const field = event.target.dataset.characterField;
@@ -2724,10 +3090,16 @@ $("#nai-character-list").addEventListener("click", (event) => {
   const article = event.target.closest("[data-character-index]");
   if (!article) return;
   const index = Number(article.dataset.characterIndex);
-  if (event.target.matches("[data-character-remove]")) naiCharacters.splice(index, 1);
-  else if (event.target.matches('[data-character-move="up"]') && index > 0) [naiCharacters[index - 1], naiCharacters[index]] = [naiCharacters[index], naiCharacters[index - 1]];
-  else if (event.target.matches('[data-character-move="down"]') && index < naiCharacters.length - 1) [naiCharacters[index + 1], naiCharacters[index]] = [naiCharacters[index], naiCharacters[index + 1]];
-  else return;
+  if (event.target.matches("[data-character-remove]")) {
+    state.target = remapNaiTagTarget(state.target, "remove", index);
+    naiCharacters.splice(index, 1);
+  } else if (event.target.matches('[data-character-move="up"]') && index > 0) {
+    state.target = remapNaiTagTarget(state.target, "move", index, index - 1);
+    [naiCharacters[index - 1], naiCharacters[index]] = [naiCharacters[index], naiCharacters[index - 1]];
+  } else if (event.target.matches('[data-character-move="down"]') && index < naiCharacters.length - 1) {
+    state.target = remapNaiTagTarget(state.target, "move", index, index + 1);
+    [naiCharacters[index + 1], naiCharacters[index]] = [naiCharacters[index], naiCharacters[index + 1]];
+  } else return;
   naiRenderCharacters();
 });
 $("#nai-fill-cart").addEventListener("click", naiFillFromCart);
@@ -2764,6 +3136,21 @@ $("#nai-split-neg").addEventListener("click", () => {
   }
 });
 $("#nai-history-refresh").addEventListener("click", loadNaiGallery);
+
+// ---- P0: Preset Mode / Quality Tags / Heavy UC / Transparent / Effective Preview ----
+document.querySelectorAll('input[name="nai-preset"]').forEach((r) => r.addEventListener("change", () => { if (r.checked) naiApplyPresetMode(r.value); }));
+$("#nai-quality-tags").addEventListener("change", () => { naiQualityTagsEnabled = $("#nai-quality-tags").checked; naiUpdateEffectivePreview(); });
+$("#nai-heavy-uc").addEventListener("change", () => { naiHeavyUcEnabled = $("#nai-heavy-uc").checked; naiUpdateEffectivePreview(); });
+$("#nai-transparent").addEventListener("change", () => { naiTransparentBg = $("#nai-transparent").checked; naiUpdateEffectivePreview(); });
+$("#nai-prompt").addEventListener("input", naiUpdateEffectivePreview);
+$("#nai-neg").addEventListener("input", naiUpdateEffectivePreview);
+$("#nai-model").addEventListener("change", naiUpdateEffectivePreview);
+$("#nai-sampler").addEventListener("change", naiUpdateEffectivePreview);
+if ($("#nai-scheduler")) $("#nai-scheduler").addEventListener("change", naiUpdateEffectivePreview);
+$("#nai-steps").addEventListener("input", naiUpdateEffectivePreview);
+$("#nai-guidance").addEventListener("input", naiUpdateEffectivePreview);
+if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").addEventListener("input", naiUpdateEffectivePreview);
+if ($("#nai-auto-smea")) $("#nai-auto-smea").addEventListener("change", naiUpdateEffectivePreview);
 
 
 init();

@@ -42,6 +42,9 @@ outputs/
 .pytest_cache/
 待清理/
 
+# Debug scripts & test artifacts (payload JSON, test images)
+debug/
+
 # Local project notes (not for publishing)
 AGENTS.md
 

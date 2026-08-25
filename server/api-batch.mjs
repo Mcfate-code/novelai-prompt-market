@@ -37,6 +37,7 @@ export class ApiBatchController {
   async run({ generation, count = null, name = "" }) {
     if (this.running) throw new Error("已有 API 生图批次在运行（单并发）");
     const request = normalizeGenerationRequest({ ...generation, count: count ?? generation.count ?? 1 });
+    request.meta = generation?.meta ?? null;
     const total = this.validateCount(request.count);
     const seedMode = request.settings.seed_mode;
     const batchId = randomUUID();
@@ -70,6 +71,7 @@ export class ApiBatchController {
               batch_index: index + 1,
               batch_total: total,
               correlation_id: result.correlationId,
+              parameters_json: request.meta ? JSON.stringify(request.meta) : null,
             });
             saved.push(item);
           }

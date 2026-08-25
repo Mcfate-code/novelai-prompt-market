@@ -1,8 +1,18 @@
+// V5 官网基准默认值（steps=23, guidance=7, noise_schedule=karras）
+const V5_DEFAULTS = Object.freeze({
+  steps: 23,
+  guidance: 7,
+});
+// 非 V5 模型（V4/V4.5）保留旧默认
+const LEGACY_DEFAULTS = Object.freeze({
+  steps: 28,
+  guidance: 5,
+});
 const DEFAULTS = Object.freeze({
   model: "nai-diffusion-5-full",
   sampler: "k_euler_ancestral",
-  steps: 28,
-  guidance: 5,
+  steps: V5_DEFAULTS.steps,
+  guidance: V5_DEFAULTS.guidance,
   width: 832,
   height: 1216,
 });
@@ -84,11 +94,13 @@ function normalizeSettings(input = {}) {
   if (!ALLOWED_MODELS.has(model)) {
     throw new Error(`不支持的模型：${modelInput}`);
   }
+  // 按模型选择默认 steps/guidance：V5 用官网基准，非 V5 用旧默认
+  const modelDefaults = model.startsWith("nai-diffusion-5-") ? V5_DEFAULTS : LEGACY_DEFAULTS;
   return {
     model,
     sampler: String(settings.sampler || DEFAULTS.sampler),
-    steps: clamp(Math.trunc(finiteNumber(settings.steps, DEFAULTS.steps)), 1, 50),
-    guidance: clamp(finiteNumber(settings.guidance ?? settings.scale, DEFAULTS.guidance), 0, 10),
+    steps: clamp(Math.trunc(finiteNumber(settings.steps, modelDefaults.steps)), 1, 50),
+    guidance: clamp(finiteNumber(settings.guidance ?? settings.scale, modelDefaults.guidance), 0, 10),
     seed: seedValue,
     seed_mode: String(settings.seed_mode || input.seed_mode || "random"),
     width: clamp(width, 64, MAX_EDGE),
@@ -150,12 +162,14 @@ export function normalizeGenerationRequest(input = {}) {
     negative_prompt: String(input.negative_prompt || "").trim(),
     snapshot_id: input.snapshot_id ?? null,
     quality_toggle: input.quality_toggle !== false,
+    noise_schedule: input.noise_schedule || input.settings?.noise_schedule || null,
     settings: { ...settings, resolution_category: resolutionCategory || null },
     resolution_category: resolutionCategory || null,
     characters,
     img2img,
     references: [],
     count,
+    meta: input.meta && typeof input.meta === "object" ? input.meta : null,
   };
 }
 
@@ -164,6 +178,7 @@ export function requestForSeed(request, seed) {
     ...request,
     settings: { ...request.settings, seed },
     count: 1,
+    meta: request.meta ?? null,
   };
 }
 
@@ -175,6 +190,7 @@ export function createGenerationRecipe(request, seed = request.settings.seed) {
     negative_prompt: request.negative_prompt,
     snapshot_id: request.snapshot_id ?? null,
     quality_toggle: request.quality_toggle,
+    noise_schedule: request.noise_schedule || null,
     settings: { ...request.settings, seed },
     resolution_category: request.resolution_category || null,
     characters: request.characters.map((character) => ({
@@ -190,7 +206,8 @@ export function createGenerationRecipe(request, seed = request.settings.seed) {
     } : null,
     references: [],
     count: 1,
+    meta: request.meta ?? null,
   };
 }
 
-export { DEFAULTS };
+export { DEFAULTS, V5_DEFAULTS, LEGACY_DEFAULTS };

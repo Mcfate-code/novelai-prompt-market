@@ -69,6 +69,11 @@
         <button type="button" class="active" data-nai-mode="txt2img">文生图</button>
         <button type="button" data-nai-mode="img2img">图生图</button>
       </div>
+      <div class="nai-preset-group" role="radiogroup" aria-label="生成预设">
+        <label class="nai-preset-radio"><input type="radio" name="nai-preset" value="website" checked /><span>官网一致（默认）</span></label>
+        <label class="nai-preset-radio"><input type="radio" name="nai-preset" value="high_quality" /><span>高质量 <em>实验</em></span></label>
+        <label class="nai-preset-radio"><input type="radio" name="nai-preset" value="custom" /><span>高级自定义</span></label>
+      </div>
       <section id="nai-img2img-panel" class="nai-img2img-panel" hidden>
         <input id="nai-img2img-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
         <button id="nai-img2img-pick" type="button" class="nai-source-picker">选择基础图</button>
@@ -118,17 +123,51 @@
       <textarea id="nai-prompt" class="nai-prompt" placeholder="1girl, masterpiece, …（也可从购物车填入）"></textarea>
       <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
       <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
+      <div class="nai-quick-toggles">
+        <label class="nai-toggle-item" title="跟随 NovelAI 官网，为最终 Prompt 自动补充质量标签">
+          <input type="checkbox" id="nai-quality-tags" checked /><span>自动质量标签</span>
+        </label>
+        <label class="nai-toggle-item" title="使用 NovelAI 官网 Heavy UC 默认负面提示词">
+          <input type="checkbox" id="nai-heavy-uc" checked /><span>推荐负面提示词</span>
+        </label>
+        <label class="nai-toggle-item" title="Prompt 追加 transparent background，API 使用 straight_alpha">
+          <input type="checkbox" id="nai-transparent" /><span>透明背景</span>
+        </label>
+      </div>
+      <details class="nai-effective-preview">
+        <summary id="nai-effective-toggle"><span>实际发送内容 ▸</span></summary>
+        <div class="nai-effective-body">
+          <div class="nai-effective-row"><span>Effective Prompt</span><pre id="nai-effective-prompt"></pre></div>
+          <div class="nai-effective-row"><span>Effective Negative</span><pre id="nai-effective-negative"></pre></div>
+          <div class="nai-effective-grid">
+            <span>Model</span><strong id="nai-eff-model"></strong>
+            <span>Resolution</span><strong id="nai-eff-resolution"></strong>
+            <span>Sampler</span><strong id="nai-eff-sampler"></strong>
+            <span>Scheduler</span><strong id="nai-eff-scheduler"></strong>
+            <span>Steps</span><strong id="nai-eff-steps"></strong>
+            <span>CFG</span><strong id="nai-eff-cfg"></strong>
+            <span>Seed</span><strong id="nai-eff-seed"></strong>
+          </div>
+        </div>
+      </details>
 
-      <section class="nai-characters">
-        <div class="nai-section-title"><span>Multi-Character</span><button id="nai-character-add" type="button" class="nai-link-btn">添加角色</button></div>
+      <details class="nai-characters" id="nai-characters-section">
+        <summary class="nai-section-title">
+          <span>角色设置 (Multi-Character)</span>
+          <span class="nai-character-count" id="nai-character-count">0</span>
+          <button id="nai-character-add" type="button" class="nai-link-btn">添加角色</button>
+        </summary>
         <div id="nai-character-list" class="nai-character-list"><div class="empty">暂无独立角色</div></div>
-      </section>
+      </details>
 
-      <details class="nai-advanced">
+      <details class="nai-advanced" id="nai-advanced-section">
         <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value">等待同步</span></summary>
         <div class="nai-adv-row nai-adv-ctrl"><span>Sampler</span><select id="nai-sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option><option value="k_dpmpp_2m">DPM++ 2M</option></select></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" value="28" placeholder="NovelAI 默认" /></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Guidance</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="5" placeholder="NovelAI 默认" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Scheduler</span><select id="nai-scheduler"><option value="karras">Karras</option><option value="normal">Normal</option><option value="exponential">Exponential</option></select></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" value="23" placeholder="NovelAI 默认" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Guidance (CFG)</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="7" placeholder="NovelAI 默认" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>CFG Rescale</span><input id="nai-cfg-rescale" type="number" step="0.01" min="0" max="1" value="0" placeholder="0" /></div>
+        <div class="nai-adv-row nai-adv-ctrl"><span>Auto SMEA</span><select id="nai-auto-smea"><option value="false">Off</option><option value="true">On</option></select></div>
         <div class="nai-adv-row nai-adv-ctrl"><span>Quality Tags</span><select id="nai-quality"><option value="on">On</option><option value="off">Off</option></select></div>
       </details>
 
@@ -239,6 +278,11 @@
     <aside class="panel cart">
       <div class="cart-header">
         <h3>Prompt 购物车</h3>
+        <label class="nai-tag-target-pick"><span>添加到</span>
+          <select id="nai-tag-target">
+            <option value="base">Base / Scene</option>
+          </select>
+        </label>
         <div class="cart-actions">
           <button id="import-btn" title="粘贴一段 NovelAI 提示词导入">导入</button>
           <button id="undo-btn">撤销</button>
@@ -393,6 +437,7 @@
     <div id="thumb-preview-tag" class="thumb-preview-tag"></div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/prompt-compiler.js"></script>
+  <script defer src="/static/app.js"></script>
 </body>
 </html>
