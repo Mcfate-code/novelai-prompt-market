@@ -390,3 +390,46 @@ Gallery + Metadata (SQLite: gallery + generation 表)
 | `server/novelai-provider.mjs` | V5 payload 构建（buildV5Parameters 已固化） |
 | `debug/test_prompt_compiler.mjs` | Prompt Compiler 单元测试（14 项） |
 | `debug/test_payload_regression.mjs` | Payload 回归测试（5 项） |
+
+## macOS 启动方式
+
+日常入口 = Dock 中的「标签超市」Web App；后台服务由 launchd（LaunchAgent）管理；旧的手工启动方式已被诊断工具替代。
+
+旧版：`.command → Terminal → nohup → sleep → Browser`
+新版：`launchd → 后台服务常驻`；`Dock Web App → 日常 UI`；`诊断脚本 → 仅故障处理`
+
+```mermaid
+flowchart LR
+    A["macOS Login"] --> B["LaunchAgent"]
+    B --> C["Python Server<br/>127.0.0.1:8123"]
+    D["Dock<br/>标签超市"] --> E["Safari Web App"]
+    E --> C
+    C --> F["Tag / Generate / Gallery"]
+    B --> G["~/Library/Logs/TagSupermarket"]
+    H["Diagnostic Launcher"] -.-> B
+    H -.-> G
+```
+
+### 首次安装
+
+运行 `bash install-launchagent.sh`（会安装 LaunchAgent 并启动服务）。
+
+### 日常使用
+
+点击 Dock 中的「标签超市」Web App（ONE-TIME USER ACTION：Safari 打开 http://127.0.0.1:8123 → 添加到程序坞）；关闭窗口≠停止服务。
+
+### 查看日志
+
+`~/Library/Logs/TagSupermarket/`（stdout.log / stderr.log）
+
+### 重新加载服务
+
+`launchctl unload ~/Library/LaunchAgents/com.tagsupermarket.server.plist && launchctl load ~/Library/LaunchAgents/com.tagsupermarket.server.plist`（或 diagnostic.command 的 r）
+
+### 卸载 LaunchAgent
+
+`launchctl unload ~/Library/LaunchAgents/com.tagsupermarket.server.plist`；删除该 plist 即可；不要删除项目数据/图库/数据库
+
+### iCloud 注意事项
+
+项目位于 iCloud Drive，若开机后 LaunchAgent 启动过早而文件尚未可用，检查日志并按需重新加载；这是已知限制，不是 bug。
