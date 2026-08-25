@@ -319,6 +319,37 @@ class V2BackendTest(unittest.TestCase):
             self.assertEqual(app.do_search(q="blue", limit=999), {"results": []})
             self.assertEqual(search_mock.call_args.kwargs["limit"], 200)
 
+    def test_inbox_seq_contract_skips_same_import(self):
+        """P1：模态导入立即应用后前端把 inboxSeq 推进到响应 seq。
+
+        服务端契约：/api/inbox?since=<seq> 不再下发同一份导入（state=None），
+        而 since 早于当前 seq 时仍会下发 —— 这正是前端双应用的来源，
+        前端修复（doImportFromModal 推进 inboxSeq）后同一份导入不会再次应用。
+        """
+        with app._INBOX_LOCK:
+            saved_seq, saved_state = app._INBOX["seq"], app._INBOX["state"]
+            app._INBOX["seq"], app._INBOX["state"] = 0, None
+        try:
+            first = app.import_prompt(app.ImportRequest(text="Base: 1girl, blue eyes", mode="replace"))
+            self.assertEqual(first["seq"], 1)
+            # 前端尚未推进游标（修复前）：since < seq 会返回 state，pollInbox 以默认 base 目标重复应用
+            pending = app.inbox(since=0)
+            self.assertEqual(pending["seq"], 1)
+            self.assertIsNotNone(pending["state"])
+            # 前端立即应用后 inboxSeq = first["seq"]：同一份导入不再下发
+            skipped = app.inbox(since=first["seq"])
+            self.assertEqual(skipped["seq"], 1)
+            self.assertIsNone(skipped["state"], "same import must not be re-delivered after seq advance")
+            # 新的导入仍然正常下发
+            second = app.import_prompt(app.ImportRequest(text="Base: 2girls", mode="append"))
+            self.assertEqual(second["seq"], 2)
+            next_pending = app.inbox(since=first["seq"])
+            self.assertEqual(next_pending["seq"], 2)
+            self.assertIsNotNone(next_pending["state"], "new import must still be delivered")
+        finally:
+            with app._INBOX_LOCK:
+                app._INBOX["seq"], app._INBOX["state"] = saved_seq, saved_state
+
 
 if __name__ == "__main__":
     unittest.main()

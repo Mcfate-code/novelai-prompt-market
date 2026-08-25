@@ -320,7 +320,15 @@ function addTagToTarget(tag) {
   addEntry(tag);
   if (state.target === "base") {
     const promptEl = $("#nai-prompt");
-    promptEl.value = insertTagIntoString(promptEl.value, tag);
+    if (naiStructuredDraft) {
+      // 结构化模式：只更新 Base 权威状态并重建 displayPrompt（Base + 现有 naiCharacters[]），
+      // 保持 textarea 与 naiStructuredRequest 一致，避免结构化草稿被当作普通文本编译。
+      naiStructuredDraft.basePrompt = insertTagIntoString(naiStructuredDraft.basePrompt, tag);
+      naiStructuredDraft.displayPrompt = naiStructuredDisplayText(naiStructuredDraft.basePrompt, naiCharacters, naiStructuredDraft.globalUc);
+      promptEl.value = naiStructuredDraft.displayPrompt;
+    } else {
+      promptEl.value = insertTagIntoString(promptEl.value, tag);
+    }
     updateNaiPromptMeta();
     if (typeof naiUpdateEffectivePreview === "function") naiUpdateEffectivePreview();
   } else {
@@ -1189,7 +1197,9 @@ function addCharacter() {
   commitPromptChange(); rebuildTargetSelect();
 }
 function removeCharacter(i) {
-  pushHistory(); state.prompt.characters.splice(i, 1);
+  pushHistory();
+  state.target = remapNaiTagTarget(state.target, "remove", i);
+  state.prompt.characters.splice(i, 1);
   if (!state.prompt.characters.length) state.prompt.characters.push({ name: "Character 1", prompt_sections: emptySections(), uc_sections: emptySections() });
   if (state.target.startsWith("char:")) { const m = state.target.match(/^char:(\d+)/); if (m && +m[1] >= state.prompt.characters.length) state.target = "base"; }
   rebuildTargetSelect(); commitPromptChange();
@@ -1578,6 +1588,8 @@ async function doImportFromModal() {
   const target = $("#import-target").value || "base";
   const r = await api("/api/import", { method: "POST", body: JSON.stringify({ text, mode }) });
   applyImported(r.parsed, mode, target);
+  // 立即应用后推进收件箱游标，避免下一轮 pollInbox 再次应用同一份导入（默认 base 目标）。
+  if (r.seq != null) inboxSeq = r.seq;
   closeImportModal();
 }
 
@@ -2692,6 +2704,21 @@ function naiUpdateEffectivePreview() {
   if ($("#nai-eff-steps")) $("#nai-eff-steps").textContent = params.steps;
   if ($("#nai-eff-cfg")) $("#nai-eff-cfg").textContent = params.guidance;
   if ($("#nai-eff-seed")) $("#nai-eff-seed").textContent = seedStr;
+}
+
+// 结构化草稿的 displayPrompt 重建：从更新的 Base + 现有 naiCharacters[] 生成，
+// 与 /api/export 的 structured 输出保持同构的行格式（Base: / Character N: / Character N UC: / Global UC:）。
+// 只重建展示文本，不改写角色的权威数据。
+function naiStructuredDisplayText(basePrompt, characters, globalUc) {
+  const lines = [];
+  if (String(basePrompt || "").trim()) lines.push(`Base: ${String(basePrompt).trim()}`);
+  (characters || []).forEach((c, i) => {
+    const name = `Character ${i + 1}`;
+    if (String(c?.prompt || "").trim()) lines.push(`${name}: ${String(c.prompt).trim()}`);
+    if (String(c?.negative_prompt || "").trim()) lines.push(`${name} UC: ${String(c.negative_prompt).trim()}`);
+  });
+  if (String(globalUc || "").trim()) lines.push(`Global UC: ${String(globalUc).trim()}`);
+  return lines.join("\n");
 }
 
 function naiStructuredRequest(prompt, negativePrompt) {
