@@ -15,6 +15,11 @@
  * - 非结构化 Base / 角色目标行为保持不变
  * - 购物车角色删除前 state.target 重映射：char:1 删 0 / char:2 删 0 / char:0 删 0 / char:1 删 2
  * - 模态导入立即应用后 inboxSeq 推进到响应 seq，同一 seq 不再被 pollInbox 重复应用
+ *
+ * 覆盖（P2 修复：翻译一致性）：
+ * - translateFreeText 读取当前 DOM 并同步 state；防抖窗口内点击翻译的是最新文本
+ * - 请求返回时原文已变化 -> 丢弃译文（不覆盖 Raw、不启用旧译文、use 标志不复活）
+ * - applyImported / applyImportedPreview 追加 free_text 实际改变后 use_free_text_en=false；replace 路径保持
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -63,6 +68,10 @@ const remapNaiTagTarget = loadFunction("remapNaiTagTarget");
 const naiStructuredDisplayText = loadFunction("naiStructuredDisplayText");
 // naiStructuredRequest 的自由变量 naiStructuredDraft 通过函数参数注入
 const naiStructuredRequest = loadFunctionBound("naiStructuredRequest", ["naiStructuredDraft"]);
+
+// ---- P2 翻译一致性纯函数（无自由变量） ----
+const shouldAcceptTranslation = loadFunction("shouldAcceptTranslation");
+const mergeImportedFreeText = loadFunction("mergeImportedFreeText");
 
 // ---- 与 app.js addTagToTarget 的 base 分支逐行一致的纯逻辑模拟（DOM 部分跳过） ----
 function simulateStructuredBaseClick(draft, naiCharacters, tag) {
@@ -246,4 +255,101 @@ test("modal import without seq advance would reapply same import with default ba
   assert.equal(flow.getSeq(), 0, "old code: inboxSeq not advanced");
   flow.pollInbox({ seq: 3, state: { mode: "replace", parsed: importResponse.parsed } });
   assert.deepEqual(flow.applied[1], { mode: "replace", target: "base" }, "old code: poll reapplies with default base target");
+});
+
+// ---- 4. 翻译一致性（P2 修复）----
+
+// 与 app.js translateFreeText 逐行一致的纯逻辑模拟（DOM/api 打桩）
+// currentDomAfter：请求返回时刻 #free-text 的 DOM 值（模拟防抖窗口/请求期间用户继续输入）
+async function simulateTranslateFreeText({ domValue, currentDomAfter, state, translation }) {
+  // app.js: const el = $("#free-text"); const raw = (el?.value ?? state.prompt.free_text).trim();
+  const el = domValue != null ? { value: domValue } : null;
+  const raw = (el?.value ?? state.prompt.free_text).trim();
+  if (!raw) return { accepted: false, reason: "empty", state };
+  // app.js: if (el && el.value !== state.prompt.free_text) { sync + use=false }（freeTextRawSync.cancel() 无 DOM 副作用）
+  if (el && el.value !== state.prompt.free_text) {
+    state.prompt.free_text = el.value;
+    state.prompt.use_free_text_en = false;
+  }
+  const r = { translated: translation }; // await api("/api/translate", ...)
+  // app.js: 仅当当前文本仍等于请求原文才接受译文
+  const current = currentDomAfter != null ? currentDomAfter : (el?.value ?? state.prompt.free_text);
+  if (!shouldAcceptTranslation(raw, current)) return { accepted: false, reason: "changed", state };
+  state.prompt.free_text_en = r.translated || "";
+  state.prompt.use_free_text_en = !!state.prompt.free_text_en;
+  return { accepted: true, state };
+}
+
+// 与 app.js applyImported / applyImportedPreview free_text 分支逐行一致的纯逻辑模拟
+function simulateImportFreeText({ current, incoming, mode, useFreeTextEn }) {
+  const state = { prompt: { free_text: current, use_free_text_en: useFreeTextEn } };
+  // app.js: if (incoming.free_text) { const merged = mergeImportedFreeText(...); if (merged !== ...) { ... } }
+  if (incoming) {
+    const merged = mergeImportedFreeText(state.prompt.free_text, incoming, mode);
+    if (merged !== state.prompt.free_text) {
+      state.prompt.free_text = merged;
+      if (mode !== "replace") state.prompt.use_free_text_en = false;
+    }
+  }
+  return state.prompt;
+}
+
+test("shouldAcceptTranslation only accepts when current text equals requested raw", () => {
+  assert.equal(shouldAcceptTranslation("一只猫", "一只猫"), true);
+  assert.equal(shouldAcceptTranslation("一只猫", "一只猫  "), true, "尾部空白不视为变化");
+  assert.equal(shouldAcceptTranslation("一只猫", "一只狗"), false, "原文已变化则丢弃");
+  assert.equal(shouldAcceptTranslation("", ""), true);
+});
+
+test("mergeImportedFreeText appends with newline, replaces in replace mode", () => {
+  assert.equal(mergeImportedFreeText("一只猫", "在屋顶", "append"), "一只猫\n在屋顶");
+  assert.equal(mergeImportedFreeText("", "在屋顶", "append"), "在屋顶");
+  assert.equal(mergeImportedFreeText("一只猫", "在屋顶", "replace"), "在屋顶");
+  assert.equal(mergeImportedFreeText("一只猫", "", "append"), "一只猫", "空 incoming 不改动当前值");
+});
+
+test("translateFreeText within debounce window translates the latest DOM text, not stale state", async () => {
+  // 用户最后输入后 180ms 内点击：state 仍是旧文本，DOM 是新文本
+  const state = { prompt: { free_text: "旧文本", free_text_en: "Old text", use_free_text_en: true } };
+  const out = await simulateTranslateFreeText({ domValue: "新文本", currentDomAfter: "新文本", state, translation: "New text" });
+  assert.equal(out.accepted, true);
+  assert.equal(state.prompt.free_text, "新文本", "DOM 新文本已同步进 state");
+  assert.equal(state.prompt.free_text_en, "New text", "翻译的是最新文本");
+  assert.equal(state.prompt.use_free_text_en, true, "请求原文未变 -> 译文生效");
+});
+
+test("translateFreeText discards stale result when raw changed during flight", async () => {
+  const state = { prompt: { free_text: "旧文本", free_text_en: "Old text", use_free_text_en: false } };
+  // 请求发出后用户又改了原文
+  const out = await simulateTranslateFreeText({ domValue: "新文本", currentDomAfter: "新文本2", state, translation: "New text" });
+  assert.equal(out.accepted, false);
+  assert.equal(out.reason, "changed");
+  assert.equal(state.prompt.free_text_en, "Old text", "旧译文/响应译文都不得覆盖");
+  assert.equal(state.prompt.use_free_text_en, false, "use 标志不得复活为 true");
+});
+
+test("translateFreeText no-edit re-translate keeps behavior unchanged", async () => {
+  const state = { prompt: { free_text: "一只猫", free_text_en: "Old en", use_free_text_en: true } };
+  const out = await simulateTranslateFreeText({ domValue: "一只猫", state, translation: "A cat" });
+  assert.equal(out.accepted, true);
+  assert.equal(state.prompt.free_text_en, "A cat");
+  assert.equal(state.prompt.use_free_text_en, true);
+});
+
+test("import append actually changing free_text invalidates use_free_text_en; replace keeps behavior", () => {
+  // append：旧译文不得继续作为 effective
+  const appended = simulateImportFreeText({ current: "一只猫", incoming: "在屋顶", mode: "append", useFreeTextEn: true });
+  assert.equal(appended.free_text, "一只猫\n在屋顶");
+  assert.equal(appended.use_free_text_en, false, "append 改变 free_text -> 旧译文失效");
+  // append 时 use 本为 false：保持 false
+  const appended2 = simulateImportFreeText({ current: "一只猫", incoming: "在屋顶", mode: "append", useFreeTextEn: false });
+  assert.equal(appended2.use_free_text_en, false);
+  // replace（非 base 目标替换路径）：free_text 替换，use 标志保持（现有行为）
+  const replaced = simulateImportFreeText({ current: "一只猫", incoming: "在屋顶", mode: "replace", useFreeTextEn: true });
+  assert.equal(replaced.free_text, "在屋顶");
+  assert.equal(replaced.use_free_text_en, true, "replace 路径行为保持");
+  // 空 incoming：不改动
+  const untouched = simulateImportFreeText({ current: "一只猫", incoming: "", mode: "append", useFreeTextEn: true });
+  assert.equal(untouched.free_text, "一只猫");
+  assert.equal(untouched.use_free_text_en, true);
 });

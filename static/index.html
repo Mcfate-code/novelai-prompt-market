@@ -387,6 +387,12 @@
         <p class="setting-help">生成标签例图时使用的默认提示词。{tag} 会被替换为目标标签（自动加双花括号强调），{rating} 替换为 safe / nsfw。必须保留 {tag} 占位符。</p>
       </section>
       <section class="settings-section">
+        <h4>百度翻译</h4>
+        <label class="setting-field"><span>百度翻译 APP ID</span><input id="setting-baidu-appid" type="text" autocomplete="off" placeholder="输入百度翻译 APP ID" /></label>
+        <label class="setting-field"><span>百度翻译密钥</span><input id="setting-baidu-secret" type="password" autocomplete="new-password" placeholder="留空表示保持不变" /></label>
+        <p class="setting-help">凭据仅保存在本机用户设置文件；翻译文本会发送到百度翻译。只有点击翻译按钮才会请求，不会自动上传。</p>
+      </section>
+      <section class="settings-section">
         <h4>自定义标签</h4>
         <p class="setting-help">保存在本地的自定义标签（不在 Danbooru 词库中时使用）。也可在购物车点「＋ 自定义标签」直接添加并加入当前 Prompt。</p>
         <div id="custom-tag-list" class="custom-tag-list"></div>
@@ -414,6 +420,7 @@
       <div class="modal-title">添加自定义标签</div>
       <p class="setting-help">自定义标签会保存到本地词库，之后在搜索中也能直接命中（via：自定义）。标签建议用英文（NovelAI 语法），例如 <code>original character</code>、<code>my_style</code>。</p>
       <label class="setting-field-stack"><span>标签名（必填）</span><input id="custom-tag-name" type="text" autocomplete="off" placeholder="例如：original character, my_style" /></label>
+      <label class="setting-field-stack"><span>中文名（选填）</span><div class="inline-field"><input id="custom-tag-zh" type="text" autocomplete="off" placeholder="可手填或自动翻译" /><button id="custom-tag-translate" type="button">自动翻译</button></div></label>
       <label class="setting-field-stack"><span>备注（选填）</span><input id="custom-tag-note" type="text" autocomplete="off" placeholder="可选，记录用途" /></label>
       <div class="modal-actions">
         <div id="custom-tag-status" class="settings-status"></div>

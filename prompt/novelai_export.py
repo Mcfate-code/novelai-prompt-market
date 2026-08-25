@@ -65,7 +65,10 @@ def export(state: dict, model_id: str | None = None) -> dict:
     overlay = C.load_overlay(model_id)
 
     base = render_section(state.get("base_prompt", []), overlay)
-    free_text = (state.get("free_text") or "").strip()
+    raw_free_text = (state.get("free_text") or "").strip()
+    translated_free_text = (state.get("free_text_en") or "").strip()
+    use_translated = bool(state.get("use_free_text_en")) and bool(translated_free_text)
+    free_text = translated_free_text if use_translated else raw_free_text
     global_uc = render_section(state.get("global_uc", []), overlay)
 
     characters = []
@@ -110,6 +113,9 @@ def export(state: dict, model_id: str | None = None) -> dict:
         "characters": characters,
         "global_uc": global_uc,
         "free_text": free_text,
+        "free_text_raw": raw_free_text,
+        "free_text_en": translated_free_text,
+        "use_free_text_en": use_translated,
         "structured": "\n".join(lines),
         "flat": flat,
         "multi_character": has_characters,
