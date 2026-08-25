@@ -250,6 +250,39 @@ test("honors a disabled quality toggle", () => {
   assert.equal(payload.parameters.qualityToggle, false);
 });
 
+test("uses Light UC preset when uc_preset is light (图库例图专用链路)", () => {
+  // 与 /api/novelai/tag-example 路由相同的原始调用形态（不经 normalizeGenerationRequest）。
+  const payload = provider.buildPayload({
+    prompt: "1girl",
+    negative_prompt: "lowres",
+    settings: { model: "nai-diffusion-5-full" },
+    uc_preset: "light",
+  });
+  assert.equal(payload.parameters.qualityPresetId, "standard");
+  assert.equal(payload.parameters.ucPresetId, "light");
+});
+
+test("keeps Heavy UC preset by default when uc_preset is omitted (普通生成)", () => {
+  const payload = provider.buildPayload({
+    prompt: "1girl",
+    negative_prompt: "lowres",
+    settings: { model: "nai-diffusion-5-full" },
+  });
+  assert.equal(payload.parameters.ucPresetId, "heavy");
+});
+
+test("rejects an unknown uc_preset explicitly", () => {
+  assert.throws(
+    () => provider.buildPayload({
+      prompt: "1girl",
+      negative_prompt: "lowres",
+      settings: { model: "nai-diffusion-5-full" },
+      uc_preset: "ultra",
+    }),
+    (error) => error.code === "INVALID_UC_PRESET" && /不支持/.test(error.message),
+  );
+});
+
 test("probe distinguishes a configured and connected account", async () => {
   const previous = process.env.NOVELAI_API_KEY;
   process.env.NOVELAI_API_KEY = "test-token";

@@ -1,245 +1,218 @@
 # TASK_REVIEW_PACKET.md
 
-> 任务：NovelAI V5 本地提示词标签超市（Prompt Builder）收尾 —— 按《收尾执行说明》完成 Stage 1–4，接入用户预置的受限标签 taxonomy。
-> 位置：`F:\tags\novelai-prompt-builder\`
-> 生成日期：2026-08-24
-
----
-
 ## 1. 任务目标
 
-按《Workbuddy_NovelAI_PromptBuilder_收尾执行说明》把项目从 PARTIAL 收敛为可日常使用的本地 Prompt Builder。
-本轮范围：**Stage 1（统一 Tag API DTO）→ Stage 2（收藏）→ Stage 3（接入受限 taxonomy）→ Stage 4（navigation 折叠）**，
-达到 SUCCESS 判定线；Stage 5–17 属体验增强，不在本轮。
-
-核心约束：数据值与工程逻辑分离——受限 taxonomy 是用户预置的现成数据，模型只负责 schema / 代码 / 校验 / UI，
-不生成、不扩写、不逐条解释、不在任何文档里 dump 全量标签值。
+- 修复 NovelAI 无法连接。
+- 修复标签例图不加载。
+- 合并重复的“收藏 / 最近使用”等导航入口。
+- 参考成熟 NovelAI 面板，改善单一入口、连接状态、错误分类与请求超时。
+- 完成自动测试和桌面/移动端浏览器验收；不触发付费生图。
+- 移除 CDP、NovelAI 网页和网页兼容模块，正式生图统一走 NovelAI 官方 API。
+- 尺寸档位采用官方 Small / Normal / Large 分类，映射为项目固定 API 宽高预设，并按官方批次数量限制生图。
+- 标签例图增加前端确认与 Python/Node 服务端双层 Anlas Gate，未确认不得调用官方生图。
 
 ## 2. 最终状态
 
-**Status: SUCCESS**
+Status: COMPLETE
 
-Stage 1–4 全部完成并通过验收：目录字段 bug 已修、收藏持久化可用、受限 taxonomy 已程序化接入并给出 resolve 统计、
-一级导航折叠（受限标签默认折叠）。38 个单元测试全绿，真实 smoke test 通过。
+用户报告的连接、例图和重复导航均已修复并通过真实本地浏览器验收。付费生图 Gate 不属于本次非付费修复验证，仍维持项目原有 PARTIAL 边界。
 
 ## 3. 输入与依据
 
-- 《NovelAI_V5_本地提示词标签超市_规格与标签库.md》—— 实现规格。
-- 《Workbuddy_NovelAI_PromptBuilder_收尾执行说明_仅工程接入版.md》—— 本轮蓝图（Stage 1–4）。
-- `novelai_prompt_tag_taxonomy_seed.json`（= `data/taxonomy_seed.json`，77 类 / 2836 成员 / 2543 去重）—— 主 taxonomy。
-- `adult_curated_taxonomy_seed.json`（24 分区 / 655 成员 / 583 去重）—— 受限标签 curated taxonomy（本轮新接入，位于项目上级目录）。
-- `data/zh_aliases.json` / `data/zh_characters.json` —— 中文别名与角色名。
-- `data/tags.sqlite`（5.2 万 tag，已含 99.4% 中文）—— 已同步完成的 canonical 词库。
+- `server/server.mjs`
+  用途：确认 Node 面板静态文件路由、NovelAI API、SSE 和兼容层端点。
+- `server/novelai-provider.mjs`
+  用途：确认 Token、代理、官方图片 API 和错误映射。
+- `static/index.html`、`static/app.js`、`static/app.css`
+  用途：定位重复导航、例图加载死锁和连接状态展示。
+- `app.py`
+  用途：确认 FastAPI 标签、例图、图库和设置 API 可用。
+- GitHub 公开项目与 SDK资料
+  用途：确认账户端点已迁移到 `image.novelai.net/user/subscription`，并参考连接状态与错误处理。
 
-## 4. 改动后的架构
+## 4. 原始实现 / 原始工作流
 
-```
-   taxonomy_seed.json（数据分类 77 类）        adult_curated_taxonomy_seed.json（受限 24 分区）
-        │  import_taxonomy                        │  import_restricted（exact_canonical → alias → normalized → unresolved）
-        ▼                                         ▼
-   taxonomy_map                            restricted_taxonomy_map
-        │                                         │
-        └──────────────┬──────────────────────────┘
-                       ▼
-              navigation.json（UI 一级导航，9 组折叠目录）
-                       │  build_catalog
-                       ▼
-                  tag_catalog 表
-                       │
-                       ▼
-        /api/catalog · /api/search · /api/favorites · /api/recent
-                 （统一 DTO：tag / canonical / zh / category / post_count / favorite）
-                       │
-                       ▼
-              原生前端 index.html / app.js（折叠目录树 + 收藏 + 分页）
+```text
+8123 FastAPI：完整标签/例图/图库 UI
+8787 Node：NovelAI API + 半套静态面板
+
+Node /static/app.js -> static/static/app.js -> 404
+Node 未代理 FastAPI 数据接口
+HTML 同时存在顶部、二级栏、侧栏三套导航
+例图 img: loading=lazy + display:none -> 浏览器不加载 -> onload 永不触发
+状态接口只报告 Token 已配置，不验证真实网络/认证
 ```
 
-[KEEP] FastAPI + SQLite + 原生 JS、三层数据底座（canonical / curated taxonomy / model overlay）不变。
-[CHANGE] 目录源从 `tag_catalog.json`（手工）改为 `navigation.json`（一级导航 + 二级引用）。
-[NEW] `restricted_taxonomy_map` 表 + `import_restricted.py` + 统一 DTO `serialize_tag`。
+## 5. 改动后的架构图
 
-## 5. 实际执行过程（Stage 1–4）
+```text
+浏览器 -> 127.0.0.1:8787（统一入口）
+              |
+              +-- [CHANGE] /static/* -> 项目 static/*
+              +-- [KEEP] /api/novelai/*、/events -> Node
+              +-- [CHANGE] V2 数据 API、/gallery/* -> FastAPI 8123
+              +-- [CHANGE] /api/legacy/* -> 旧兼容层
 
-### Stage 1 — 统一 Tag API DTO
-- 做了什么：`db.serialize_tag()` 统一公开 DTO（tag/canonical/zh/category/post_count/favorite），
-  目录 / 搜索 / 收藏 / 最近全部走同一序列化；修复 `resolve_tag` 返回旧键名导致的 4 个测试回归（改为 `tag`/`canonical`）。
-- 为什么：消除 `prompt_tag` vs `tag` 双轨，不再在前端做 `t.tag || t.prompt_tag` 兼容。
-- 结果：目录英文名正常、点击不再加空 tag；新增 `test_catalog_contract.py` 契约测试。
+NovelAI 状态 -> [NEW] image.novelai.net/user/subscription 只读探测
+例图 -> [CHANGE] 图片保留布局、加载前 opacity:0、onload 后显示
+导航 -> [CHANGE] 单一顶部主导航
+```
 
-### Stage 2 — 收藏
-- 做了什么：确认收藏 UI（卡片 ☆ 与购物车分离）与后端 /api/favorites 已就绪；补 `test_favorite_persistence.py`（幂等 / 取消即消失 / 重开仍在 / 与购物车分离）。
-- 结果：收藏持久化可用，收藏与「加入购物车」相互独立。
+## 6. 实际执行过程
 
-### Stage 3 — 接入受限 taxonomy
-- 做了什么：新增 `importer/import_restricted.py`，程序化读取 `adult_curated_taxonomy_seed.json`，
-  按 `exact_canonical → exact_alias → normalized_canonical → unresolved_seed` 逐条 resolve，
-  写入 `restricted_taxonomy_map`（含 status / canonical_name）；异常条目单独标记 `anomalous`。
-- 为什么：curated 与 raw 分开；受限目录必须来自用户预置文件，不用 `LIKE '%kw%'` 自动构造。
-- 结果统计：`categories=24, memberships=655, resolved_canonical=474, resolved_alias=0, unresolved_seed=180, duplicates=0, anomalous=1`。
-  unresolved 保留原始值、不丢弃、不猜。
+### Step 1 - 确认根因
 
-### Stage 4 — navigation 折叠
-- 做了什么：新增 `data/navigation.json`（9 组一级导航 + 二级引用），`build_catalog` 改读 navigation.json；
-  前端 `renderTree` 改为可折叠一级目录，受限标签默认折叠。
-- 为什么：一级导航从 77 类扁平压到 10 个可折叠组；导航与数据分类分离，底层 taxonomy 不重写。
-- 结果：`groups=10, children=107`；受限标签 30 个子目录（6 个主 taxonomy NSFW + 24 个受限分区）默认折叠。
+验证 `8787/static/app.js` 为 404、`8787/app.js` 为 200；确认 HTML 存在三套同类导航；确认 `8123/api/thumbs?tags=1girl` 能返回本地图片路径。
 
-## 6. 关键决策记录
+### Step 2 - 统一入口
+
+修复 Node 的 `/static/*` 映射，并为 FastAPI V2 API、图库文件建立显式白名单代理。把 Node 旧预设和同步端点迁到 `/api/legacy/*`，避免 `/api/presets`、`/api/sync` 同名冲突。
+
+### Step 3 - NovelAI 连接诊断
+
+新增只读账户探测与超时。初始使用旧域名 `api.novelai.net` 返回 400；依据公开 SDK 最新迁移说明改为 `image.novelai.net/user/subscription`。真实本机状态返回 `connected`，代理为 `127.0.0.1:7890`。
+
+### Step 4 - 导航与错误提示
+
+移除二级栏和侧栏重复入口，只保留“标签 / 收藏 / 最近 / 图库 / 生图”。前端区分未配置、服务未启动、网络错误、超时、认证错误、余额不足和限流。
+
+### Step 5 - 修复例图死锁
+
+浏览器实测 API 有路径但 `naturalWidth=0`。定位到 `loading="lazy"` 与 `display:none` 组合导致浏览器不发起图片请求，而代码又等待 `onload` 才显示。改为 `display:block; opacity:0`，加载完成后 `opacity:1`。
+
+## 7. 关键决策记录
 
 | 决策 | 依据 | 最终动作 |
 | --- | --- | --- |
-| 后端统一 DTO，不做前端字段兼容 | 规格明确禁止 `t.tag \|\| t.prompt_tag` | `serialize_tag` 统一序列化，更新测试契约 |
-| 受限 taxonomy 独立表 `restricted_taxonomy_map` | curated 与 raw 分开，需记录 resolve 状态 | 新增表 + 专用 importer，不塞进 taxonomy_map |
-| 受限文件按 config 引用、不复制第二份 | 规格「不复制第二份数据」 | `app_settings.restricted_taxonomy_path = "../adult_curated_taxonomy_seed.json"` |
-| unresolved 保留原始值展示 | 规格「不静默丢弃、不猜、不 LLM 补词」 | COALESCE(t.prompt_tag, m.seed)，可直接加入购物车 |
-| 脏条目（误粘贴的中文说明）标记 anomalous 不进 UI | 不静默修改用户源文件、但不污染 UI | `_is_anomalous` 检测，DB 保留、UI 过滤、报告计数 |
+| 统一使用 8787 | 双入口各自只有半套功能 | Node 代理 FastAPI 数据层 |
+| 使用显式代理白名单 | 避免生图端点误转发并限制攻击面 | 仅列出 V2 API 与图库路径 |
+| 旧兼容端点改 `/api/legacy/*` | 与 V2 `/api/presets`、`/api/sync` 冲突 | 分离命名空间 |
+| 状态探测使用图片域名 | 旧账户域名明确提示迁移 | 改为 image.novelai.net |
+| 不做测试生图 | 会真实消耗 Anlas | 只做只读认证与网络探测 |
 
-## 7. 文件修改记录
+## 8. 文件修改记录
 
 | 文件 | 修改内容 |
 | --- | --- |
-| `db.py` | 新增 `restricted_taxonomy_map` 表；`tag_dict` → `serialize_tag` 统一 DTO（含 favorite） |
-| `search.py` | `resolve_tag`/`search` 走统一 DTO + favorite 标记 |
-| `app.py` | 新增 `restricted_taxonomy` 目录 kind、`_query_restricted_tags`、`_serialize_catalog_rows`；修复 recent 目录 JOIN 缺失；`ensure_seeded` 接入 `import_restricted`；catalog 返回 icon/collapsed |
-| `importer/import_restricted.py` | 新增：受限 taxonomy 程序化 resolve + 统计 |
-| `importer/build_catalog.py` | 改读 `navigation.json`，生成一级导航 + 受限分区子目录 |
-| `data/navigation.json` | 新增：9 组一级导航定义 |
-| `config/app_settings.json` | 新增 `restricted_taxonomy_path` |
-| `static/app.js` | 目录树可折叠（图标 + 折叠状态 + 受限标签默认折叠） |
-| `static/app.css` | 折叠目录样式 |
-| `tests/test_catalog_contract.py` | 新增：DTO 契约 |
-| `tests/test_favorite_persistence.py` | 新增：收藏持久化 |
-| `tests/test_restricted_taxonomy.py` | 新增：受限 taxonomy schema / 解析统计 / 无重复 canonical / unresolved 保留 |
-| `tests/test_alias_resolution.py` | 更新为统一 DTO 键名 |
-| `README.md` | 同步 DTO / 收藏 / navigation / 受限 taxonomy / 解析规则 / 中文策略 / 不做的能力 |
+| `server/server.mjs` | 静态路由、FastAPI 白名单代理、统一入口、健康状态、legacy 路由 |
+| `server/novelai-provider.mjs` | 只读连接探测、正确账户域名、请求超时、错误映射复用 |
+| `server/server-routing.test.mjs` | 新增真实 HTTP 路由集成测试 |
+| `server/novelai-provider.test.mjs` | 新增连接成功和 401 映射测试 |
+| `static/index.html` | 合并为单一主导航 |
+| `static/app.js` | 同源 Node 地址、连接状态和错误提示、legacy 端点 |
+| `static/app.css` | 主导航激活态、例图加载显示修复 |
+| `README.md` | 统一入口和当前验证边界 |
 
-## 8. README 更新
+## 9. README 更新
 
-**README updated: YES** —— 已补充 Tag API DTO、收藏与购物车分离、navigation vs taxonomy 区别、
-受限 taxonomy 接入方式与统计、canonical/alias 解析规则、中文策略、当前明确不做的能力。
-未 dump 受限标签的全量具体值。
+README updated: YES
 
-## 9. 失败与调整
+## 10. 失败与调整
 
-### 失败 1 — 测试回归：resolve_tag 返回旧键名（已修）
-原状况：`serialize_tag` 上线后 `resolve_tag` 返回 `tag`/`canonical`，但 `test_alias_resolution.py` 仍断言
-`danbooru_name`/`prompt_tag`，4 个用例报错。
-调整：更新测试为新 DTO 键名，并新增契约测试锁定「内部字段不泄漏」。
-结果：修复，38 测试全绿。
+### Failure 1
 
-### 失败 2 — navigation.json 引用了带数字前缀的分类名（已修）
-原状况：`taxonomy_map.category_l1` 存的是「人物数量与主体」（无「01 」前缀），navigation.json 误写成「01 人物数量与主体」，
-导致 taxonomy 目录 total=0。
-调整：以脚本 strip 数字前缀并逐条校验 77 个标签名与 DB 一致后回写。
-结果：修复，77 类全部可浏览。
+初始只读探测请求 `api.novelai.net/user/subscription` 返回 HTTP 400，并提示第三方工具迁移到 image URL。查阅当前 SDK 资料后改为 `image.novelai.net/user/subscription`，真实返回 connected。
 
-### 失败 3 — 旧服务占用 8123 端口（已处理）
-原状况：端口被上一会话遗留的旧代码服务占用，新服务 bind 失败。
-调整：定位并停止旧进程，重启新服务。
-结果：处理完成。
+### Failure 2
 
-### 发现（未改用户源文件）— 受限 seed 含 1 条脏数据
-`adult_curated_taxonomy_seed.json` 的「胸部」分区第 36 条是一段 334 字的中文审阅说明（误粘贴），
-非合法 tag。已由 importer 标记为 `anomalous`（保留在 DB、不进 UI、计入统计），未静默修改用户源文件。
-**建议用户在源文件里删除这一行。**
+例图 API 返回成功，但浏览器图片仍为 `naturalWidth=0`。静态图片响应实际为 200，进一步定位为 lazy 图片与 `display:none` 的加载死锁；CSS 修正后图片实际解码。
 
-## 10. 验证记录
+### Failure 3
 
-### Check 1 — 单元测试全绿
-`python -m unittest discover -s tests` → **PASS，38/38**（新增 catalog 契约 / 收藏 / 受限 taxonomy 11 个用例）。
+首选浏览器 CLI 未安装，改用本机已配置的 Edge 自动化通道完成验收；会话已正常关闭。
 
-### Check 2 — 目录 DTO 契约
-`/api/catalog/tax_人物数量与主体/tags` → 返回 `{tag, canonical, zh, category, post_count, favorite}`，无 `prompt_tag`。**PASS**。
+### Failure 4
 
-### Check 3 — 受限 taxonomy 目录
-`/api/catalog/restricted_1/tags`（裸露与脱衣状态）→ total=57，resolved 显示 canonical+中文，
-unresolved 以原始值展示（post_count=0）。**PASS**。
+最终外部送审时 ChatGPT 登录态已过期，只显示登录页；未触碰账号凭据并正常关闭会话。随后启动的独立只读审阅代理超出执行轮次上限，未返回有效结论。因此本包不声称已完成外部审阅，最终结论来自人工代码复核、自动测试和真实浏览器验收。
 
-### Check 4 — 收藏持久化
-POST → GET → DELETE 往返：收藏出现 → 取消即消失。**PASS**。
+### Review hardening
 
-### Check 5 — 搜索 / 解析中文命中
-「蓝眼」→ `blue eyes` / `blue_eyes` / `蓝眼睛`，含 favorite 字段。**PASS**。
+人工复核发现 `proxyToPython()` 直接以 `req.url` 构造目标 URL，普通浏览器请求无异常，但绝对形式 request-target 理论上可能覆盖上游 host。已改为仅提取 pathname 和 search，再以固定 `PYTHON_APP_URL` 构造目标；同时补充请求体转发、非本机 Origin 拦截和绝对形式 URL 不得逃逸的集成测试。另移除已删除侧栏导航遗留的无效 CSS。
 
-### Check 6 — navigation 折叠
-`/api/catalog` 返回 10 组，受限标签 `collapsed=true`、`nsfw=true`、30 个子目录；其余组默认展开。**PASS**。
+## 11. 验证记录
 
-## 11. 关键证据
+### Check 1 - 自动回归
 
-Evidence 1：`/api/catalog` 返回 10 组折叠目录（受限标签 collapsed=true，children=30）。
-Evidence 2：受限 taxonomy 解析统计 `resolved_canonical=474 / unresolved_seed=180 / duplicates=0 / anomalous=1`。
-Evidence 3：目录/搜索/收藏/最近响应均为统一 DTO（无内部字段泄漏），grep 已确认。
-Evidence 4：38 个单元测试 `OK`。
-Evidence 5：recent 目录（原 JOIN 缺失会报错）现已正常返回 total=33。
+目标失败：路由重排破坏既有 V2 或 NovelAI 请求契约。
 
-## 12. 未解决问题（非阻塞）
+实际结果：PASS。Python `86/86`；Node `19/19`；JavaScript/Node 语法与 `git diff --check` 通过。路由集成测试还覆盖 query、POST body、非本机 Origin 拒绝和绝对形式 request-target 固定到 FastAPI 上游；批次测试覆盖 `error_code`、`error_message`、`correlation_id` 持久化，设置测试覆盖未确认例图请求的 Anlas Gate。
 
-1. **受限 seed 有 1 条脏数据**：`adult_curated_taxonomy_seed.json` 的「胸部」分区混入一段中文审阅说明，已标记 anomalous，建议用户清理源文件这一行。
-2. **180 个 unresolved seed**：多为本地 Danbooru 快照未覆盖的 NSFW tag（`erect nipples`、`vagina` 等），
-   已按规格保留原始值并可直接使用；如需提升 resolve 率，需扩展 Danbooru 同步范围（非本轮范围）。
-3. **画师中文 / 自然语言翻译 / 例图**：属 Stage 5–17 体验增强，本轮未做（见原审阅包）。
+### Check 2 - 统一入口
 
-## 13. 与原目标的对应关系
+目标失败：`/static/app.js`、标签 API 或缩略图仍无法通过 8787 访问。
 
-| 原要求（Stage 1–4） | 结果 | 证据 |
+实际结果：PASS。首页和 JS 为 200；`/api/thumbs` 返回路径；缩略图为 `200 image/jpeg`。
+
+### Check 3 - NovelAI 真实只读连接
+
+目标失败：Token 已保存但网络、代理或认证不可用。
+
+实际结果：PASS。状态为 `connected`，网络为 `http://127.0.0.1:7890`。
+
+### Check 4 - 例图端到端
+
+目标失败：DOM 有 URL 但浏览器未解码图片。
+
+实际结果：PASS。搜索 `1girl` 后首批图片 `naturalWidth=151-180`，`opacity=1`，45 张已加载、失败数 0。
+
+### Check 5 - 桌面与移动布局
+
+目标失败：重复导航、横向溢出或移动端错位。
+
+实际结果：PASS。桌面 `scrollWidth=innerWidth=1432`；iPhone 14 `scrollWidth=innerWidth=390`；均只有五个主入口。
+
+### Check 6 - API-only 与 Anlas Gate 冒烟
+
+实际结果：PASS。`/api/status` 返回 `{"mode":"api-only","cdp":"disabled","webCompatibility":false}`；`/api/nai-state` 与 `/api/legacy/presets` 均为 `404`；未携带 `confirm_anlas` 的 `/api/novelai/tag-example` 返回 `428` 与 `ANLAS_CONFIRMATION_REQUIRED`。本轮未调用真实付费生图。
+
+## 12. 关键证据
+
+1. `/api/novelai/status` 返回 `{"ok":true,"configured":true,"state":"connected"...}`。
+2. 浏览器生图视图显示“NovelAI 已连接 · 本机代理”，Generate 可用。
+3. 例图首批 `complete=true` 且 `naturalWidth>0`。
+4. Python 86 项、Node 19 项全部通过。
+5. 验收截图：`outputs/fixed-desktop.png`、`outputs/fixed-mobile.png`。
+
+## 13. 未解决问题
+
+1. 未执行真实付费生图，因此单张/多张付费 Gate、实网 402/429 未在本轮触发。
+2. 当前已切换为官方 API-only：Node 不再等待或连接 Edge/CDP，不依赖 NovelAI 网页页面；正常使用仍需 FastAPI 8123 与 Node 8787（由 `app.py` 自动启动时可复用统一入口）。
+3. 官方文档明确的是 Small/Normal/Large 类别与批次数限制；面板像素值属于本项目对 API `width`/`height` 的固定预设，未将未公开完整枚举冒充官方原文。
+4. Small 预设最多生成 6 张，Normal/Large 预设最多生成 4 张；官方 API 批次在本地串行执行，每次请求固定生成一张。
+5. 标签例图仅在前端明确确认且请求携带 `confirm_anlas: true` 时允许执行；Python 与 Node 直达接口均返回 `428 ANLAS_CONFIRMATION_REQUIRED` 阻断未确认请求，命中已有缓存仍为只读。
+
+## 14. 与原目标的对应关系
+
+| 原要求 | 结果 | 证据 |
 | --- | --- | --- |
-| 统一 Tag API DTO | 完成 | serialize_tag + 契约测试 |
-| 收藏持久化 | 完成 | /api/favorites 往返 + 测试 |
-| 接入受限 taxonomy | 完成 | import_restricted + 解析统计 |
-| navigation 折叠 | 完成 | navigation.json + 折叠目录树 |
-| README 更新 | 完成 | DTO/解析规则/不做的能力 |
+| NovelAI 无法连接 | 完成 | 真实只读状态 connected |
+| 例图不加载 | 完成 | 图片实际解码，naturalWidth > 0 |
+| 收藏/最近出现两行 | 完成 | 只保留单一顶部导航 |
+| 排查其他 bug | 完成 | 修复静态路由、双入口和同名 API 冲突 |
+| 参考成熟项目 | 完成 | 采用连接状态、错误分类、超时、单一入口与当前账户域名 |
 
-## 14. 最终产物
+## 15. 最终产物
 
-- `app.py` / `db.py` / `search.py` —— 后端（统一 DTO + 受限 taxonomy + 修复 recent JOIN）
-- `importer/import_restricted.py` / `build_catalog.py` —— 受限 taxonomy 接入 + navigation 目录
-- `data/navigation.json` —— UI 一级导航
-- `static/*` —— 折叠目录树
-- `tests/*` —— 38 用例（新增 catalog 契约 / 收藏 / 受限 taxonomy）
-- `README.md`、本审阅包
-
----
+- 修复后的项目代码。
+- `server/server-routing.test.mjs` 路由回归测试。
+- `outputs/fixed-desktop.png`、`outputs/fixed-mobile.png`。
+- 更新后的 `README.md` 和本审阅包。
+- 当前统一入口：`http://127.0.0.1:8787`。
 
 # EXTERNAL REVIEW REQUEST
 
-请审阅者重点检查：
-
-1. 统一 DTO 方案（后端 `serialize_tag` + 更新测试契约）是否比「前端字段兼容」更利于长期维护；
-2. 受限 taxonomy 的 resolve 顺序与 unresolved 保留策略是否符合「不猜、不丢弃」；
-3. `navigation.json` 的 9 组一级导航划分是否合理（77 类 → 人物/服装/镜头/场景/风格/道具/受限/NovelAI 的映射）；
-4. 脏数据（anomalous）处理方式（DB 保留 + UI 过滤 + 报告）是否恰当，是否应直接清理源文件；
-5. 是否有更小、更直接的实现。
-
-请勿因为「做法少见」判定错误；只有确实影响真实使用场景时才作为问题报告。
-
----
+请重点检查代理白名单与路由优先级、只读 NovelAI 探针是否可能消费 Anlas、官方 API-only 路由是否完整、尺寸类别与批次数限制是否一致，以及例图 lazy/display 修复是否覆盖真实失败模式。若无实质问题请明确说明。
 
 ===== REVIEW HANDOFF =====
 
-任务：NovelAI V5 本地 Prompt Builder 收尾，完成 Stage 1–4（统一 DTO / 收藏 / 受限 taxonomy / navigation 折叠）。
+任务：修复 NovelAI 连接、例图不加载、重复导航和双入口问题。
 
-最终状态：SUCCESS —— 38 测试全绿，目录/搜索/收藏/最近统一 DTO，受限 taxonomy 程序化接入（24 分区 / 474 resolved / 180 unresolved 保留），10 组折叠导航。
+最终状态：COMPLETE（本次报告故障均修复；未执行付费生图）。
 
-关键改动：
-1. `db.serialize_tag` 统一 DTO（tag/canonical/zh/category/post_count/favorite），更新测试契约。
-2. 新增 `import_restricted.py` + `restricted_taxonomy_map` 表，程序化 resolve 受限 taxonomy。
-3. 新增 `navigation.json`（9 组一级导航），前端目录树可折叠、受限标签默认折叠。
-4. 修复 recent 目录 JOIN 缺失、resolve_tag 测试回归、navigation 标签名前缀不匹配。
+关键改动：8787 统一入口；FastAPI 白名单代理；静态路由修复；image.novelai.net 只读连接探测；单一导航；例图加载死锁修复；官方 API-only；Small/Normal/Large 尺寸档位；失败批次错误详情持久化。
 
-关键证据：
-1. 38 单元测试 OK；目录/搜索/收藏/最近响应统一 DTO（无内部字段泄漏）。
-2. 受限 taxonomy 统计：categories=24 / memberships=655 / resolved_canonical=474 / unresolved_seed=180 / duplicates=0 / anomalous=1。
-3. smoke test：中文「蓝眼」→ blue eyes；收藏往返正常；recent 目录 total=33。
+关键证据：NovelAI 状态接口可用；例图 naturalWidth>0；尺寸档位不再依赖网页状态；API-only 状态返回 `cdp: disabled`；Python 86/86、Node 19/19 回归测试通过；桌面布局无横向溢出；未确认例图请求被 428 Anlas Gate 阻断。
 
-发生过的失败（均已修）：resolve_tag 测试回归、navigation 标签名数字前缀不匹配、旧服务占用 8123。
-
-未解决问题（非阻塞）：
-1. 受限 seed 含 1 条误粘贴的中文说明（已标记 anomalous，建议清理源文件）。
-2. 180 个 unresolved seed 属本地快照未覆盖的 NSFW tag，已保留原始值。
-3. 画师中文 / 自然语言翻译 / 例图属 Stage 5–17，本轮未做。
-
-修改文件：db.py / search.py / app.py / importer/* / data/navigation.json / config/app_settings.json / static/* / tests/* / README.md
+未解决问题：未执行付费单张/六张和实网 402/429 Gate；正式生图仍需用户在界面明确发起并承担 Anlas 消耗。
 
 README：UPDATED
-
-请重点审阅：DTO 方案、受限 resolve 策略、navigation 分组、anomalous 处理、以及是否有更该优先修的问题。

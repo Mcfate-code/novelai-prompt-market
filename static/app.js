@@ -839,10 +839,29 @@ function applyThumbs(seq = thumbLoadSeq) {
     };
     img.onerror = () => {
       if (seq !== thumbLoadSeq) return;
+      // 失效缩略图不能把容器永久折叠：清除坏 URL，优先回退到 large，
+      // 并只允许一次 fallback，之后交给 loadThumbs 的有限轮询重新获取。
+      const fallback = largeMap[tag] && largeMap[tag] !== url ? largeMap[tag] : "";
+      if (fallback && !img.dataset.thumbFallback) {
+        img.dataset.thumbFallback = "1";
+        delete img.dataset.srcApplied;
+        img.classList.remove("loaded");
+        wrap?.classList.remove("failed");
+        img.src = fallback;
+        return;
+      }
+      delete img.dataset.srcApplied;
+      delete img.dataset.thumbFallback;
+      if (thumbMap[tag] === url) delete thumbMap[tag];
+      if (largeMap[tag] === url) delete largeMap[tag];
       thumbLoadState?.failed.add(tag);
-      wrap?.classList.add("failed");
+      wrap?.classList.remove("failed");
       updateThumbProgress();
+      // 让后端清理失效行并重新抓取一次；attempt=5 到达现有重试上限，
+      // 避免损坏远端资源造成无限请求循环。
+      if (tag && seq === thumbLoadSeq) setTimeout(() => loadThumbs([tag], 5, seq), 250);
     };
+    delete img.dataset.thumbFallback;
     img.src = url;
   });
 }
@@ -1912,6 +1931,9 @@ $("#gallery-open-cleanup").addEventListener("click", openGalleryCleanupFolder);
 let activeGalleryDir = null;
 let galleryItems = [];
 let selectedGalleryFiles = new Set();
+let galleryReviewMode = false;
+let galleryReviewIndex = -1;
+let galleryPreviewSeq = 0; // showGalleryPreview 请求序列号，防止异步回退乱序覆盖较新的选中项
 const GALLERY_ZOOM_KEY = "tags-market-gallery-zoom";
 const GALLERY_ZOOM_LEVELS = ["small", "medium", "large"];
 let galleryZoom = GALLERY_ZOOM_LEVELS.includes(localStorage.getItem(GALLERY_ZOOM_KEY)) ? localStorage.getItem(GALLERY_ZOOM_KEY) : "medium";
@@ -1938,6 +1960,30 @@ function updateGallerySelectionUi() {
   const total = galleryItems.length;
   const selected = galleryItems.filter((it) => selectedGalleryFiles.has(galleryFileKey(activeGalleryDir, it.file_name))).length;
   $("#gallery-select-all").textContent = total && selected === total ? "取消全选" : "全选";
+}
+function setGalleryReviewMode(enabled) {
+  galleryReviewMode = enabled;
+  const layout = $("#gallery-view");
+  const button = $("#gallery-review-btn");
+  layout.classList.toggle("review-mode", enabled);
+  button.setAttribute("aria-pressed", String(enabled));
+  button.textContent = enabled ? "退出审阅" : "审阅模式";
+  if (!enabled) {
+    galleryReviewIndex = -1;
+    document.querySelectorAll(".gallery-card.review-selected").forEach((el) => el.classList.remove("review-selected"));
+  } else if (galleryItems.length && galleryReviewIndex < 0) {
+    selectGalleryReviewItem(0);
+  }
+}
+function selectGalleryReviewItem(index) {
+  if (!galleryItems.length) return;
+  galleryReviewIndex = Math.max(0, Math.min(galleryItems.length - 1, index));
+  const item = galleryItems[galleryReviewIndex];
+  document.querySelectorAll(".gallery-card").forEach((card) =>
+    card.classList.toggle("review-selected", card.dataset.file === item.file_name)
+  );
+  showGalleryPreview(activeGalleryDir, item.file_name);
+  document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`)?.scrollIntoView({ block: "nearest" });
 }
 function toggleGalleryFile(dirName, fileName, checked) {
   const key = galleryFileKey(dirName, fileName);
@@ -2020,7 +2066,7 @@ async function openGalleryDir(dirName) {
     galleryItems = data.items;
     const grid = $("#gallery-grid");
     applyGalleryZoom();
-    if (!data.items.length) { grid.innerHTML = `<div class="empty">该目录暂无图片</div>`; updateGallerySelectionUi(); pendingScroll = null; return; }
+    if (!data.items.length) { galleryReviewIndex = -1; grid.innerHTML = `<div class="empty">该目录暂无图片</div>`; updateGallerySelectionUi(); pendingScroll = null; return; }
     grid.innerHTML = data.items.map((it) =>
       `<div class="gallery-card ${it.favorite ? "fav" : ""}" data-file="${esc(it.file_name)}">` +
       `<input class="gallery-select" type="checkbox" aria-label="选择图片" ${selectedGalleryFiles.has(galleryFileKey(dirName, it.file_name)) ? "checked" : ""} />` +
@@ -2046,6 +2092,7 @@ async function openGalleryDir(dirName) {
       card.addEventListener("click", (e) => {
         if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select") || e.target.closest(".gallery-action-btn")) return;
         showGalleryPreview(dirName, card.dataset.file);
+        if (galleryReviewMode) selectGalleryReviewItem(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
       });
       card.querySelector(".gallery-fav").addEventListener("click", (e) => {
         e.stopPropagation();
@@ -2081,14 +2128,33 @@ async function openGalleryDir(dirName) {
         });
       });
     });
+    if (galleryReviewMode) selectGalleryReviewItem(Math.max(0, galleryReviewIndex));
   } catch (e) { toast("目录加载失败：" + e.message); }
 }
 
+$("#gallery-review-btn").addEventListener("click", () => setGalleryReviewMode(!galleryReviewMode));
+document.addEventListener("keydown", (event) => {
+  if (!galleryReviewMode || state.view !== "gallery") return;
+  const target = event.target;
+  if (target.matches("input, textarea, select, button, [contenteditable='true']")) return;
+  if (event.key === "Escape") { setGalleryReviewMode(false); return; }
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  selectGalleryReviewItem(galleryReviewIndex + (event.key === "ArrowRight" ? 1 : -1));
+});
+
 async function showGalleryPreview(dirName, fileName) {
+  const seq = ++galleryPreviewSeq;
+  let it = activeGalleryDir === dirName ? galleryItems.find((x) => x.file_name === fileName) : null;
+  if (!it) {
+    try {
+      const data = await api(`/api/gallery/${encodeURIComponent(dirName)}`);
+      if (seq !== galleryPreviewSeq) return; // 过期响应，丢弃，避免覆盖较新的选中项
+      it = data.items.find((x) => x.file_name === fileName);
+      if (!it) return;
+    } catch (e) { toast("预览失败：" + e.message); return; }
+  }
   try {
-    const data = await api(`/api/gallery/${encodeURIComponent(dirName)}`);
-    const it = data.items.find((x) => x.file_name === fileName);
-    if (!it) return;
     const body = $("#gallery-preview-body");
     const imgPath = `/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}`;
     body.innerHTML =
@@ -2422,18 +2488,44 @@ function naiApplyPresetMode(mode) {
 }
 
 // ---- P0: Effective Preview ----
+// 编译参数（Preview 与实际发送共用，避免分叉）。
+// 返回 { result, params }，result 为 compileGenerationPrompts 的详细编译结果。
+function naiCompileGeneration(rawPrompt, rawNegative) {
+  const params = naiCollectParameters();
+  const { compileGenerationPrompts } = window.PromptCompiler;
+  const result = compileGenerationPrompts(rawPrompt, rawNegative, params.model, {
+    qualityTags: naiQualityTagsEnabled,
+    heavyUc: naiHeavyUcEnabled,
+    transparentBackground: naiTransparentBg,
+  });
+  return { result, params };
+}
+
 function naiUpdateEffectivePreview() {
   const rawPrompt = $("#nai-prompt").value;
   const rawNeg = $("#nai-neg").value;
-  const { compilePrompt, compileNegative } = window.PromptCompiler;
-  const effectivePrompt = compilePrompt(rawPrompt, { qualityTags: naiQualityTagsEnabled, transparentBackground: naiTransparentBg });
-  const effectiveNegative = compileNegative(rawNeg, { heavyUc: naiHeavyUcEnabled });
-  const params = naiCollectParameters();
+  // P0: 与 naiGenerate() 共用同一结构化解析路径，避免 Preview 与实际 Generate 分叉。
+  // 多角色草稿下 textarea 里是结构化 displayPrompt，需先解析回 basePrompt 再编译。
+  const structured = naiStructuredRequest(rawPrompt, rawNeg);
+  const compilePromptInput = structured?.prompt ?? rawPrompt;
+  const compileNegativeInput = structured?.negative_prompt ?? rawNeg;
+  const { result, params } = naiCompileGeneration(compilePromptInput, compileNegativeInput);
   const preset = NAI_RESOLUTION_PRESETS[params.resolution_category];
   const resolutionStr = preset ? `${preset.width}×${preset.height}` : `${params.width}×${params.height}`;
   const seedStr = params.seed_mode === "random" ? "Random" : String(params.seed ?? "-");
-  if ($("#nai-effective-prompt")) $("#nai-effective-prompt").textContent = effectivePrompt || "(空)";
-  if ($("#nai-effective-negative")) $("#nai-effective-negative").textContent = effectiveNegative || "(空)";
+  if ($("#nai-effective-prompt")) $("#nai-effective-prompt").textContent = result.effectivePositive || "(空)";
+  if ($("#nai-effective-negative")) $("#nai-effective-negative").textContent = result.effectiveNegative || "(空)";
+  if ($("#nai-source-positive-user")) $("#nai-source-positive-user").textContent = result.userPositive.length ? result.userPositive.join(", ") : "(无)";
+  if ($("#nai-source-positive-auto")) $("#nai-source-positive-auto").textContent = result.autoPositive.length ? result.autoPositive.join(", ") : "(无)";
+  if ($("#nai-source-negative-user")) $("#nai-source-negative-user").textContent = result.userNegative.length ? result.userNegative.join(", ") : "(无)";
+  if ($("#nai-source-negative-auto")) $("#nai-source-negative-auto").textContent = result.autoNegative.length ? result.autoNegative.join(", ") : "(无)";
+  if ($("#nai-suppressed-auto")) {
+    // WEBUI PARITY：跨极性冲突仅 warning，不删除任何 token。
+    // 优先使用 crossPolarityWarnings（含用户两侧同 token 冲突）；为空则回退显示 userCrossPolarityConflicts。
+    const warnings = result.crossPolarityWarnings ?? [...(result.suppressedAuto?.positive || []), ...(result.suppressedAuto?.negative || []), ...(result.userCrossPolarityConflicts || [])];
+    $("#nai-suppressed-auto").textContent = warnings.length ? warnings.join(", ") : "(无)";
+  }
+  if ($("#nai-user-conflicts")) $("#nai-user-conflicts").textContent = result.userCrossPolarityConflicts.length ? result.userCrossPolarityConflicts.join(", ") : "(无)";
   if ($("#nai-eff-model")) $("#nai-eff-model").textContent = params.model;
   if ($("#nai-eff-resolution")) $("#nai-eff-resolution").textContent = resolutionStr;
   if ($("#nai-eff-sampler")) $("#nai-eff-sampler").textContent = params.sampler;
@@ -2578,12 +2670,12 @@ async function naiGenerate() {
   if (!naiApiConfigured) { toast("未配置 NovelAI 官方 API Token，已阻止生成"); return; }
   const parameters = naiCollectParameters();
   const structured = naiStructuredRequest(prompt, negativePrompt);
-  // P0: Apply Prompt Compiler to get effective prompt/negative
-  const { compilePrompt, compileNegative } = window.PromptCompiler;
-  const rawGenerationPrompt = structured?.prompt || prompt.trim();
+  // P0: 使用与 Preview 相同的详细编译结果（shared compiled result），避免分叉
+  const rawGenerationPrompt = structured?.prompt ?? prompt.trim();
   const rawGenerationNegative = structured?.negative_prompt ?? negativePrompt;
-  const generationPrompt = compilePrompt(rawGenerationPrompt, { qualityTags: naiQualityTagsEnabled, transparentBackground: naiTransparentBg });
-  const generationNegative = compileNegative(rawGenerationNegative, { heavyUc: naiHeavyUcEnabled });
+  const compiled = naiCompileGeneration(rawGenerationPrompt, rawGenerationNegative).result;
+  const generationPrompt = compiled.effectivePositive;
+  const generationNegative = compiled.effectiveNegative;
   const editorCharacters = naiCollectCharacters();
   const characters = editorCharacters.length ? editorCharacters : (structured?.characters || []);
   const maxCount = naiBatchMaxCount();
@@ -2613,6 +2705,15 @@ async function naiGenerate() {
       effectivePrompt: generationPrompt,
       rawNegative: $("#nai-neg").value,
       effectiveNegative: generationNegative,
+      promptSources: {
+        userPositive: compiled.userPositive,
+        autoPositive: compiled.autoPositive,
+        userNegative: compiled.userNegative,
+        autoNegative: compiled.autoNegative,
+        suppressedAuto: compiled.suppressedAuto,
+        crossPolarityWarnings: compiled.crossPolarityWarnings,
+        userCrossPolarityConflicts: compiled.userCrossPolarityConflicts,
+      },
       model: parameters.model,
       width: parameters.width,
       height: parameters.height,

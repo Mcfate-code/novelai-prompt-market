@@ -374,7 +374,23 @@ function isStructuredPromptModel(model) {
  * Called only for structured models (nai-diffusion-4/5-*).
  * Merges into the existing parameters object in-place.
  */
-function buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords) {
+// UC presets currently used by this provider. Only `light` (图库例图专用链路) and
+// `heavy` (普通生成默认) are supported here. Unknown values are rejected explicitly
+// rather than silently mapped to another preset.
+const ALLOWED_UC_PRESETS = Object.freeze(["light", "heavy"]);
+
+function normalizeUcPreset(value) {
+  if (value === undefined || value === null || value === "") return "heavy";
+  const preset = String(value);
+  if (!ALLOWED_UC_PRESETS.includes(preset)) {
+    const error = new Error(`不支持的 UC preset：${preset}（仅支持 light / heavy）`);
+    error.code = "INVALID_UC_PRESET";
+    throw error;
+  }
+  return preset;
+}
+
+function buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords, ucPreset) {
   // Structured prompt fields (already partially set by buildPayload for V4/V5)
   parameters.prompt = null;
   parameters.params_version = model.startsWith("nai-diffusion-5-") ? 4 : 3;
@@ -413,7 +429,8 @@ function buildV5Parameters(parameters, model, prompt, negativePrompt, characters
 
   // Quality & UC presets
   parameters.qualityPresetId = "standard";
-  parameters.ucPresetId = "heavy";
+  // 图库例图专用链路显式传 `light`，普通生成未传则保持 `heavy` 现状。
+  parameters.ucPresetId = ucPreset || "heavy";
 
   // Tag hints
   parameters.tag_hint_qt = 1;
@@ -508,6 +525,7 @@ export class NovelAIProvider {
     const negativePrompt = String(request.negative_prompt || "");
     const characters = Array.isArray(request.characters) ? request.characters : [];
     const useCoords = characters.some((character) => !!character.position);
+    const ucPreset = normalizeUcPreset(request.uc_preset);
     const parameters = {
       width: settings.width ?? 832,
       height: settings.height ?? 1216,
@@ -523,7 +541,7 @@ export class NovelAIProvider {
     };
 
     if (isStructuredPromptModel(model)) {
-      buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords);
+      buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords, ucPreset);
     }
 
     let action = "generate";

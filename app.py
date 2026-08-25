@@ -311,6 +311,20 @@ def _enforce_cache_limit(protected: set[str] | None = None) -> None:
             break
 
 
+def _valid_cached_thumb_url(url: str) -> bool:
+    """Only expose non-empty local cache files; stale DB rows must be refetched."""
+    if not url or not url.startswith("/static/thumbs/"):
+        return False
+    name = url.rsplit("/", 1)[-1]
+    if not name or Path(name).name != name:
+        return False
+    path = THUMB_DIR / name
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _guess_img_ext(url: str) -> str:
     """从远端 URL 推断图片扩展名（默认 .jpg）。"""
     path = url.split("?")[0].lower().rstrip("/")
@@ -1224,7 +1238,20 @@ def thumbs(tags: str = ""):
     finally:
         conn.close()
     cached = {r["tag_name"]: (r["thumb_url"], r["thumb_large_url"]) for r in rows}
-    missing = [n for n in names if n not in cached or not (cached.get(n) or ("", ""))[0] or not (cached.get(n) or ("", ""))[1]]
+    stale = [n for n in names if n in cached and (
+        not _valid_cached_thumb_url(cached[n][0]) or
+        (cached[n][1] and not _valid_cached_thumb_url(cached[n][1]))
+    )]
+    if stale:
+        conn = _conn()
+        try:
+            conn.executemany("DELETE FROM tag_thumbs WHERE tag_name=?", ((n,) for n in stale))
+            conn.commit()
+        finally:
+            conn.close()
+        for n in stale:
+            cached.pop(n, None)
+    missing = [n for n in names if n not in cached]
     if missing:
         THUMB_DIR.mkdir(parents=True, exist_ok=True)
         ex = getattr(app.state, "thumb_executor", None)
@@ -2343,7 +2370,7 @@ def import_preview(req: ImportPreviewRequest):
                 status = "exact" if hit else None
                 if not hit:
                     resolved = search.resolve_tag(conn, tag)
-                    if resolved and resolved.get("via") not in {"canonical_prefix", "alias_prefix"}:
+                    if resolved and resolved.get("via") not in {"canonical_prefix", "alias_prefix", "user_tags"}:
                         hit, status = resolved, "normalized"
                 candidates = []
                 if custom and not hit:

@@ -63,7 +63,7 @@
       <div class="nai-section-title">Generation</div>
       <div id="nai-api-status" class="nai-live"><span class="nai-live-dot"></span><span>正在检查官方 API…</span></div>
       <label class="nai-label">Model</label>
-      <select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 Full</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 Curated</option></select>
+      <select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 Full</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 Curated</option><option value="nai-diffusion-4-5-full">NAI Diffusion V4.5 Full</option><option value="nai-diffusion-4-full">NAI Diffusion V4 Full</option></select>
       <div class="nai-current-line"><span>通道</span><strong id="nai-mode">官方 API</strong></div>
       <div class="nai-mode-switch" role="group" aria-label="生成模式">
         <button type="button" class="active" data-nai-mode="txt2img">文生图</button>
@@ -138,7 +138,13 @@
         <summary id="nai-effective-toggle"><span>实际发送内容 ▸</span></summary>
         <div class="nai-effective-body">
           <div class="nai-effective-row"><span>Effective Prompt</span><pre id="nai-effective-prompt"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>Positive · User</span><pre id="nai-source-positive-user"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>Positive · Auto</span><pre id="nai-source-positive-auto"></pre></div>
           <div class="nai-effective-row"><span>Effective Negative</span><pre id="nai-effective-negative"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>Negative · User</span><pre id="nai-source-negative-user"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>Negative · Auto</span><pre id="nai-source-negative-auto"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>Cross-polarity conflicts (warning, not removed)</span><pre id="nai-suppressed-auto"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>User cross-polarity conflicts</span><pre id="nai-user-conflicts"></pre></div>
           <div class="nai-effective-grid">
             <span>Model</span><strong id="nai-eff-model"></strong>
             <span>Resolution</span><strong id="nai-eff-resolution"></strong>
@@ -224,6 +230,7 @@
           </div>
           <button id="gallery-select-all" class="ghost" type="button">全选</button>
           <button id="gallery-cleanup-btn" class="ghost danger-action" type="button" disabled>移入待清理</button>
+          <button id="gallery-review-btn" class="ghost" type="button" aria-pressed="false">审阅模式</button>
           <button id="gallery-import-btn" class="primary">导入图包</button>
           <button id="gallery-del-btn" class="ghost" style="display:none">删除该目录</button>
         </div>
@@ -231,7 +238,7 @@
       <div id="gallery-selection-status" class="gallery-selection-status" aria-live="polite"></div>
       <div id="gallery-grid" class="gallery-grid gallery-grid-medium"></div>
     </section>
-    <aside class="panel gallery-preview">
+    <aside id="gallery-preview-panel" class="panel gallery-preview">
       <h3>预览</h3>
       <div id="gallery-preview-body" class="gallery-preview-body">
         <div class="empty">点击图片查看大图与提示词</div>

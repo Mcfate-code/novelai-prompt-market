@@ -278,6 +278,8 @@ const server = createServer((req, res) => {
               sampler: "k_euler_ancestral",
             },
             quality_toggle: true,
+            // 图库例图专用链路使用 Light UC preset；普通生成走 /api/novelai/generate，不传此字段保持 heavy。
+            uc_preset: "light",
           });
           const image = result.images[0];
           res.writeHead(200, { "Content-Type": "application/json" });

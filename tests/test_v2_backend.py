@@ -76,6 +76,38 @@ class V2BackendTest(unittest.TestCase):
         self.assertIn("别名", alias["match_reason"])
         conn.close()
 
+    def test_search_recalls_user_tags_and_resolves(self):
+        self.insert_tags()
+        conn = self.conn()
+        conn.execute("INSERT INTO user_tags VALUES ('my custom tag', '', 'now')")
+        conn.commit()
+        # 完整 / 子串召回
+        full = search.search(conn, "my custom tag")
+        self.assertTrue(any(r["tag"] == "my custom tag" and r["via"] == "user_tags" for r in full))
+        sub = search.search(conn, "my custom")
+        self.assertTrue(any(r["tag"] == "my custom tag" and r["via"] == "user_tags" for r in sub))
+        # 前缀召回
+        pre = search.search(conn, "my cust")
+        self.assertTrue(any(r["tag"] == "my custom tag" and r["via"] == "user_tags" for r in pre))
+        # resolve
+        resolved = search.resolve_tag(conn, "my custom tag")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["tag"], "my custom tag")
+        self.assertEqual(resolved["via"], "user_tags")
+        self.assertEqual(resolved["canonical"], "my_custom_tag")
+        conn.close()
+
+    def test_search_user_tag_does_not_override_builtin(self):
+        self.insert_tags()
+        conn = self.conn()
+        # 与内置标签 blue eyes 同名的自定义标签：内置优先，不重复
+        conn.execute("INSERT INTO user_tags VALUES ('blue eyes', '', 'now')")
+        conn.commit()
+        results = search.search(conn, "blue eyes")
+        self.assertEqual(len([r for r in results if r["tag"] == "blue eyes"]), 1)
+        self.assertNotEqual(results[0].get("via"), "user_tags")
+        conn.close()
+
     def test_classification_override(self):
         self.insert_tags()
         definitions = app.prompt_section_list()["sections"]

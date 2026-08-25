@@ -187,6 +187,24 @@ def resolve_tag(conn: sqlite3.Connection, query: str) -> dict | None:
     ).fetchone()
     if row:
         return db.tag_dict(row, favorite=row["prompt_tag"] in favs)
+    # 6) 自定义标签（user_tags）：精确或前缀命中。
+    row = conn.execute(
+        "SELECT tag_name FROM user_tags "
+        "WHERE lower(tag_name)=? OR lower(tag_name) LIKE ? ESCAPE '\\' "
+        "ORDER BY length(tag_name) ASC LIMIT 1",
+        (q, f"{_like_escape(q)}%"),
+    ).fetchone()
+    if row:
+        tag_name = row["tag_name"]
+        return {
+            "tag": tag_name,
+            "canonical": db.underscore(tag_name),
+            "zh": "",
+            "category": 0,
+            "post_count": 0,
+            "favorite": tag_name in favs,
+            "via": "user_tags",
+        }
     return None
 
 
@@ -294,6 +312,35 @@ def _search_candidates(
         canonical = row["danbooru_name"]
         rows.setdefault(canonical, row)
         aliases.setdefault(canonical, []).append(row["matched_alias"])
+
+    # 自定义标签召回（user_tags）：不受 category / deprecated 过滤（自定义标签无分类/废弃元数据）。
+    # 条件 = 整体子串 或 逐 token（AND）命中，交由 match_evidence 做最终匹配判定。
+    user_conditions = ["lower(tag_name) LIKE ? ESCAPE '\\'"]
+    user_args: list = [f"%{_like_escape(raw)}%"]
+    if tokens:
+        user_conditions.append(
+            "(" + " AND ".join(["lower(tag_name) LIKE ? ESCAPE '\\'"] * len(tokens)) + ")"
+        )
+        user_args.extend(f"%{_like_escape(token)}%" for token in tokens)
+    for row in conn.execute(
+        "SELECT tag_name, note, created_at FROM user_tags "
+        f"WHERE ({' OR '.join(user_conditions)}) LIMIT ?",
+        (*user_args, candidate_limit),
+    ):
+        tag_name = row["tag_name"]
+        key = db.underscore(tag_name)
+        if key in rows:
+            continue  # 与内置标签同名时内置优先，避免重复/覆盖
+        rows[key] = {
+            "prompt_tag": tag_name,
+            "danbooru_name": key,
+            "category": 0,
+            "post_count": 0,
+            "is_deprecated": 0,
+            "zh_name": "",
+            "use_count": 0,
+            "via": "user_tags",
+        }
 
     # 没有文本召回时，以有限热门集合支持拼写模糊匹配，避免扫描整个词库。
     if len(rows) < limit:
