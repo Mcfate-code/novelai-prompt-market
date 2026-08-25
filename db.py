@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS tags (
     zh_name TEXT,
     ja_name TEXT,
     ko_name TEXT,
+    pinyin TEXT,
+    pinyin_initials TEXT,
     source TEXT NOT NULL DEFAULT 'danbooru',
     created_at TEXT,
     updated_at TEXT,
@@ -142,6 +144,7 @@ CREATE INDEX IF NOT EXISTS idx_tag_novelai_examples_status ON tag_novelai_exampl
 CREATE TABLE IF NOT EXISTS user_tags (
     tag_name TEXT PRIMARY KEY,
     note TEXT NOT NULL DEFAULT '',
+    zh TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -255,6 +258,11 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute(
                 "ALTER TABLE tag_thumbs ADD COLUMN thumb_large_url TEXT NOT NULL DEFAULT ''"
             )
+        tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tags)")}
+        if tcols and "pinyin" not in tcols:
+            conn.execute("ALTER TABLE tags ADD COLUMN pinyin TEXT")
+        if tcols and "pinyin_initials" not in tcols:
+            conn.execute("ALTER TABLE tags ADD COLUMN pinyin_initials TEXT")
         gcols = {r["name"] for r in conn.execute("PRAGMA table_info(gallery)")}
         if gcols and "negative_prompt" not in gcols:
             conn.execute("ALTER TABLE gallery ADD COLUMN negative_prompt TEXT NOT NULL DEFAULT ''")
@@ -264,6 +272,9 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute("ALTER TABLE gallery ADD COLUMN snapshot_id TEXT REFERENCES prompt_snapshot(id)")
         if gcols and "source_asset_id" not in gcols:
             conn.execute("ALTER TABLE gallery ADD COLUMN source_asset_id TEXT")
+        ucols = {r["name"] for r in conn.execute("PRAGMA table_info(user_tags)")}
+        if ucols and "zh" not in ucols:
+            conn.execute("ALTER TABLE user_tags ADD COLUMN zh TEXT NOT NULL DEFAULT ''")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_gallery_source_asset "
             "ON gallery(source_asset_id) WHERE source_asset_id IS NOT NULL"
@@ -369,8 +380,9 @@ def upsert_tags(conn: sqlite3.Connection, rows: list[dict]) -> int:
             """
             INSERT INTO tags (
                 danbooru_name, prompt_tag, category, post_count, is_deprecated,
-                zh_name, ja_name, ko_name, source, created_at, updated_at, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                zh_name, ja_name, ko_name, pinyin, pinyin_initials,
+                source, created_at, updated_at, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(danbooru_name) DO UPDATE SET
                 prompt_tag = excluded.prompt_tag,
                 category = excluded.category,
@@ -379,6 +391,8 @@ def upsert_tags(conn: sqlite3.Connection, rows: list[dict]) -> int:
                 zh_name = COALESCE(excluded.zh_name, tags.zh_name),
                 ja_name = COALESCE(excluded.ja_name, tags.ja_name),
                 ko_name = COALESCE(excluded.ko_name, tags.ko_name),
+                pinyin = COALESCE(excluded.pinyin, tags.pinyin),
+                pinyin_initials = COALESCE(excluded.pinyin_initials, tags.pinyin_initials),
                 source = excluded.source,
                 created_at = COALESCE(excluded.created_at, tags.created_at),
                 updated_at = COALESCE(excluded.updated_at, tags.updated_at),
@@ -393,6 +407,8 @@ def upsert_tags(conn: sqlite3.Connection, rows: list[dict]) -> int:
                 r.get("zh_name"),
                 r.get("ja_name"),
                 r.get("ko_name"),
+                r.get("pinyin"),
+                r.get("pinyin_initials"),
                 r.get("source", "danbooru"),
                 r.get("created_at"),
                 r.get("updated_at"),

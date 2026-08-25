@@ -25,7 +25,7 @@ python -m venv .venv
 .venv\Scripts\python app.py
 ```
 
-启动 `app.py` 后会自动检测并拉起 NovelAI 本地服务 `127.0.0.1:8787`，无需再开第二个终端。统一从 <http://127.0.0.1:8787> 使用面板；该入口会把标签、例图、图库和设置请求转发给 FastAPI `8123`，NovelAI 官方 API 和进度事件由 Node 处理。生图只走官方 API，不需要 NovelAI 网页、Edge/CDP 或网页控件。退出 Python 应用时，本次自动启动的 Node 子服务也会一起退出；若 8787 已由用户手工启动，则会直接复用且不会关闭它。
+启动 `app.py` 后会自动检测并拉起 NovelAI 本地服务 `127.0.0.1:8787`，无需再开第二个终端。统一从 <http://127.0.0.1:8787> 使用面板；该入口会把标签、例图、图库和设置请求转发给 FastAPI `8123`，NovelAI 官方 API 和进度事件由 Node 处理。生图只走官方 API，不需要 NovelAI 网页、Edge/CDP 或网页控件。退出 Python 应用时，本次自动启动的 Node 子服务也会一起退出；若 8787 已由用户手工启动，则会直接复用且不会关闭它。Node 子服务的 owner 记录在 `.workbuddy/runtime/novelai-service.pid`（`{parent_pid, node_pid}`），用于防止多个 `app.py` 实例互杀：某个实例因 8123 被占用而启动失败、即将退出时，不会误杀仍在健康对外服务的 node。
 
 本地启动默认开启 Python 自动重载和 Node 文件监听，修改服务端或 Node 源码后会自动重启对应进程，避免新前端调用旧接口。需要稳定运行时可设置 `TAGS_MARKET_RELOAD=0` 后再启动。
 
@@ -42,9 +42,13 @@ python -m venv .venv
 3. `token_unordered`
 4. `prefix`
 5. `substring`
-6. `fuzzy`
+6. `pinyin_exact`
+7. `pinyin_partial`
+8. `fuzzy`
 
 结果返回 `match_type`、`match_reason` 和相似度。SQL 先分层召回有限候选，再执行相似度计算，避免全表 Python 模糊匹配。真实词库中 `range murata` 可将 `murata range` 排在首位，`orange hat` 不会抢到前面；本机基准约 `0.11s`。
+
+支持**拼音模糊搜索**：对每个标签的中文名/中文别名生成拼音（全拼 `lan yan` + 首字母 `ly`），使输入 `lanyan` / `lan yan` / `ly` 能命中对应中文名的英文标签（如 蓝眼 → `blue eyes`）。拼音列由 `importer/backfill_pinyin.py` 回填（幂等，可重复运行）。
 
 ### PromptState V2
 
@@ -126,6 +130,7 @@ PromptState
 | `GET /api/prompt/sections` | 固定 Prompt 分区定义 |
 | `POST /api/prompt/classify` | 本地确定性分类 |
 | `POST /api/prompt/section-override` | 保存用户分区覆盖 |
+| `GET /api/prompt/section-overrides` | 返回全部用户分区覆盖（前端加载购物车时回填条目分区） |
 | `GET/POST /api/bundles` | Bundle 列表与创建 |
 | `GET/PUT/DELETE /api/bundles/{id}` | Bundle 读取、更新、删除 |
 | `POST /api/import/preview` | 导入四态预览 |
@@ -136,6 +141,11 @@ PromptState
 | `GET /api/snapshots/{id}` | 读取 Snapshot |
 | `POST /api/snapshots/{id}/restore` | 全部或指定分区恢复 |
 | `POST /api/gallery/item` | Node 图片回写 Python 图库 |
+| `POST /api/translate` | 用户显式点击后调用百度通用文本翻译 |
+
+### 百度翻译
+
+在设置页填写百度翻译 APP ID 和密钥后，凭据只保存在本机用户设置文件（权限为 0600），接口不会回显密钥。翻译文本会发送到百度翻译，只有点击按钮才会请求，不会自动上传。自定义标签支持手动填写中文名，也支持英文标签自动翻译；自然语言补充可保留中文 Raw，并在选择使用英文译文后将其作为 Effective Prompt。
 
 ## 数据表
 

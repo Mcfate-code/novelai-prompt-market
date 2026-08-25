@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import db  # noqa: E402
+from importer import pinyin_util  # noqa: E402
 
 ZH_PATH = db.BASE_DIR / "data" / "zh_aliases.json"
 ZH_CHAR_PATH = db.BASE_DIR / "data" / "zh_characters.json"
@@ -92,9 +93,12 @@ def import_zh(conn, zh: dict[str, str] | None = None) -> dict:
         alias_rows.append(
             {"alias": name, "canonical_name": canonical, "lang": "zh", "source": "curated"}
         )
+        full, initials = pinyin_util.compute_pinyin(name)
         conn.execute(
-            "UPDATE tags SET zh_name=COALESCE(?, zh_name) WHERE danbooru_name=?",
-            (name, canonical),
+            "UPDATE tags SET zh_name=COALESCE(?, zh_name), "
+            "pinyin=COALESCE(?, pinyin), pinyin_initials=COALESCE(?, pinyin_initials) "
+            "WHERE danbooru_name=?",
+            (name, full or None, initials or None, canonical),
         )
     db.upsert_aliases(conn, alias_rows)
     conn.commit()

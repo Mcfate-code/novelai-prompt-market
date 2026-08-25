@@ -11,12 +11,15 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import threading
@@ -36,7 +39,7 @@ from prompt import composer, import_parser, novelai_export, sections as prompt_s
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -65,7 +68,13 @@ DEFAULT_USER_SETTINGS = {
     "novelai_batch_max_count": 6,
     "novelai_example_credit_warning": True,
     "novelai_example_prompt_template": NOVELAI_EXAMPLE_PROMPT_TEMPLATE,
+    "baidu_translate_appid": "",
+    "baidu_translate_secret": "",
 }
+BAIDU_TRANSLATE_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
+BAIDU_TRANSLATE_TIMEOUT = 12
+_translate_lock = threading.Lock()
+_translate_last_request = 0.0
 NOVELAI_SERVICE_URL = "http://127.0.0.1:8787"
 NOVELAI_SERVICE_START_TIMEOUT = 12.0
 MANAGED_NODE_BIN = Path.home() / ".workbuddy" / "binaries" / "node" / "versions" / "22.12.0" / "bin" / "node"
@@ -95,6 +104,57 @@ def _node_executable() -> str:
     if discovered:
         return discovered
     raise RuntimeError("未找到 Node.js 22+，无法自动启动 NovelAI 本地服务")
+
+
+def _novelai_pidfile_path() -> Path:
+    """node 服务 owner 记录文件（与 novelai-service.log 同目录）。"""
+    return BASE_DIR / ".workbuddy" / "runtime" / "novelai-service.pid"
+
+
+def _read_novelai_pidfile() -> dict | None:
+    """读取 node 服务的 owner 记录 {parent_pid, node_pid}；缺失/损坏返回 None。"""
+    try:
+        data = json.loads(_novelai_pidfile_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_novelai_pidfile(node_pid: int | None) -> None:
+    """把本进程声明为 8787 node 服务的 owner（原子写入，失败不抛出）。"""
+    try:
+        path = _novelai_pidfile_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({"parent_pid": os.getpid(), "node_pid": node_pid}, ensure_ascii=False)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _remove_novelai_pidfile() -> None:
+    """删除 pidfile，但仅当它仍指向本进程（避免误删别的实例的 owner 记录）。"""
+    owner = _read_novelai_pidfile()
+    if owner is not None and owner.get("parent_pid") == os.getpid():
+        try:
+            _novelai_pidfile_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _app_port_available(host: str, port: int) -> bool:
+    """返回 True 当 (host, port) 当前可被本进程绑定（即没有其它 app.py 占用）。
+
+    用于 lifespan 启动阶段预判：若 8123 已被别的实例占用，则本实例稍后绑定必然失败、
+    属于「冗余实例」，退出时不得杀掉仍在健康服务的 node。
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+        return True
+    except OSError:
+        return False
 
 
 def _start_novelai_service() -> tuple[subprocess.Popen | None, object | None]:
@@ -140,6 +200,7 @@ def _start_novelai_service() -> tuple[subprocess.Popen | None, object | None]:
                 "请查看 .workbuddy/runtime/novelai-service.log"
             )
         if _novelai_service_ready():
+            _write_novelai_pidfile(getattr(process, "pid", None))
             print(f"NovelAI 本地服务已自动启动：{NOVELAI_SERVICE_URL}")
             return process, log_handle
         time.sleep(0.1)
@@ -154,16 +215,41 @@ def _start_novelai_service() -> tuple[subprocess.Popen | None, object | None]:
     raise RuntimeError("NovelAI 本地服务启动超时，请查看 .workbuddy/runtime/novelai-service.log")
 
 
-def _stop_novelai_service(process: subprocess.Popen | None, log_handle: object | None) -> None:
-    if process is not None and process.poll() is None:
+def _stop_novelai_service(
+    process: subprocess.Popen | None,
+    log_handle: object | None,
+    graceful: bool = True,
+) -> None:
+    """停止本实例托管的 node 子进程，但绝不动别的 app.py 实例的 node。
+
+    防互杀守卫：只有「pidfile 声明的 owner 就是本进程」且「本实例确实接管了 8123
+    （graceful 关闭）」时，才 terminate 自己 spawn 的 node。其余情况（别的实例的 node、
+    或本实例因 8123 被占用而启动失败、即将退出）一律只清理自己的句柄，不杀 node。
+    """
+    try:
+        if process is None or process.poll() is not None:
+            return
+        owner = _read_novelai_pidfile()
+        owns_node = owner is not None and owner.get("parent_pid") == os.getpid()
+        if not owns_node:
+            # 该 node 是别的 app.py 实例启动的（或 pidfile 已易主），绝不碰。
+            return
+        if not graceful and _novelai_service_ready():
+            # 本实例并未真正接管 8123（如端口被占、启动失败即将退出），
+            # 而 node 仍健康对外服务——不要拖垮它，仅清理本进程残留的 pidfile 声明。
+            _remove_novelai_pidfile()
+            return
+        # 正常关闭（或 node 已不健康）：terminate 自己 spawn 的 node 并清理 pidfile。
         process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
-    if log_handle is not None:
-        log_handle.close()
+        _remove_novelai_pidfile()
+    finally:
+        if log_handle is not None:
+            log_handle.close()
 
 
 def _parse_bool(value, default: bool) -> bool:
@@ -198,6 +284,8 @@ def _load_user_settings() -> dict:
     data["danbooru_login"] = str(data.get("danbooru_login") or "").strip()
     data["danbooru_api_key"] = str(data.get("danbooru_api_key") or "").strip()
     data["novelai_api_token"] = str(os.environ.get("NOVELAI_API_KEY") or data.get("novelai_api_token") or "").strip()
+    data["baidu_translate_appid"] = str(os.environ.get("BAIDU_TRANSLATE_APPID") or data.get("baidu_translate_appid") or "").strip()
+    data["baidu_translate_secret"] = str(os.environ.get("BAIDU_TRANSLATE_SECRET") or data.get("baidu_translate_secret") or "").strip()
     try:
         data["novelai_batch_max_count"] = max(1, min(100, int(data.get("novelai_batch_max_count", 6))))
     except (TypeError, ValueError):
@@ -365,17 +453,28 @@ async def lifespan(app: FastAPI):
     app.state.novelai_service_process = None
     app.state.novelai_service_log = None
     app.state.novelai_service_error = None
+    app.state.novelai_service_owns_port = True
     try:
         process, log_handle = _start_novelai_service()
         app.state.novelai_service_process = process
         app.state.novelai_service_log = log_handle
+        # 预判本实例能否真正接管 8123：若端口已被别的 app.py 占用，则稍后绑定必然失败，
+        # 退出时不得杀掉仍在健康服务的 node（防互杀）。
+        app.state.novelai_service_owns_port = _app_port_available(
+            SETTINGS.get("host", "127.0.0.1"),
+            SETTINGS.get("port", 8123),
+        )
     except RuntimeError as exc:
         app.state.novelai_service_error = str(exc)
         print(f"NovelAI 本地服务自动启动失败：{exc}", file=sys.stderr)
     try:
         yield
     finally:
-        _stop_novelai_service(app.state.novelai_service_process, app.state.novelai_service_log)
+        _stop_novelai_service(
+            app.state.novelai_service_process,
+            app.state.novelai_service_log,
+            graceful=app.state.novelai_service_owns_port,
+        )
         app.state.thumb_executor.shutdown(wait=True, cancel_futures=True)
         app.state.image_executor.shutdown(wait=True, cancel_futures=True)
 
@@ -715,7 +814,7 @@ def gallery_dir(dir_name: str):
     try:
         rows = conn.execute(
             "SELECT g.id, g.file_name, g.prompt, g.negative_prompt, g.parameters_json, g.file_path, "
-            "g.snapshot_id, g.source_asset_id, (f.dir_name IS NOT NULL) favorite "
+            "g.snapshot_id, g.source_asset_id, g.created_at, (f.dir_name IS NOT NULL) favorite "
             "FROM gallery g LEFT JOIN gallery_favorites f USING (dir_name, file_name) "
             "WHERE g.dir_name=? ORDER BY g.id DESC",
             (dir_name,),
@@ -1379,6 +1478,8 @@ class UserSettingsBody(BaseModel):
     novelai_batch_max_count: int | None = None
     novelai_example_credit_warning: bool | None = None
     novelai_example_prompt_template: str | None = None
+    baidu_translate_appid: str = ""
+    baidu_translate_secret: str = ""
 
 
 def _dir_usage_mb(directory: Path) -> float:
@@ -1412,6 +1513,7 @@ def get_settings():
         "danbooru_login": settings["danbooru_login"],
         "has_danbooru_api_key": bool(settings["danbooru_api_key"] or os.environ.get("DANBOORU_API_KEY")),
         "novelai_configured": bool(settings["novelai_api_token"]),
+        "baidu_translate_configured": bool(settings["baidu_translate_appid"] and settings["baidu_translate_secret"]),
         "novelai_batch_max_count": settings["novelai_batch_max_count"],
         "novelai_example_credit_warning": settings["novelai_example_credit_warning"],
         "novelai_example_prompt_template": settings["novelai_example_prompt_template"],
@@ -1636,8 +1738,14 @@ def save_settings(body: UserSettingsBody):
         incoming["danbooru_api_key"] = current["danbooru_api_key"]
     if not incoming["novelai_api_token"].strip():
         incoming["novelai_api_token"] = current["novelai_api_token"]
+    if not incoming["baidu_translate_appid"].strip():
+        incoming["baidu_translate_appid"] = current["baidu_translate_appid"]
+    if not incoming["baidu_translate_secret"].strip():
+        incoming["baidu_translate_secret"] = current["baidu_translate_secret"]
     incoming["danbooru_login"] = incoming["danbooru_login"].strip()
     incoming["novelai_api_token"] = incoming["novelai_api_token"].strip()
+    incoming["baidu_translate_appid"] = incoming["baidu_translate_appid"].strip()
+    incoming["baidu_translate_secret"] = incoming["baidu_translate_secret"].strip()
     incoming["proxy_url"] = incoming["proxy_url"].strip()
     if "novelai_batch_max_count" in incoming:
         incoming["novelai_batch_max_count"] = max(1, min(100, int(incoming["novelai_batch_max_count"])))
@@ -1651,6 +1759,90 @@ def save_settings(body: UserSettingsBody):
     _save_user_settings(normalized)
     _enforce_cache_limit()
     return get_settings()
+
+
+class TranslateBody(BaseModel):
+    text: str
+    from_: str = Field("auto", alias="from")
+    to: str = "en"
+
+    @property
+    def source_language(self) -> str:
+        return self.from_
+
+
+def baidu_translate_sign(appid: str, text: str, salt: str, secret: str) -> str:
+    """Baidu 官方签名：appid + 原始 q + salt + secret，再 UTF-8 MD5。"""
+    return hashlib.md5(f"{appid}{text}{salt}{secret}".encode("utf-8")).hexdigest()
+
+
+def _translate_error_message(payload: dict) -> str:
+    code = str(payload.get("error_code") or "")
+    messages = {
+        "52001": "百度翻译请求超时",
+        "54003": "百度翻译请求过于频繁，请稍后再试",
+        "54004": "百度翻译账户余额不足",
+        "54005": "百度翻译短时间内请求过于频繁",
+        "58001": "百度翻译语言参数不支持",
+        "54001": "百度翻译鉴权失败，请检查配置",
+    }
+    return messages.get(code, "百度翻译服务暂时不可用")
+
+
+@app.post("/api/translate")
+def translate(body: TranslateBody):
+    text = body.text.strip()
+    source = body.source_language.strip().lower()
+    target = body.to.strip().lower()
+    if source not in {"auto", "zh", "en"} or target not in {"zh", "en"}:
+        raise HTTPException(400, "翻译语言仅支持 from=auto/zh/en、to=zh/en")
+    if not text:
+        raise HTTPException(400, "翻译文本不能为空")
+    if len(text) > 1000 or len(text.encode("utf-8")) > 6000:
+        raise HTTPException(413, "翻译文本不能超过 1000 字符或 6000 字节")
+    settings = _load_user_settings()
+    appid = settings["baidu_translate_appid"]
+    secret = settings["baidu_translate_secret"]
+    if not appid or not secret:
+        raise HTTPException(428, "尚未配置百度翻译，请先在设置中填写 APP ID 和密钥")
+
+    global _translate_last_request
+    with _translate_lock:
+        wait = 1.0 - (time.monotonic() - _translate_last_request)
+        if wait > 0:
+            time.sleep(wait)
+        _translate_last_request = time.monotonic()
+    salt = secrets.token_hex(8)
+    form = {
+        "q": text,
+        "from": source,
+        "to": target,
+        "appid": appid,
+        "salt": salt,
+        "sign": baidu_translate_sign(appid, text, salt, secret),
+    }
+    request = urllib.request.Request(
+        BAIDU_TRANSLATE_URL,
+        data=urllib.parse.urlencode(form).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        opener = urllib.request.build_opener(_semantic_proxy_handler(settings))
+        with opener.open(request, timeout=BAIDU_TRANSLATE_TIMEOUT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(502, "百度翻译服务返回错误") from exc
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise HTTPException(502, "百度翻译服务连接失败，请检查代理或稍后重试")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(502, "百度翻译服务返回无效结果") from exc
+    if payload.get("error_code"):
+        raise HTTPException(502, _translate_error_message(payload))
+    result = payload.get("trans_result")
+    if not isinstance(result, list) or not result or not isinstance(result[0], dict) or not isinstance(result[0].get("dst"), str):
+        raise HTTPException(502, "百度翻译服务返回无效结果")
+    return {"text": text, "translated": "\n".join(str(item.get("dst") or "") for item in result)}
 
 
 @app.get("/api/catalog")
@@ -2000,6 +2192,17 @@ def prompt_section_override(body: SectionOverrideRequest):
         )
         conn.commit()
         return {"ok": True, "tag": tag, "section": section}
+    finally:
+        conn.close()
+
+
+@app.get("/api/prompt/section-overrides")
+def prompt_section_overrides():
+    """返回全部用户分区覆盖（tag -> section），供前端加载购物车时回填条目分区。"""
+    conn = _conn()
+    try:
+        rows = conn.execute("SELECT tag_name, section FROM tag_section_override").fetchall()
+        return {"overrides": {row["tag_name"]: row["section"] for row in rows}}
     finally:
         conn.close()
 
@@ -2415,7 +2618,7 @@ def import_preview(req: ImportPreviewRequest):
             for e in entries:
                 tag = e.get("tag", "")
                 custom = conn.execute(
-                    "SELECT tag_name FROM user_tags WHERE lower(tag_name)=lower(?)", (tag.strip(),)
+                    "SELECT tag_name, zh FROM user_tags WHERE lower(tag_name)=lower(?)", (tag.strip(),)
                 ).fetchone()
                 exact = conn.execute(
                     "SELECT * FROM tags WHERE lower(prompt_tag)=lower(?) OR lower(danbooru_name)=lower(?) LIMIT 1",
@@ -2429,7 +2632,7 @@ def import_preview(req: ImportPreviewRequest):
                         hit, status = resolved, "normalized"
                 candidates = []
                 if custom and not hit:
-                    hit = {"tag": custom["tag_name"], "canonical": custom["tag_name"], "via": "user_tags"}
+                    hit = {"tag": custom["tag_name"], "canonical": custom["tag_name"], "zh": custom["zh"] or "", "via": "user_tags"}
                     status = "custom"
                 elif not hit:
                     status = "candidate"
@@ -2472,6 +2675,7 @@ def import_preview(req: ImportPreviewRequest):
 class UserTagRequest(BaseModel):
     tag: str
     note: str = ""
+    zh: str = ""
 
 
 @app.post("/api/user-tags")
@@ -2483,9 +2687,9 @@ def add_user_tag(req: UserTagRequest):
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO user_tags (tag_name, note, created_at) VALUES (?,?,?) "
-            "ON CONFLICT(tag_name) DO UPDATE SET note=excluded.note, created_at=excluded.created_at",
-            (tag, req.note.strip(), db.now_iso()),
+            "INSERT INTO user_tags (tag_name, note, zh, created_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(tag_name) DO UPDATE SET note=excluded.note, zh=excluded.zh, created_at=excluded.created_at",
+            (tag, req.note.strip(), req.zh.strip(), db.now_iso()),
         )
         conn.commit()
         return {"ok": True, "tag": tag}
@@ -2509,11 +2713,11 @@ def list_user_tags():
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT tag_name, note, created_at FROM user_tags ORDER BY created_at DESC"
+            "SELECT tag_name, note, zh, created_at FROM user_tags ORDER BY created_at DESC"
         ).fetchall()
         return {
             "tags": [
-                {"tag": r["tag_name"], "note": r["note"], "created_at": r["created_at"]}
+                {"tag": r["tag_name"], "note": r["note"], "zh": r["zh"], "created_at": r["created_at"]}
                 for r in rows
             ]
         }
@@ -2554,6 +2758,9 @@ def export(req: ExportRequest):
             state["global_uc"] = _flatten_section_state({"sections": req.structured_state["global_uc_sections"]})
         if isinstance(req.structured_state.get("free_text"), str):
             state["free_text"] = req.structured_state["free_text"]
+        if isinstance(req.structured_state.get("free_text_en"), str):
+            state["free_text_en"] = req.structured_state["free_text_en"]
+        state["use_free_text_en"] = bool(req.structured_state.get("use_free_text_en"))
         structured_characters = req.structured_state.get("characters")
         if isinstance(structured_characters, list):
             state["characters"] = []

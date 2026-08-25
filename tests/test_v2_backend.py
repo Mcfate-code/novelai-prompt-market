@@ -79,7 +79,7 @@ class V2BackendTest(unittest.TestCase):
     def test_search_recalls_user_tags_and_resolves(self):
         self.insert_tags()
         conn = self.conn()
-        conn.execute("INSERT INTO user_tags VALUES ('my custom tag', '', 'now')")
+        conn.execute("INSERT INTO user_tags (tag_name, note, zh, created_at) VALUES (?,?,?,?)", ('my custom tag', '', '', 'now'))
         conn.commit()
         # 完整 / 子串召回
         full = search.search(conn, "my custom tag")
@@ -101,7 +101,7 @@ class V2BackendTest(unittest.TestCase):
         self.insert_tags()
         conn = self.conn()
         # 与内置标签 blue eyes 同名的自定义标签：内置优先，不重复
-        conn.execute("INSERT INTO user_tags VALUES ('blue eyes', '', 'now')")
+        conn.execute("INSERT INTO user_tags (tag_name, note, zh, created_at) VALUES (?,?,?,?)", ('blue eyes', '', '', 'now'))
         conn.commit()
         results = search.search(conn, "blue eyes")
         self.assertEqual(len([r for r in results if r["tag"] == "blue eyes"]), 1)
@@ -122,6 +122,17 @@ class V2BackendTest(unittest.TestCase):
         self.assertEqual(sections.classify_tag(conn, "alice"), "scene")
         conn.close()
 
+    def test_section_overrides_list_endpoint(self):
+        # 前端加载购物车时用该接口回填条目分区；空表返回空 map
+        self.assertEqual(app.prompt_section_overrides(), {"overrides": {}})
+        conn = self.conn()
+        conn.execute("INSERT INTO tag_section_override VALUES ('alice', 'scene', 'now')")
+        conn.execute("INSERT INTO tag_section_override VALUES ('bob', 'style', 'now')")
+        conn.commit()
+        conn.close()
+        result = app.prompt_section_overrides()
+        self.assertEqual(result["overrides"], {"alice": "scene", "bob": "style"})
+
     def test_bundle_crud(self):
         created = app.bundle_create(app.BundleBody(name="Look", items=[
             app.BundleItemBody(tag="custom tag", weight=1.25, section="style", sort_order=2)
@@ -135,7 +146,7 @@ class V2BackendTest(unittest.TestCase):
     def test_import_preview_four_states(self):
         self.insert_tags()
         conn = self.conn()
-        conn.execute("INSERT INTO user_tags VALUES ('my custom', '', 'now')")
+        conn.execute("INSERT INTO user_tags (tag_name, note, zh, created_at) VALUES (?,?,?,?)", ('my custom', '', '', 'now'))
         conn.commit()
         conn.close()
         result = app.import_preview(app.ImportPreviewRequest(
@@ -283,6 +294,8 @@ class V2BackendTest(unittest.TestCase):
         conn.close()
         listed = app.gallery_dir("nai_generated")
         self.assertIsNone(listed["items"][0]["parameters"])
+        # 前端按 item.created_at 做图库日期分组，API 必须返回顶层 created_at（根因回归）
+        self.assertTrue(listed["items"][0]["created_at"], "gallery item API must return created_at")
     def test_gallery_item_accepts_data_url_and_rejects_invalid_image_inputs(self):
         gallery_dir = Path(self.tmp.name) / "gallery"
         gallery_dir.mkdir()

@@ -330,6 +330,10 @@ button.primary:hover { background: var(--accent-ink); border-color: var(--accent
 .conflict { color: #b45309; }
 
 .free-text-box { width: 100%; min-height: 56px; resize: vertical; border: 1px solid var(--border); border-radius: 6px; padding: 6px; font-family: inherit; font-size: 13px; }
+.free-text-actions { display: flex; align-items: center; gap: 12px; font-size: 12px; }
+.free-text-translation { min-height: 48px; }
+.inline-field { display: flex; gap: 6px; }
+.inline-field input { flex: 1; }
 
 .empty { color: var(--muted); text-align: center; padding: 24px 10px; font-size: 13px; }
 
@@ -444,6 +448,10 @@ button.primary:hover { background: var(--accent-ink); border-color: var(--accent
 .gallery-grid-small { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 .gallery-grid-medium { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .gallery-grid-large { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+/* nai_generated 目录日期分组标题：网格内整行、非嵌套卡片，沿用项目色/间距 */
+.gallery-group-title { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 4px 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.gallery-group-title:first-child { margin-top: 0; }
+.gallery-group-title .gallery-group-count { font-size: 11px; font-weight: 400; color: var(--muted); background: var(--chip); border-radius: 10px; padding: 0 8px; line-height: 18px; }
 .gallery-card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; cursor: pointer; position: relative; background: #fff; transition: box-shadow .12s, border-color .12s; }
 .gallery-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.12); }
 .gallery-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
@@ -775,6 +783,8 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
 .weight-popover button { padding: 3px 6px; font-size: 11px; }
 .weight-popover span { flex-basis: 100%; height: 0; }
 .weight-popover strong { min-width: 40px; text-align: center; font-size: 11px; padding-top: 4px; }
+.weight-popover input[data-weight-input] { width: 52px; min-width: 0; padding: 2px 4px; font: inherit; font-size: 11px; text-align: center; border: 1px solid var(--border); border-radius: 4px; background: #fff; color: var(--text); }
+.weight-popover input[data-weight-input]:focus { outline: none; border-color: #c9a05f; box-shadow: 0 0 0 2px rgba(201,160,95,.18); }
 .prompt-preview-bar { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 9px 10px; background: #fbfcfd; }
 .prompt-preview-head { display: flex; justify-content: space-between; font-size: 12px; }
 .prompt-preview-head span { color: var(--muted); }

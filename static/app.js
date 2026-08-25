@@ -8,7 +8,7 @@ const SECTION_LABELS = { character: "角色", appearance: "外观", clothing: "�
 
 function emptySections() { return Object.fromEntries(SECTION_IDS.map((id) => [id, []])); }
 function emptyPromptState() {
-  return { schema_version: 2, sections: emptySections(), characters: [{ name: "Character 1", prompt_sections: emptySections(), uc_sections: emptySections() }], global_uc_sections: emptySections(), free_text: "" };
+  return { schema_version: 2, sections: emptySections(), characters: [{ name: "Character 1", prompt_sections: emptySections(), uc_sections: emptySections() }], global_uc_sections: emptySections(), free_text: "", free_text_en: "", use_free_text_en: false };
 }
 function normalizeEntry(value, section = "other", extra = {}) {
   const raw = typeof value === "string" ? { tag: value } : (value || {});
@@ -28,7 +28,7 @@ function normalizeSections(source) {
 }
 function migratePromptState(raw) {
   if (raw?.schema_version === 2 && raw.sections) {
-    return { schema_version: 2, sections: normalizeSections(raw.sections), characters: (Array.isArray(raw.characters) && raw.characters.length ? raw.characters : [{ name: "Character 1" }]).map((ch, i) => ({ name: ch.name || `Character ${i + 1}`, prompt_sections: normalizeSections(ch.prompt_sections), uc_sections: normalizeSections(ch.uc_sections), position: ch.position || null })), global_uc_sections: normalizeSections(raw.global_uc_sections), free_text: typeof raw.free_text === "string" ? raw.free_text : "" };
+    return { schema_version: 2, sections: normalizeSections(raw.sections), characters: (Array.isArray(raw.characters) && raw.characters.length ? raw.characters : [{ name: "Character 1" }]).map((ch, i) => ({ name: ch.name || `Character ${i + 1}`, prompt_sections: normalizeSections(ch.prompt_sections), uc_sections: normalizeSections(ch.uc_sections), position: ch.position || null })), global_uc_sections: normalizeSections(raw.global_uc_sections), free_text: typeof raw.free_text === "string" ? raw.free_text : "", free_text_en: typeof raw.free_text_en === "string" ? raw.free_text_en : "", use_free_text_en: raw.use_free_text_en === true };
   }
   const prompt = emptyPromptState();
   (raw?.base || raw?.base_prompt || []).forEach((e, i) => prompt.sections[SECTION_IDS.includes(e?.section) ? e.section : "other"].push(normalizeEntry(e, e?.section || "other", { sort_order: i })));
@@ -40,6 +40,8 @@ function migratePromptState(raw) {
   });
   (raw?.global_uc || []).forEach((e, i) => prompt.global_uc_sections[SECTION_IDS.includes(e?.section) ? e.section : "other"].push(normalizeEntry(e, e?.section || "other", { sort_order: i })));
   prompt.free_text = typeof raw?.free_text === "string" ? raw.free_text : "";
+  prompt.free_text_en = typeof raw?.free_text_en === "string" ? raw.free_text_en : "";
+  prompt.use_free_text_en = raw?.use_free_text_en === true && !!prompt.free_text_en;
   return prompt;
 }
 
@@ -52,7 +54,9 @@ let promptConflicts = [];
 let bundles = [];
 let pendingSnapshotId = null;
 let cartAdvanced = false;
+let openWeightEntryId = null; // 当前打开的权重 popover 对应条目 id；renderCart 重建后据此保持打开
 let zhMap = {}; // prompt_tag -> 中文名
+let freeTextRawSync = null; // #free-text 输入防抖句柄；translateFreeText 取消 pending 防抖用
 
 // ===== 工具 =====
 const $ = (sel) => document.querySelector(sel);
@@ -66,7 +70,9 @@ const api = async (path, opts = {}) => {
 };
 const debounce = (fn, ms) => {
   let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  const wrapped = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  wrapped.cancel = () => { clearTimeout(t); t = null; };
+  return wrapped;
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const cssEsc = (s) => {
@@ -118,8 +124,12 @@ function weightText(entry) {
 }
 function promptPreviewText() {
   const tags = positivePromptEntries().map(weightText);
-  if (state.prompt.free_text.trim()) tags.push(state.prompt.free_text.trim());
+  const freeText = effectiveFreeText();
+  if (freeText) tags.push(freeText);
   return tags.join(", ");
+}
+function effectiveFreeText() {
+  return state.prompt.use_free_text_en && state.prompt.free_text_en.trim() ? state.prompt.free_text_en.trim() : state.prompt.free_text.trim();
 }
 function negativePreviewText() { return negativePromptEntries().map(weightText).join(", "); }
 const refreshPromptServices = debounce(() => { loadRecommendations(); loadConflicts(); }, 250);
@@ -144,6 +154,7 @@ let userSettings = {
   novelai_batch_max_count: 6,
   novelai_example_credit_warning: true,
   novelai_example_prompt_template: "{tag}, {rating}, masterpiece, best quality, very aesthetic, absurdres",
+  baidu_translate_configured: false,
 };
 
 async function loadUserSettings() {
@@ -165,6 +176,10 @@ function openSettings() {
   $("#setting-api-key").placeholder = s.has_danbooru_api_key ? "已配置，留空保持不变" : "输入 API Key";
   $("#setting-novelai-api-key").value = "";
   $("#setting-novelai-api-key").placeholder = s.novelai_configured ? "已配置，留空保持不变" : "输入 NovelAI API Key";
+  $("#setting-baidu-appid").value = "";
+  $("#setting-baidu-appid").placeholder = s.baidu_translate_configured ? "已配置，留空保持不变" : "输入百度翻译 APP ID";
+  $("#setting-baidu-secret").value = "";
+  $("#setting-baidu-secret").placeholder = s.baidu_translate_configured ? "已配置，留空保持不变" : "输入百度翻译密钥";
   $("#setting-novelai-batch-max").value = s.novelai_batch_max_count ?? 6;
   $("#setting-novelai-batch-max-value").textContent = `${s.novelai_batch_max_count ?? 6} 张`;
   $("#setting-novelai-example-credit-warning").checked = s.novelai_example_credit_warning !== false;
@@ -191,6 +206,8 @@ async function saveUserSettings() {
       danbooru_login: $("#setting-login").value.trim(),
       danbooru_api_key: $("#setting-api-key").value,
       novelai_api_token: $("#setting-novelai-api-key").value,
+      baidu_translate_appid: $("#setting-baidu-appid").value.trim(),
+      baidu_translate_secret: $("#setting-baidu-secret").value,
       novelai_batch_max_count: Number($("#setting-novelai-batch-max").value),
       novelai_example_credit_warning: $("#setting-novelai-example-credit-warning").checked,
       novelai_example_prompt_template: $("#setting-novelai-example-prompt").value.trim(),
@@ -353,7 +370,7 @@ async function init() {
   $("#model-select").innerHTML = m.models.map((x) => `<option value="${x.id}" ${x.id === state.model ? "selected" : ""}>${esc(x.label)}</option>`).join("");
   rebuildTargetSelect();
   rebuildNaiTagTarget();
-  await Promise.all([loadTaxonomy(), loadFavorites(), loadRecent(), loadPromptSections()]);
+  await Promise.all([loadTaxonomy(), loadFavorites(), loadRecent(), loadPromptSections(), loadSectionOverrides()]);
   await loadZh();
   await loadPromptPresets();
   renderCart();
@@ -367,6 +384,35 @@ async function loadPromptSections() {
       promptSections = data.sections.filter((s) => SECTION_IDS.includes(s.id)).map((s) => ({ id: s.id, label: s.label || SECTION_LABELS[s.id] }));
     }
   } catch { /* 后端升级期间使用内置分类 */ }
+}
+
+// 加载时从后端 tag_section_override 回填购物车条目分区：用户显式选择过的分区以覆盖表为准，
+// 即使本地草稿缺失/过期（如旧版草稿、清过站点数据、跨浏览器），刷新后仍归到所选分区。
+async function loadSectionOverrides() {
+  try {
+    const data = await api("/api/prompt/section-overrides");
+    const raw = data.overrides || {};
+    const list = Array.isArray(raw) ? raw : Object.entries(raw).map(([tag, section]) => ({ tag, section }));
+    const byTag = new Map();
+    list.forEach((o) => { if (SECTION_IDS.includes(o.section)) byTag.set(String(o.tag).toLowerCase(), o.section); });
+    if (!byTag.size) return;
+    // 覆盖与草稿冲突时以覆盖为准：把条目从草稿分区物理移入覆盖分区（只移动，不改写其它字段）
+    const apply = (sections) => {
+      const moves = [];
+      SECTION_IDS.forEach((sid) => (sections[sid] || []).forEach((e) => {
+        const s = byTag.get(String(e.tag).toLowerCase());
+        if (s && s !== sid) moves.push({ entry: e, from: sid, to: s });
+      }));
+      moves.forEach((m) => {
+        sections[m.from] = sections[m.from].filter((e) => e !== m.entry);
+        m.entry.section = m.to;
+        sections[m.to].push(m.entry);
+      });
+    };
+    apply(state.prompt.sections);
+    apply(state.prompt.global_uc_sections);
+    state.prompt.characters.forEach((ch) => { apply(ch.prompt_sections); apply(ch.uc_sections); });
+  } catch { /* 后端不可用时保持草稿分区 */ }
 }
 
 async function loadZh() {
@@ -411,6 +457,7 @@ let browseSnapshot = null;  // 离开「分类浏览」时保存 {catalogId, pag
 const navHistory = [];      // 浏览历史栈：{catalogId, page, query, scrollTop}
 const NAV_MAX = 30;
 let pendingScroll = null;   // 异步渲染完成后要恢复的滚动位置
+let reviewSavedGridScrollTop = 0;  // 进入图库审阅前保存的网格滚动位置（退出审阅后恢复）
 let contentRequestSeq = 0;  // 丢弃过期的分类/搜索响应
 let showingSearchResults = false;  // 主标签列表当前展示的是搜索结果（可能出现在 favorites/recent 视图内）
 
@@ -963,7 +1010,7 @@ function entryHtml(e, slotKey) {
     `<span class="tag" title="${esc(zh)}">${esc(e.tag)}</span>` +
     (zh ? `<span class="zh">${esc(zh)}</span>` : "") +
     `<button class="weight-toggle" title="调整权重">${Number(e.weight || 1).toFixed(1)}</button>` +
-    `<div class="weight-popover" hidden><button data-weight="0.8">弱 0.8</button><button data-weight="1">普通 1.0</button><button data-weight="1.2">强 1.2</button><span></span><button data-step="-0.05">−</button><strong>${Number(e.weight || 1).toFixed(2)}</strong><button data-step="0.05">+</button></div>` +
+    `<div class="weight-popover" hidden><button data-weight="0.8">弱 0.8</button><button data-weight="1">普通 1.0</button><button data-weight="1.2">强 1.2</button><span></span><button data-step="-0.05">−</button><input type="number" data-weight-input step="0.05" min="0.1" max="2" value="${Number(e.weight || 1).toFixed(2)}" aria-label="输入权重" /><strong>${Number(e.weight || 1).toFixed(2)}</strong><button data-step="0.05">+</button></div>` +
     `<select class="section-select" title="移到分类">${sectionOptions(e.section)}</select>` +
     `<button title="删除" class="del">×</button></div>`;
 }
@@ -1022,11 +1069,20 @@ function renderCart() {
   const el = $("#cart");
   const html = `<section class="compact-cart"><label class="cart-tag-input"><span>添加标签</span><div><input id="cart-tag-input" autocomplete="off" placeholder="输入中文或英文，回车直接加入" /><button id="cart-tag-submit" type="button">添加</button></div><small>输入时会在中间自动查找；回车会加入完全匹配的标签。</small></label><button id="cart-custom-tag" type="button" class="ghost add-custom-btn">＋ 自定义标签</button><div class="compact-cart-head"><strong>Prompt</strong><span>${positivePromptEntries().length} 个标签</span></div><div class="compact-tags">${compactEntriesHtml()}</div>` +
     `<details class="compact-uc"><summary>Undesired Content（${negativePromptEntries().length}）</summary><div class="compact-tags">${compactUcHtml()}</div></details>` +
-    `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea></label></section>` +
+     `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><small class="setting-help">Raw 中文始终保留；英文译文仅在勾选后作为 Effective Prompt。</small><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></label></section>` +
     `<details class="cart-advanced" ${cartAdvanced ? "open" : ""}><summary>高级编辑：分区、权重与多角色</summary><div class="cart-advanced-body"><button type="button" class="cart-add-character" data-add-character>+ 添加角色</button>${advancedCartHtml()}</div></details>`;
   el.innerHTML = html;
   bindEntryControls(el);
-  $("#free-text").addEventListener("input", debounce((ev) => { state.prompt.free_text = ev.target.value; commitPromptChange({ render: false }); updatePromptPreview(); }, 180));
+  // 重建后恢复当前打开的权重面板（加减/手动输入会触发重渲染，不能因此关闭）
+  if (openWeightEntryId) {
+    const openPop = el.querySelector(`.entry[data-entry-id="${cssEsc(openWeightEntryId)}"] .weight-popover`);
+    if (openPop) openPop.hidden = false; else openWeightEntryId = null;
+  }
+  freeTextRawSync = debounce((ev) => { state.prompt.free_text = ev.target.value; state.prompt.use_free_text_en = false; commitPromptChange({ render: false }); updatePromptPreview(); }, 180);
+  $("#free-text").addEventListener("input", freeTextRawSync);
+  $("#free-text-en").addEventListener("input", debounce((ev) => { state.prompt.free_text_en = ev.target.value; commitPromptChange({ render: false }); updatePromptPreview(); }, 180));
+  $("#free-text-use-en").addEventListener("change", (ev) => { state.prompt.use_free_text_en = ev.target.checked && !!state.prompt.free_text_en.trim(); commitPromptChange({ render: false }); updatePromptPreview(); });
+  $("#free-text-translate").addEventListener("click", translateFreeText);
   el.querySelectorAll("[data-rm]").forEach((n) => n.addEventListener("click", () => removeCharacter(+n.dataset.rm.split(":")[1])));
   el.querySelectorAll("[data-compact-remove]").forEach((button) => button.addEventListener("click", () => removeEntryById(button.dataset.compactSlot, button.dataset.compactRemove)));
   el.querySelector("[data-add-character]")?.addEventListener("click", addCharacter);
@@ -1076,9 +1132,32 @@ function bindEntryControls(root) {
   root.querySelectorAll(".entry").forEach((node) => {
     const slot = node.dataset.slot, id = node.dataset.entryId;
     const toggle = node.querySelector(".weight-toggle"), pop = node.querySelector(".weight-popover");
-    toggle.addEventListener("click", () => { root.querySelectorAll(".weight-popover:not([hidden])").forEach((p) => { if (p !== pop) p.hidden = true; }); pop.hidden = !pop.hidden; });
+    toggle.addEventListener("click", () => {
+      if (openWeightEntryId === id) {
+        openWeightEntryId = null; pop.hidden = true;
+      } else {
+        root.querySelectorAll(".weight-popover:not([hidden])").forEach((p) => { if (p !== pop) p.hidden = true; });
+        openWeightEntryId = id; pop.hidden = false;
+      }
+    });
     pop.querySelectorAll("[data-weight]").forEach((b) => b.addEventListener("click", () => setEntryWeight(slot, id, Number(b.dataset.weight))));
     pop.querySelectorAll("[data-step]").forEach((b) => b.addEventListener("click", () => { const found = findEntry(slot, id); if (found) setEntryWeight(slot, id, Math.max(0.1, Math.min(2, found.entry.weight + Number(b.dataset.step)))); }));
+    const weightInput = pop.querySelector("[data-weight-input]");
+    weightInput.addEventListener("input", () => {
+      // 轻量实时预览：只更新内存权重与面板显示值，不重建 DOM，保证连续键入不失焦
+      const found = findEntry(slot, id); if (!found) return;
+      const v = Number(weightInput.value);
+      if (Number.isFinite(v)) {
+        found.entry.weight = Math.max(0.1, Math.min(2, v));
+        pop.querySelector("strong").textContent = found.entry.weight.toFixed(2);
+      }
+    });
+    weightInput.addEventListener("change", () => {
+      // 回车/失焦提交：clamp[0.1,2]，无效则回退当前值；commit 后 renderCart 由 openWeightEntryId 保持面板打开
+      const found = findEntry(slot, id); if (!found) return;
+      const v = Number(weightInput.value);
+      setEntryWeight(slot, id, Number.isFinite(v) ? Math.max(0.1, Math.min(2, v)) : found.entry.weight);
+    });
     node.querySelector(".section-select").addEventListener("change", (e) => moveEntrySection(slot, id, e.target.value));
     node.querySelector(".del").addEventListener("click", () => removeEntryById(slot, id));
   });
@@ -1088,23 +1167,70 @@ function bindEntryControls(root) {
 function openCustomTagModal() {
   $("#custom-tag-name").value = "";
   $("#custom-tag-note").value = "";
+  $("#custom-tag-zh").value = "";
   $("#custom-tag-status").textContent = "";
   $("#custom-tag-modal").style.display = "flex";
   $("#custom-tag-name").focus();
 }
 function closeCustomTagModal() { $("#custom-tag-modal").style.display = "none"; }
 
+// 纯函数：请求返回时仅当当前文本仍等于请求原文才接受译文（防抖窗口/请求期间原文变化则丢弃）
+function shouldAcceptTranslation(requestedRaw, currentRaw) {
+  return (currentRaw ?? "").trim() === (requestedRaw ?? "").trim();
+}
+
+async function translateFreeText() {
+  const btn = $("#free-text-translate");
+  const el = $("#free-text");
+  const raw = (el?.value ?? state.prompt.free_text).trim();
+  if (!raw) { toast("请先填写中文自然语言补充"); return; }
+  // 读取当前 DOM 并同步 state，避免防抖窗口内翻译旧文本；改 Raw 即失效旧译文
+  if (el && el.value !== state.prompt.free_text) {
+    state.prompt.free_text = el.value;
+    state.prompt.use_free_text_en = false;
+  }
+  freeTextRawSync?.cancel(); // 取消 pending 防抖，避免稍后回调把 state/use 标志覆盖回旧值
+  btn.disabled = true;
+  try {
+    const r = await api("/api/translate", { method: "POST", body: JSON.stringify({ text: raw, from: "zh", to: "en" }) });
+    // 请求返回时原文已变化：丢弃结果，不覆盖用户更新后的 Raw、不启用旧译文
+    if (!shouldAcceptTranslation(raw, $("#free-text")?.value ?? state.prompt.free_text)) {
+      toast("原文已变化，翻译结果已丢弃，请重试");
+      return;
+    }
+    state.prompt.free_text_en = r.translated || "";
+    state.prompt.use_free_text_en = !!state.prompt.free_text_en;
+    commitPromptChange();
+    toast("已翻译为英语；Raw 中文仍保留");
+  } catch (e) { toast(`翻译失败：${e.message || e}`); }
+  finally { btn.disabled = false; }
+}
+
+async function translateCustomTag() {
+  const btn = $("#custom-tag-translate");
+  const tag = $("#custom-tag-name").value.trim();
+  if (!tag) { $("#custom-tag-status").textContent = "请先填写英文标签名"; return; }
+  btn.disabled = true;
+  try {
+    const r = await api("/api/translate", { method: "POST", body: JSON.stringify({ text: tag, from: "en", to: "zh" }) });
+    $("#custom-tag-zh").value = r.translated || "";
+  } catch (e) { $("#custom-tag-status").textContent = `自动翻译失败：${e.message || e}`; }
+  finally { btn.disabled = false; }
+}
+
 async function submitCustomTag() {
   const nameEl = $("#custom-tag-name");
   const noteEl = $("#custom-tag-note");
+  const zhEl = $("#custom-tag-zh");
   const status = $("#custom-tag-status");
   const tag = nameEl.value.trim();
   const note = noteEl.value.trim();
+  const zh = zhEl.value.trim();
   if (!tag) { status.textContent = "标签名不能为空"; nameEl.focus(); return; }
   const btn = $("#custom-tag-save");
   btn.disabled = true;
   try {
-    await api("/api/user-tags", { method: "POST", body: JSON.stringify({ tag, note }) });
+    await api("/api/user-tags", { method: "POST", body: JSON.stringify({ tag, note, zh }) });
     await addEntry(tag, { custom: true, source: "custom" });
     closeCustomTagModal();
     toast(`已添加自定义标签「${tag}」`);
@@ -1126,7 +1252,7 @@ async function loadCustomTags() {
       return;
     }
     box.innerHTML = tags.map((t) =>
-      `<div class="custom-tag-row"><span class="ct-tag">${esc(t.tag)}</span>${t.note ? `<small class="ct-note">${esc(t.note)}</small>` : ""}<button class="ghost ct-del" data-tag="${esc(t.tag)}" type="button">删除</button></div>`
+      `<div class="custom-tag-row"><span class="ct-tag">${esc(t.tag)}</span>${t.zh ? `<small class="ct-zh">${esc(t.zh)}</small>` : ""}${t.note ? `<small class="ct-note">${esc(t.note)}</small>` : ""}<button class="ghost ct-del" data-tag="${esc(t.tag)}" type="button">删除</button></div>`
     ).join("");
     box.querySelectorAll(".ct-del").forEach((b) => b.addEventListener("click", () => deleteCustomTag(b.dataset.tag)));
   } catch {
@@ -1405,6 +1531,13 @@ function countEntries(parsed) {
   return n;
 }
 
+// 纯函数：合并导入的 free_text（replace 直接替换；append 追加换行拼接）
+function mergeImportedFreeText(current, incoming, mode) {
+  if (!incoming) return current;
+  if (mode === "replace") return incoming;
+  return [current, incoming].filter(Boolean).join("\n");
+}
+
 function applyImported(parsed, mode, target = "base") {
   pushHistory(); const incoming = migratePromptState(parsed);
   if (target === "base" && mode === "replace") state.prompt = incoming;
@@ -1412,7 +1545,14 @@ function applyImported(parsed, mode, target = "base") {
     const targetSections = getSectionMap(target); if (!targetSections) return;
     if (mode === "replace") SECTION_IDS.forEach((id) => { targetSections[id] = []; });
     SECTION_IDS.forEach((id) => incoming.sections[id].forEach((entry) => { if (!targetSections[id].some((e) => e.tag === entry.tag)) targetSections[id].push(entry); }));
-    if (incoming.free_text) state.prompt.free_text = mode === "replace" ? incoming.free_text : [state.prompt.free_text, incoming.free_text].filter(Boolean).join("\n");
+    if (incoming.free_text) {
+      const merged = mergeImportedFreeText(state.prompt.free_text, incoming.free_text, mode);
+      if (merged !== state.prompt.free_text) {
+        state.prompt.free_text = merged;
+        // 追加/非替换路径实际改变 free_text 后，旧译文不得继续作为 effective
+        if (mode !== "replace") state.prompt.use_free_text_en = false;
+      }
+    }
   }
   rebuildTargetSelect(); commitPromptChange(); toast(`已导入 ${countEntries(parsed)} 个标签`);
 }
@@ -1577,7 +1717,13 @@ async function applyImportedPreview() {
       if (keep) api("/api/user-tags", { method: "POST", body: JSON.stringify({ tag, note: row?.querySelector(".imp-note")?.value || "" }) }).catch(() => {});
     });
   });
-  if (importPreviewData.free_text) state.prompt.free_text = mode === "replace" ? importPreviewData.free_text : [state.prompt.free_text, importPreviewData.free_text].filter(Boolean).join("\n");
+  if (importPreviewData.free_text) {
+    const merged = mergeImportedFreeText(state.prompt.free_text, importPreviewData.free_text, mode);
+    if (merged !== state.prompt.free_text) {
+      state.prompt.free_text = merged;
+      if (mode !== "replace") state.prompt.use_free_text_en = false;
+    }
+  }
   rebuildTargetSelect(); commitPromptChange(); importPreviewData = null; closeImportModal(); toast(`已导入 ${imported} 个标签`);
 }
 
@@ -1948,6 +2094,7 @@ $("#import-cancel").addEventListener("click", closeImportModal);
 $("#import-modal").addEventListener("click", (e) => { if (e.target.id === "import-modal") closeImportModal(); });
 $("#custom-tag-cancel").addEventListener("click", closeCustomTagModal);
 $("#custom-tag-save").addEventListener("click", submitCustomTag);
+$("#custom-tag-translate").addEventListener("click", translateCustomTag);
 $("#custom-tag-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submitCustomTag(); } });
 $("#custom-tag-modal").addEventListener("click", (e) => { if (e.target.id === "custom-tag-modal") closeCustomTagModal(); });
 bind("#top-import-btn", "click", openImportModal);
@@ -2029,8 +2176,15 @@ function setGalleryReviewMode(enabled) {
     galleryReviewIndex = -1;
     setGalleryReviewZoom("fit");
     document.querySelectorAll(".gallery-card.review-selected").forEach((el) => el.classList.remove("review-selected"));
+    // 退出审阅后恢复图库网格滚动位置，不重载网格，不影响当前选中卡片
+    const grid = $("#gallery-grid");
+    const saved = reviewSavedGridScrollTop;
+    requestAnimationFrame(() => { if (grid) grid.scrollTop = saved; });
     return;
   }
+  // 进入审阅前保存网格滚动位置，退出后恢复
+  const grid = $("#gallery-grid");
+  if (grid) reviewSavedGridScrollTop = grid.scrollTop;
   if (galleryItems.length && galleryReviewIndex < 0) galleryReviewIndex = 0;
   renderGalleryReview();
 }
@@ -2084,7 +2238,11 @@ function renderGalleryReview() {
   img.className = "gallery-review-img";
   img.alt = "";
   img.src = imgPath;
-  img.addEventListener("error", () => { canvas.innerHTML = `<div class="empty">图片加载失败</div>`; });
+  img.addEventListener("error", () => {
+    // 只有当该 img 仍是当前渲染的图片时才显示失败占位，旧图的 error 不得清空新图
+    if (canvas.firstChild !== img) return;
+    canvas.innerHTML = `<div class="empty">图片加载失败</div>`;
+  });
   canvas.innerHTML = "";
   canvas.appendChild(img);
   if (countEl) countEl.textContent = `${galleryReviewIndex + 1} / ${total}`;
@@ -2171,6 +2329,75 @@ async function loadGalleryList() {
   } catch (e) { toast("图库加载失败：" + e.message); }
 }
 
+// ===== 图库日期分组（仅 nai_generated）：按 item.created_at 本地日期分组，组标题为网格内整行，不嵌套包裹卡片 =====
+function galleryDateGroupOf(it) {
+  const raw = it && it.created_at;
+  if (!raw) return { key: "undated", label: "未标注日期" };
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return { key: "undated", label: "未标注日期" };
+  const today = new Date();
+  const key = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+  if (key === `${today.getFullYear()}-${today.getMonth() + 1}-${today.getDate()}`) return { key, label: "今天" };
+  const y = new Date(today); y.setDate(today.getDate() - 1);
+  if (key === `${y.getFullYear()}-${y.getMonth() + 1}-${y.getDate()}`) return { key, label: "昨天" };
+  return { key, label: `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日` };
+}
+function galleryCardHtml(it, dirName) {
+  return `<div class="gallery-card ${it.favorite ? "fav" : ""}" data-file="${esc(it.file_name)}">` +
+    `<input class="gallery-select" type="checkbox" aria-label="选择图片" ${selectedGalleryFiles.has(galleryFileKey(dirName, it.file_name)) ? "checked" : ""} />` +
+    `<img src="/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}" loading="lazy" alt="" />` +
+    `<button class="gallery-fav ${it.favorite ? "on" : ""}" title="${it.favorite ? "取消收藏" : "收藏"}">★</button>` +
+    `<div class="gallery-card-prompt">${esc(it.prompt)}</div>` +
+    `<div class="gallery-card-actions">` +
+    `<button class="gallery-action-btn" data-action="restore" title="恢复参数">恢复参数</button>` +
+    `<button class="gallery-action-btn" data-action="seed" title="复用 Seed">复用 Seed</button>` +
+    `<button class="gallery-action-btn" data-action="copy" title="复制 Prompt">复制 Prompt</button>` +
+    `</div>` +
+    `</div>`;
+}
+// 生成 #gallery-grid 的内部 HTML：非 nai_generated 保持原平铺；nai_generated 按日期顺序插标题。
+// 不复制/拆分 galleryItems，卡片仍为网格直接子元素、DOM 顺序与 galleryItems 一致（审阅索引不受影响）。
+function renderGalleryGridHtml(items, dirName) {
+  const grouped = dirName === "nai_generated";
+  let counts = null;
+  if (grouped) {
+    counts = new Map();
+    items.forEach((it) => {
+      const key = galleryDateGroupOf(it).key;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+  }
+  let html = "";
+  let lastKey = null;
+  items.forEach((it) => {
+    if (grouped) {
+      const g = galleryDateGroupOf(it);
+      if (g.key !== lastKey) {
+        html += `<div class="gallery-group-title" data-group-key="${esc(g.key)}"><span class="gallery-group-name">${esc(g.label)}</span><span class="gallery-group-count">${counts.get(g.key)}</span></div>`;
+        lastKey = g.key;
+      }
+    }
+    html += galleryCardHtml(it, dirName);
+  });
+  return html;
+}
+// 删除卡片后调用：移除已空的日期组标题，并刷新剩余组的计数
+function refreshGalleryGroupTitles() {
+  const grid = $("#gallery-grid");
+  if (!grid) return;
+  grid.querySelectorAll(".gallery-group-title").forEach((title) => {
+    let el = title.nextElementSibling;
+    let count = 0;
+    while (el && !el.classList.contains("gallery-group-title")) {
+      if (el.classList.contains("gallery-card")) count++;
+      el = el.nextElementSibling;
+    }
+    if (!count) { title.remove(); return; }
+    const countEl = title.querySelector(".gallery-group-count");
+    if (countEl) countEl.textContent = String(count);
+  });
+}
+
 async function openGalleryDir(dirName) {
   activeGalleryDir = dirName;
   selectedGalleryFiles.clear();
@@ -2186,19 +2413,7 @@ async function openGalleryDir(dirName) {
     const grid = $("#gallery-grid");
     applyGalleryZoom();
     if (!data.items.length) { galleryReviewIndex = -1; grid.innerHTML = `<div class="empty">该目录暂无图片</div>`; updateGallerySelectionUi(); pendingScroll = null; return; }
-    grid.innerHTML = data.items.map((it) =>
-      `<div class="gallery-card ${it.favorite ? "fav" : ""}" data-file="${esc(it.file_name)}">` +
-      `<input class="gallery-select" type="checkbox" aria-label="选择图片" ${selectedGalleryFiles.has(galleryFileKey(dirName, it.file_name)) ? "checked" : ""} />` +
-      `<img src="/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}" loading="lazy" alt="" />` +
-      `<button class="gallery-fav ${it.favorite ? "on" : ""}" title="${it.favorite ? "取消收藏" : "收藏"}">★</button>` +
-      `<div class="gallery-card-prompt">${esc(it.prompt)}</div>` +
-      `<div class="gallery-card-actions">` +
-      `<button class="gallery-action-btn" data-action="restore" title="恢复参数">恢复参数</button>` +
-      `<button class="gallery-action-btn" data-action="seed" title="复用 Seed">复用 Seed</button>` +
-      `<button class="gallery-action-btn" data-action="copy" title="复制 Prompt">复制 Prompt</button>` +
-      `</div>` +
-      `</div>`
-    ).join("");
+    grid.innerHTML = renderGalleryGridHtml(data.items, dirName);
     updateGallerySelectionUi();
     if (pendingScroll != null) {
       const st = pendingScroll; pendingScroll = null;
@@ -2383,6 +2598,7 @@ async function deleteGalleryReviewItem() {
       galleryItems = galleryItems.filter((x) => x.file_name !== item.file_name);
       selectedGalleryFiles.delete(galleryFileKey(activeGalleryDir, item.file_name));
       document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`)?.remove();
+      refreshGalleryGroupTitles();
       updateGallerySelectionUi();
       renderGalleryReview();
     }

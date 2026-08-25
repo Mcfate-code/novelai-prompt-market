@@ -189,17 +189,17 @@ def resolve_tag(conn: sqlite3.Connection, query: str) -> dict | None:
         return db.tag_dict(row, favorite=row["prompt_tag"] in favs)
     # 6) 自定义标签（user_tags）：精确或前缀命中。
     row = conn.execute(
-        "SELECT tag_name FROM user_tags "
-        "WHERE lower(tag_name)=? OR lower(tag_name) LIKE ? ESCAPE '\\' "
+        "SELECT tag_name, zh FROM user_tags "
+        "WHERE lower(tag_name)=? OR lower(tag_name) LIKE ? ESCAPE '\\' OR lower(zh)=? OR lower(zh) LIKE ? ESCAPE '\\' "
         "ORDER BY length(tag_name) ASC LIMIT 1",
-        (q, f"{_like_escape(q)}%"),
+        (q, f"{_like_escape(q)}%", q, f"{_like_escape(q)}%"),
     ).fetchone()
     if row:
         tag_name = row["tag_name"]
         return {
             "tag": tag_name,
             "canonical": db.underscore(tag_name),
-            "zh": "",
+            "zh": row["zh"] or "",
             "category": 0,
             "post_count": 0,
             "favorite": tag_name in favs,
@@ -214,7 +214,9 @@ MATCH_RANK = {
     "token_unordered": 2,
     "prefix": 3,
     "substring": 4,
-    "fuzzy": 5,
+    "pinyin_exact": 5,
+    "pinyin_partial": 6,
+    "fuzzy": 7,
 }
 
 MATCH_REASON = {
@@ -223,6 +225,8 @@ MATCH_REASON = {
     "token_unordered": "词元完全一致，仅顺序不同",
     "prefix": "匹配标签或别名前缀",
     "substring": "包含查询文本",
+    "pinyin_exact": "与中文名拼音全拼或首字母一致",
+    "pinyin_partial": "匹配中文名拼音前缀或子串",
     "fuzzy": "与标签或别名相似",
 }
 
@@ -256,6 +260,46 @@ def match_evidence(query: str, candidate: str) -> tuple[str, float] | None:
     return None
 
 
+def _pinyin_query(q: str) -> str:
+    """用户输入 -> 去空格的 ASCII 拼音比对串（'lan yan'/'lanyan' -> 'lanyan'）。"""
+    return _norm(q).replace(" ", "")
+
+
+def match_pinyin_evidence(
+    query: str,
+    pinyin: str | None,
+    initials: str | None,
+) -> tuple[str, float] | None:
+    """拼音证据（针对标签中文名/中文别名拼音）。
+
+    分层（强 -> 弱）：
+      1. 全拼精确（lanyan == 'lan yan' 去空格）
+      2. 首字母精确（ly == ly）
+      3. 全拼前缀（lan -> lan yan；lanyan -> lan yan jing）
+      4. 首字母前缀（l -> ly；ly -> lyj）
+
+    只用前缀不做子串：去空格后做子串会跨词误命中（如 'lanyan' 会命中
+    '灿 烂 阳' 的 'can lan yang'），前缀语义更安全。非 ASCII 查询或拼音为空
+    时返回 None。
+    """
+    pq = _pinyin_query(query)
+    if not pq or not pq.isascii() or not pq.isalpha():
+        return None
+    full = (pinyin or "").replace(" ", "").lower()
+    ini = (initials or "").lower()
+    if not full and not ini:
+        return None
+    if full and pq == full:
+        return "pinyin_exact", 1.0
+    if ini and pq == ini:
+        return "pinyin_exact", 1.0
+    if full and full.startswith(pq):
+        return "pinyin_partial", difflib.SequenceMatcher(None, pq, full).ratio()
+    if ini and ini.startswith(pq):
+        return "pinyin_partial", difflib.SequenceMatcher(None, pq, ini).ratio()
+    return None
+
+
 def _search_candidates(
     conn: sqlite3.Connection,
     query: str,
@@ -281,6 +325,15 @@ def _search_candidates(
         tag_args.extend((pattern, pattern))
         alias_conditions.append("lower(a.alias) LIKE ? ESCAPE '\\'")
         alias_args.append(pattern)
+
+    # 拼音召回：对中文名/中文别名的拼音做 LIKE，同时覆盖 lanyan / lan yan / ly 三种写法。
+    # 全拼列存 "lan yan"，用 REPLACE 去空格后比对 "lanyan"；首字母列直接比对 "ly"。
+    pq = _pinyin_query(query)
+    if pq and pq.isascii() and pq.isalpha():
+        tag_conditions.append("REPLACE(t.pinyin, ' ', '') LIKE ? ESCAPE '\\'")
+        tag_args.append(f"%{_like_escape(pq)}%")
+        tag_conditions.append("t.pinyin_initials LIKE ? ESCAPE '\\'")
+        tag_args.append(f"%{_like_escape(pq)}%")
 
     filters = []
     filter_args: list = []
@@ -315,15 +368,15 @@ def _search_candidates(
 
     # 自定义标签召回（user_tags）：不受 category / deprecated 过滤（自定义标签无分类/废弃元数据）。
     # 条件 = 整体子串 或 逐 token（AND）命中，交由 match_evidence 做最终匹配判定。
-    user_conditions = ["lower(tag_name) LIKE ? ESCAPE '\\'"]
-    user_args: list = [f"%{_like_escape(raw)}%"]
+    user_conditions = ["lower(tag_name) LIKE ? ESCAPE '\\'", "lower(zh) LIKE ? ESCAPE '\\'"]
+    user_args: list = [f"%{_like_escape(raw)}%", f"%{_like_escape(raw)}%"]
     if tokens:
         user_conditions.append(
-            "(" + " AND ".join(["lower(tag_name) LIKE ? ESCAPE '\\'"] * len(tokens)) + ")"
+            "(" + " AND ".join(["(lower(tag_name) LIKE ? ESCAPE '\\' OR lower(zh) LIKE ? ESCAPE '\\')"] * len(tokens)) + ")"
         )
-        user_args.extend(f"%{_like_escape(token)}%" for token in tokens)
+        user_args.extend(value for token in tokens for value in (f"%{_like_escape(token)}%", f"%{_like_escape(token)}%"))
     for row in conn.execute(
-        "SELECT tag_name, note, created_at FROM user_tags "
+        "SELECT tag_name, note, zh, created_at FROM user_tags "
         f"WHERE ({' OR '.join(user_conditions)}) LIMIT ?",
         (*user_args, candidate_limit),
     ):
@@ -337,7 +390,8 @@ def _search_candidates(
             "category": 0,
             "post_count": 0,
             "is_deprecated": 0,
-            "zh_name": "",
+            "zh_name": row["zh"] or "",
+            "zh": row["zh"] or "",
             "use_count": 0,
             "via": "user_tags",
         }
@@ -378,6 +432,8 @@ def search(
     results = []
     for row in rows.values():
         names = [row["prompt_tag"], row["danbooru_name"], *aliases.get(row["danbooru_name"], [])]
+        if "zh" in row.keys():
+            names.append(row["zh"] or "")
         best = None
         best_name = ""
         for name in names:
@@ -387,14 +443,25 @@ def search(
             key = (MATCH_RANK[evidence[0]], -evidence[1])
             if best is None or key < (MATCH_RANK[best[0]], -best[1]):
                 best, best_name = evidence, name
+        # 拼音证据（基于中文名/中文别名拼音），与名称证据同场比较，弱者不覆盖强者
+        pinyin = row["pinyin"] if "pinyin" in row.keys() else None
+        initials = row["pinyin_initials"] if "pinyin_initials" in row.keys() else None
+        pinyin_ev = match_pinyin_evidence(query, pinyin, initials)
+        if pinyin_ev is not None:
+            key = (MATCH_RANK[pinyin_ev[0]], -pinyin_ev[1])
+            if best is None or key < (MATCH_RANK[best[0]], -best[1]):
+                best, best_name = pinyin_ev, ""
         if best is None:
             continue
         match_type, similarity = best
+        is_pinyin = match_type in ("pinyin_exact", "pinyin_partial")
+        via_alias = (not is_pinyin) and best_name not in (row["prompt_tag"], row["danbooru_name"])
+        reason_suffix = "（通过中文名拼音）" if is_pinyin else ("（通过别名）" if via_alias else "")
         item = db.tag_dict(row)
         item.update({
             "rank": MATCH_RANK[match_type],
             "match_type": match_type,
-            "match_reason": MATCH_REASON[match_type] + ("（通过别名）" if best_name not in (row["prompt_tag"], row["danbooru_name"]) else ""),
+            "match_reason": MATCH_REASON[match_type] + reason_suffix,
             "similarity": round(similarity, 6),
             "use_count": row["use_count"],
             "category_name": db.CATEGORY_NAMES.get(row["category"], "General"),
