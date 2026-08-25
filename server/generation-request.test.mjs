@@ -104,3 +104,23 @@ test("keeps the quality toggle through normalization and recipes", () => {
   assert.equal(one.quality_toggle, false);
   assert.equal(recipe.quality_toggle, false);
 });
+
+test("normalizes and passes through uc_preset (off/light/heavy)", () => {
+  for (const value of ["off", "light", "heavy"]) {
+    const request = normalizeGenerationRequest({ prompt: "x", uc_preset: value });
+    assert.equal(request.uc_preset, value, `normalized uc_preset must be ${value}`);
+    const one = requestForSeed(request, 99);
+    const recipe = createGenerationRecipe(one);
+    assert.equal(one.uc_preset, value);
+    assert.equal(recipe.uc_preset, value);
+  }
+});
+
+test("defaults uc_preset to heavy for legacy requests without the field", () => {
+  const request = normalizeGenerationRequest({ prompt: "x" });
+  assert.equal(request.uc_preset, "heavy");
+});
+
+test("rejects an unknown uc_preset in normalization", () => {
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", uc_preset: "ultra" }), /不支持的 UC preset/);
+});

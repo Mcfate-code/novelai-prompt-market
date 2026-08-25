@@ -167,6 +167,47 @@ test("getAutoPromptPreset: V5 Full Web-verified; V5 Curated empty (UNVERIFIED); 
   assert.ok(getAutoPromptPreset(MODELS.v45Full).negativeTags.includes("nsfw"));
 });
 
+// ---- 3b. Tier mapping: positive/negative tier -> qualityTags / heavyUc ----
+// 前端档位选择器（#nai-positive-tier / #nai-negative-tier）在 app.js 的 naiCompileGeneration
+// 映射为 compiler 的 qualityTags / heavyUc 布尔值：
+//   positive: off=false, v5_standard=true
+//   negative: off=false, 其余=true
+// 此处用纯函数验证该映射的编译结果。
+
+test("positive off -> no auto positive injected", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: false, heavyUc: true });
+  assert.deepEqual(res.autoPositive, [], "positive off must not inject auto positive");
+  assert.equal(res.effectivePositive, "nahida");
+});
+
+test("V5 Full + positive v5_standard + raw nahida -> strict Web-verified quality", () => {
+  // v5_standard -> qualityTags=true
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
+  assert.equal(res.effectivePositive, "nahida, very aesthetic, masterpiece, no text");
+  assert.deepEqual(res.autoPositive, ["very aesthetic", "masterpiece", "no text"]);
+});
+
+test("V5 Curated + positive v5_standard -> no fabricated Curated preset (UNVERIFIED)", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Curated, { qualityTags: true, heavyUc: true });
+  assert.deepEqual(res.autoPositive, [], "V5 Curated must not fabricate a dedicated positive preset");
+  assert.deepEqual(res.autoNegative, [], "V5 Curated must not fabricate a dedicated negative preset");
+  assert.equal(res.effectivePositive, "nahida");
+});
+
+test("negative off -> no client auto negative injected", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: false });
+  assert.deepEqual(res.autoNegative, [], "negative off must not inject client auto negative");
+  assert.equal(res.effectiveNegative, "blurry");
+});
+
+test("negative light/heavy -> client auto negative present (request layer preset is separate)", () => {
+  const light = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
+  assert.ok(light.autoNegative.length > 0, "negative heavy keeps client auto UC");
+  // light 也复用客户端 heavy UC 数组（服务端 ucPresetId 决定实际展开）；此处仅验证档位开启则注入。
+  const heavy = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
+  assert.ok(heavy.autoNegative.length > 0, "negative light/heavy both enable client auto UC injection");
+});
+
 // ---- 4. Legacy string wrappers still work (backward compat) ----
 
 test("legacy compilePrompt/compileNegative wrappers return strings", () => {

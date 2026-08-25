@@ -1766,6 +1766,8 @@ function renderRecentView() {
 
 async function showView(view) {
   if (view === state.view) return;
+  // 离开图库视图时退出审阅模式，恢复普通图库布局
+  if (view !== "gallery" && galleryReviewMode) setGalleryReviewMode(false);
   // 保存当前视图位置：滚动 + 分类浏览的完整浏览状态
   if (state.view === "browse") {
     viewScrolls.browse = $("#tag-list").scrollTop;
@@ -1965,25 +1967,67 @@ function setGalleryReviewMode(enabled) {
   galleryReviewMode = enabled;
   const layout = $("#gallery-view");
   const button = $("#gallery-review-btn");
+  const review = $("#gallery-review");
   layout.classList.toggle("review-mode", enabled);
   button.setAttribute("aria-pressed", String(enabled));
   button.textContent = enabled ? "退出审阅" : "审阅模式";
+  if (review) review.hidden = !enabled;
   if (!enabled) {
     galleryReviewIndex = -1;
     document.querySelectorAll(".gallery-card.review-selected").forEach((el) => el.classList.remove("review-selected"));
-  } else if (galleryItems.length && galleryReviewIndex < 0) {
-    selectGalleryReviewItem(0);
+    return;
   }
+  if (galleryItems.length && galleryReviewIndex < 0) galleryReviewIndex = 0;
+  renderGalleryReview();
 }
 function selectGalleryReviewItem(index) {
-  if (!galleryItems.length) return;
+  if (!galleryItems.length) { galleryReviewIndex = -1; renderGalleryReview(); return; }
   galleryReviewIndex = Math.max(0, Math.min(galleryItems.length - 1, index));
   const item = galleryItems[galleryReviewIndex];
   document.querySelectorAll(".gallery-card").forEach((card) =>
     card.classList.toggle("review-selected", card.dataset.file === item.file_name)
   );
-  showGalleryPreview(activeGalleryDir, item.file_name);
-  document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`)?.scrollIntoView({ block: "nearest" });
+  renderGalleryReview();
+}
+function renderGalleryReview() {
+  const canvas = $("#gallery-review-canvas");
+  if (!canvas) return;
+  const total = galleryItems.length;
+  const item = galleryItems[galleryReviewIndex] ?? null;
+  const prevBtn = $("#gallery-review-prev");
+  const nextBtn = $("#gallery-review-next");
+  const favBtn = $("#gallery-review-fav");
+  const delBtn = $("#gallery-review-del");
+  const countEl = $("#gallery-review-count");
+  if (!item) {
+    canvas.innerHTML = `<div class="empty">暂无图片</div>`;
+    if (countEl) countEl.textContent = "";
+    [prevBtn, nextBtn, favBtn, delBtn].forEach((b) => b && (b.disabled = true));
+    return;
+  }
+  const imgPath = `/gallery/${encodeURIComponent(activeGalleryDir)}/${encodeURIComponent(item.file_path.split("/").pop())}`;
+  const img = document.createElement("img");
+  img.className = "gallery-review-img";
+  img.alt = "";
+  img.src = imgPath;
+  img.addEventListener("error", () => { canvas.innerHTML = `<div class="empty">图片加载失败</div>`; });
+  canvas.innerHTML = "";
+  canvas.appendChild(img);
+  if (countEl) countEl.textContent = `${galleryReviewIndex + 1} / ${total}`;
+  if (prevBtn) prevBtn.disabled = galleryReviewIndex <= 0;
+  if (nextBtn) nextBtn.disabled = galleryReviewIndex >= total - 1;
+  if (favBtn) favBtn.disabled = false;
+  if (delBtn) delBtn.disabled = false;
+  updateReviewFavButton(item);
+}
+function updateReviewFavButton(item) {
+  const favBtn = $("#gallery-review-fav");
+  if (!favBtn || !item) return;
+  favBtn.classList.toggle("on", !!item.favorite);
+  favBtn.textContent = item.favorite ? "★" : "☆";
+  favBtn.title = item.favorite ? "取消收藏" : "收藏";
+  favBtn.setAttribute("aria-label", item.favorite ? "取消收藏当前图片" : "收藏当前图片");
+  favBtn.setAttribute("aria-pressed", String(!!item.favorite));
 }
 function toggleGalleryFile(dirName, fileName, checked) {
   const key = galleryFileKey(dirName, fileName);
@@ -2133,10 +2177,15 @@ async function openGalleryDir(dirName) {
 }
 
 $("#gallery-review-btn").addEventListener("click", () => setGalleryReviewMode(!galleryReviewMode));
+$("#gallery-review-exit").addEventListener("click", () => setGalleryReviewMode(false));
+$("#gallery-review-prev").addEventListener("click", () => { selectGalleryReviewItem(galleryReviewIndex - 1); $("#gallery-review-prev").blur(); });
+$("#gallery-review-next").addEventListener("click", () => { selectGalleryReviewItem(galleryReviewIndex + 1); $("#gallery-review-next").blur(); });
+$("#gallery-review-fav").addEventListener("click", (e) => { e.stopPropagation(); toggleGalleryReviewFav(); $("#gallery-review-fav").blur(); });
+$("#gallery-review-del").addEventListener("click", (e) => { e.stopPropagation(); deleteGalleryReviewItem(); $("#gallery-review-del").blur(); });
 document.addEventListener("keydown", (event) => {
   if (!galleryReviewMode || state.view !== "gallery") return;
   const target = event.target;
-  if (target.matches("input, textarea, select, button, [contenteditable='true']")) return;
+  if (target.matches("input, textarea, select, [contenteditable='true']")) return;
   if (event.key === "Escape") { setGalleryReviewMode(false); return; }
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   event.preventDefault();
@@ -2209,6 +2258,50 @@ async function toggleGalleryFav(dirName, fileName, fav) {
   } catch (e) { toast("操作失败：" + e.message); }
 }
 
+async function toggleGalleryReviewFav() {
+  const item = galleryItems[galleryReviewIndex];
+  if (!item || !activeGalleryDir) return;
+  const fav = !item.favorite;
+  try {
+    await api("/api/gallery/favorite", { method: "POST", body: JSON.stringify({ dir_name: activeGalleryDir, file_name: item.file_name, favorite: fav }) });
+    item.favorite = fav;
+    const card = document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`);
+    if (card) { card.classList.toggle("fav", fav); card.querySelector(".gallery-fav")?.classList.toggle("on", fav); }
+    updateReviewFavButton(item);
+    toast(fav ? "已收藏" : "已取消收藏");
+  } catch (e) { toast("操作失败：" + e.message); }
+}
+
+async function deleteGalleryReviewItem() {
+  const item = galleryItems[galleryReviewIndex];
+  if (!item || !activeGalleryDir) return;
+  if (!confirm(`确定删除当前图片「${item.file_name}」？图片会移入项目「待清理」文件夹，图库索引将移除。`)) return;
+  const oldIndex = galleryReviewIndex;
+  const remaining = galleryItems.length - 1;
+  try {
+    await api("/api/gallery/item/delete", { method: "POST", body: JSON.stringify({ dir_name: activeGalleryDir, file_name: item.file_name }) });
+    if (remaining <= 0) {
+      // 目录清空：退出审阅并显示空状态
+      galleryItems = [];
+      galleryReviewIndex = -1;
+      setGalleryReviewMode(false);
+      $("#gallery-grid").innerHTML = `<div class="empty">该目录暂无图片</div>`;
+      $("#gallery-preview-body").innerHTML = `<div class="empty">点击图片查看大图与提示词</div>`;
+      updateGallerySelectionUi();
+    } else {
+      // 删除当前项后，翻到「下一张」；若删的是最后一张则回退到上一张
+      galleryReviewIndex = Math.min(oldIndex, remaining - 1);
+      galleryItems = galleryItems.filter((x) => x.file_name !== item.file_name);
+      selectedGalleryFiles.delete(galleryFileKey(activeGalleryDir, item.file_name));
+      document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`)?.remove();
+      updateGallerySelectionUi();
+      renderGalleryReview();
+    }
+    loadGalleryList(); // 刷新目录计数；openGalleryDir 会重渲染网格并恢复审阅视图
+    toast("已删除当前图片");
+  } catch (e) { toast("删除失败：" + e.message); }
+}
+
 async function handleGalleryUpload() {
   const file = $("#gallery-file").files[0];
   if (!file) return;
@@ -2261,11 +2354,32 @@ let naiStructuredDraft = null;
 let naiGenerationMode = "txt2img";
 let naiImg2ImgSource = null;
 let naiCharacters = [];
-// P0: Generation Preset & Prompt Compiler state
-let naiPresetMode = localStorage.getItem("nai_preset_mode") || "website"; // website | high_quality | custom
-let naiQualityTagsEnabled = true;
-let naiHeavyUcEnabled = true;
+// P0: Generation 档位 & Prompt Compiler state
+// positive tier: off | v5_standard；negative tier: off | light | heavy
+// 默认 v5_standard + heavy 以保持当前 V5 Full 默认行为。
+let naiPositiveTier = "v5_standard";
+let naiNegativeTier = "heavy";
 let naiTransparentBg = false;
+
+// 旧 metadata/localStorage 兼容：旧 qualityTags=true/false -> v5_standard/off
+// 旧 heavyUc=true/false -> heavy/off
+{
+  // 新档位键优先。
+  const newPos = localStorage.getItem("nai_positive_tier");
+  const newNeg = localStorage.getItem("nai_negative_tier");
+  if (newPos === "off" || newPos === "v5_standard") naiPositiveTier = newPos;
+  if (newNeg === "off" || newNeg === "light" || newNeg === "heavy") naiNegativeTier = newNeg;
+  // 旧 metadata 兼容。
+  const legacyPos = localStorage.getItem("nai_quality_tags");
+  const legacyNegRaw = localStorage.getItem("nai_heavy_uc");
+  const legacyUcPreset = localStorage.getItem("nai_uc_preset");
+  if (!newNeg && (legacyUcPreset === "off" || legacyUcPreset === "light" || legacyUcPreset === "heavy")) {
+    naiNegativeTier = legacyUcPreset;
+  } else if (!newNeg && legacyNegRaw !== null) {
+    naiNegativeTier = legacyNegRaw === "false" ? "off" : "heavy";
+  }
+  if (!newPos && legacyPos !== null) naiPositiveTier = legacyPos === "false" ? "off" : "v5_standard";
+}
 
 function naiNormalizeNumberInput(v, fallback = null) {
   const s = String(v ?? "").trim();
@@ -2437,54 +2551,10 @@ function naiCollectParameters() {
     scheduler: $("#nai-scheduler")?.value || "karras",
     cfg_rescale: number("#nai-cfg-rescale", 0),
     auto_smea: $("#nai-auto-smea")?.value === "true",
-    quality_preset: $("#nai-quality").value,
-    preset_mode: naiPresetMode,
-    quality_tags: naiQualityTagsEnabled,
-    heavy_uc: naiHeavyUcEnabled,
+    positive_tier: naiPositiveTier,
+    negative_tier: naiNegativeTier,
     transparent_bg: naiTransparentBg,
   };
-}
-
-function naiQualityEnabled(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  return !["off", "false", "0", "disabled"].includes(normalized);
-}
-
-// ---- P0: Generation Preset Mode ----
-const NAI_PRESET_CONFIGS = Object.freeze({
-  website: { steps: 23, guidance: 7, sampler: "k_euler_ancestral", scheduler: "karras", cfg_rescale: 0, auto_smea: false, qualityTags: true, heavyUc: true },
-  high_quality: { steps: 28, guidance: 7, sampler: "k_euler_ancestral", scheduler: "karras", cfg_rescale: 0, auto_smea: false, qualityTags: true, heavyUc: true },
-  custom: null, // custom = user controls everything
-});
-
-function naiApplyPresetMode(mode) {
-  naiPresetMode = mode;
-  localStorage.setItem("nai_preset_mode", mode);
-  // Update radio UI
-  document.querySelectorAll('input[name="nai-preset"]').forEach((r) => { r.checked = r.value === mode; });
-  const advanced = $("#nai-advanced-section");
-  if (mode === "custom") {
-    advanced.classList.remove("nai-advanced-locked");
-  } else {
-    advanced.classList.add("nai-advanced-locked");
-    // Apply preset values to hidden fields
-    const cfg = NAI_PRESET_CONFIGS[mode];
-    if (cfg) {
-      $("#nai-steps").value = cfg.steps;
-      $("#nai-guidance").value = cfg.guidance;
-      naiSetSelectValue("#nai-sampler", cfg.sampler, "k_euler_ancestral");
-      if ($("#nai-scheduler")) $("#nai-scheduler").value = cfg.scheduler;
-      if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").value = cfg.cfg_rescale;
-      if ($("#nai-auto-smea")) $("#nai-auto-smea").value = String(cfg.auto_smea);
-      naiQualityTagsEnabled = cfg.qualityTags;
-      naiHeavyUcEnabled = cfg.heavyUc;
-      $("#nai-quality-tags").checked = cfg.qualityTags;
-      $("#nai-heavy-uc").checked = cfg.heavyUc;
-    }
-  }
-  naiUpdateEffectivePreview();
-  naiRenderCost();
-  updateAdvSummary(naiCollectParameters());
 }
 
 // ---- P0: Effective Preview ----
@@ -2494,8 +2564,8 @@ function naiCompileGeneration(rawPrompt, rawNegative) {
   const params = naiCollectParameters();
   const { compileGenerationPrompts } = window.PromptCompiler;
   const result = compileGenerationPrompts(rawPrompt, rawNegative, params.model, {
-    qualityTags: naiQualityTagsEnabled,
-    heavyUc: naiHeavyUcEnabled,
+    qualityTags: naiPositiveTier === "v5_standard",
+    heavyUc: naiNegativeTier !== "off",
     transparentBackground: naiTransparentBg,
   });
   return { result, params };
@@ -2657,10 +2727,30 @@ function initGenerateView() {
   naiRenderCost();
   loadNaiGallery();
   loadNaiApiStatus();
-  // P0: Initialize preset mode & toggles
-  naiApplyPresetMode(naiPresetMode);
+  // P0: Initialize 档位选择器（正面 / 负面）
+  naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "v5_standard");
+  naiSetSelectValue("#nai-negative-tier", naiNegativeTier, "heavy");
+  naiUpdateTierHint();
   naiUpdateEffectivePreview();
   if (!naiSSEOpened) { naiSSEOpened = true; naiSSE(); }
+}
+
+// 更新档位提示：V5 Curated 选择 v5_standard 时因 preset UNVERIFIED 不注入专属数组。
+function naiUpdateTierHint() {
+  const hint = $("#nai-tier-hint");
+  if (!hint) return;
+  const model = $("#nai-model").value;
+  const pos = naiPositiveTier;
+  const neg = naiNegativeTier;
+  const notes = [];
+  if (model === "nai-diffusion-5-curated" && pos === "v5_standard") {
+    notes.push("V5 Curated 的专属 Quality preset 未验证（UNVERIFIED），本档位不注入正面数组");
+  }
+  if (neg === "off") {
+    notes.push("负面档位为关闭：客户端不注入自动 UC，且请求层发送 uc_preset=off（不发送 heavy）");
+  }
+  hint.textContent = notes.join("；");
+  hint.classList.toggle("show", notes.length > 0);
 }
 
 async function naiGenerate() {
@@ -2724,14 +2814,15 @@ async function naiGenerate() {
       cfgRescale: parameters.cfg_rescale ?? 0,
       seed: parameters.seed,
       seed_mode: parameters.seed_mode,
-      qualityPreset: parameters.quality_preset,
-      ucPreset: naiHeavyUcEnabled ? "heavy" : "off",
+      positiveTier: naiPositiveTier,
+      negativeTier: naiNegativeTier,
+      ucPreset: naiNegativeTier,
       transparentBackground: naiTransparentBg,
-      presetMode: naiPresetMode,
-      qualityTags: naiQualityTagsEnabled,
-      heavyUc: naiHeavyUcEnabled,
       resolution_category: parameters.resolution_category,
       mode: naiGenerationMode,
+      // 兼容旧字段：qualityTags / heavyUc 由档位派生，保留供旧 metadata 恢复。
+      qualityTags: naiPositiveTier === "v5_standard",
+      heavyUc: naiNegativeTier !== "off",
       ...(characters.length ? { characterPrompts: characters } : {}),
     };
     const res = await fetch(`${NAI_SERVER}/api/novelai/generate`, {
@@ -2755,7 +2846,8 @@ async function naiGenerate() {
           noise_schedule: parameters.scheduler || "karras",
         },
         count,
-        quality_toggle: naiQualityEnabled(parameters.quality_preset),
+        uc_preset: naiNegativeTier,
+        quality_toggle: naiPositiveTier === "v5_standard",
         snapshot_id: snapshotId,
         name: "manual",
         meta,
@@ -2980,7 +3072,6 @@ async function naiRestoreItem(it) {
   if ($("#nai-scheduler")) $("#nai-scheduler").value = p.scheduler || "karras";
   if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").value = p.cfg_rescale ?? 0;
   if ($("#nai-auto-smea")) $("#nai-auto-smea").value = String(p.auto_smea ?? false);
-  naiSetSelectValue("#nai-quality", recipe.quality_toggle === false ? "off" : p.quality_preset, "on");
   naiCharacters = Array.isArray(recipe.characters) ? recipe.characters.map((character) => ({
     prompt: character.prompt || "",
     negative_prompt: character.negative_prompt || "",
@@ -3044,21 +3135,21 @@ function applyGenerationConfig(cfg) {
   // Seed
   if (cfg.seed_mode) $("#nai-seed-mode").value = cfg.seed_mode;
   if (cfg.seed != null) $("#nai-seed").value = String(cfg.seed);
-  // Quality / UC toggles
-  if (cfg.qualityPreset) naiSetSelectValue("#nai-quality", cfg.qualityPreset, "on");
-  if (cfg.presetMode) {
-    naiPresetMode = cfg.presetMode;
-    localStorage.setItem("nai_preset_mode", cfg.presetMode);
-    document.querySelectorAll('input[name="nai-preset"]').forEach((r) => { r.checked = r.value === cfg.presetMode; });
+  // 档位（正面 / 负面）：新字段优先；旧字段 qualityTags / heavyUc 兼容映射。
+  if (cfg.positiveTier === "off" || cfg.positiveTier === "v5_standard") {
+    naiPositiveTier = cfg.positiveTier;
+  } else if (cfg.qualityTags != null) {
+    naiPositiveTier = !!cfg.qualityTags ? "v5_standard" : "off";
   }
-  if (cfg.qualityTags != null) {
-    naiQualityTagsEnabled = !!cfg.qualityTags;
-    if ($("#nai-quality-tags")) $("#nai-quality-tags").checked = naiQualityTagsEnabled;
+  if (cfg.negativeTier === "off" || cfg.negativeTier === "light" || cfg.negativeTier === "heavy") {
+    naiNegativeTier = cfg.negativeTier;
+  } else if (cfg.ucPreset === "off" || cfg.ucPreset === "light" || cfg.ucPreset === "heavy") {
+    naiNegativeTier = cfg.ucPreset;
+  } else if (cfg.heavyUc != null) {
+    naiNegativeTier = !!cfg.heavyUc ? "heavy" : "off";
   }
-  if (cfg.heavyUc != null) {
-    naiHeavyUcEnabled = !!cfg.heavyUc;
-    if ($("#nai-heavy-uc")) $("#nai-heavy-uc").checked = naiHeavyUcEnabled;
-  }
+  naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "v5_standard");
+  naiSetSelectValue("#nai-negative-tier", naiNegativeTier, "heavy");
   if (cfg.transparentBackground != null) {
     naiTransparentBg = !!cfg.transparentBackground;
     if ($("#nai-transparent")) $("#nai-transparent").checked = naiTransparentBg;
@@ -3114,10 +3205,10 @@ function extractMetaFromGalleryItem(item) {
     cfgRescale: s.cfg_rescale ?? 0,
     seed: s.seed,
     seed_mode: s.seed_mode || "fixed",
-    qualityPreset: recipe.quality_toggle === false ? "off" : "on",
+    positiveTier: recipe.quality_toggle === false ? "off" : "v5_standard",
+    negativeTier: "heavy",
     ucPreset: "heavy",
     transparentBackground: false,
-    presetMode: "custom",
     qualityTags: true,
     heavyUc: true,
     resolution_category: recipe.resolution_category || null,
@@ -3238,14 +3329,23 @@ $("#nai-split-neg").addEventListener("click", () => {
 });
 $("#nai-history-refresh").addEventListener("click", loadNaiGallery);
 
-// ---- P0: Preset Mode / Quality Tags / Heavy UC / Transparent / Effective Preview ----
-document.querySelectorAll('input[name="nai-preset"]').forEach((r) => r.addEventListener("change", () => { if (r.checked) naiApplyPresetMode(r.value); }));
-$("#nai-quality-tags").addEventListener("change", () => { naiQualityTagsEnabled = $("#nai-quality-tags").checked; naiUpdateEffectivePreview(); });
-$("#nai-heavy-uc").addEventListener("change", () => { naiHeavyUcEnabled = $("#nai-heavy-uc").checked; naiUpdateEffectivePreview(); });
+// ---- P0: 档位选择器（正面 / 负面）/ Transparent / Effective Preview ----
+$("#nai-positive-tier").addEventListener("change", () => {
+  naiPositiveTier = $("#nai-positive-tier").value === "v5_standard" ? "v5_standard" : "off";
+  localStorage.setItem("nai_positive_tier", naiPositiveTier);
+  naiUpdateTierHint();
+  naiUpdateEffectivePreview();
+});
+$("#nai-negative-tier").addEventListener("change", () => {
+  naiNegativeTier = $("#nai-negative-tier").value;
+  localStorage.setItem("nai_negative_tier", naiNegativeTier);
+  naiUpdateTierHint();
+  naiUpdateEffectivePreview();
+});
 $("#nai-transparent").addEventListener("change", () => { naiTransparentBg = $("#nai-transparent").checked; naiUpdateEffectivePreview(); });
 $("#nai-prompt").addEventListener("input", naiUpdateEffectivePreview);
 $("#nai-neg").addEventListener("input", naiUpdateEffectivePreview);
-$("#nai-model").addEventListener("change", naiUpdateEffectivePreview);
+$("#nai-model").addEventListener("change", () => { naiUpdateTierHint(); naiUpdateEffectivePreview(); });
 $("#nai-sampler").addEventListener("change", naiUpdateEffectivePreview);
 if ($("#nai-scheduler")) $("#nai-scheduler").addEventListener("change", naiUpdateEffectivePreview);
 $("#nai-steps").addEventListener("input", naiUpdateEffectivePreview);

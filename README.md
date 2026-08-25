@@ -318,11 +318,8 @@ git diff --check
 ```text
 UI (index.html)
   │
-  ├─ Generation Preset (官网一致 / 高质量 / 高级自定义)
-  │    └─ 控制 Steps/CFG/Sampler/Scheduler 等参数默认值
-  │
-  ├─ Quality Tags Toggle (☑ 自动质量标签, 默认 ON)
-  ├─ Heavy UC Toggle (☑ 推荐负面提示词, 默认 ON)
+  ├─ 正面提示词档位 (#nai-positive-tier: off | v5_standard, 默认 v5_standard)
+  ├─ 负面提示词档位 (#nai-negative-tier: off | light | heavy, 默认 heavy)
   ├─ Transparent Background Toggle (□ 透明背景, 默认 OFF)
   │
   ▼
@@ -343,19 +340,21 @@ naiGenerate() → POST /api/novelai/generate
   │
   ├─ prompt = effectivePositive
   ├─ negative_prompt = effectiveNegative
+  ├─ uc_preset = 负面档位（off / light / heavy）
   │
   ▼
 Backend normalizeGenerationRequest()
   │
   ├─ 按模型选择默认值：V5 → steps=23, guidance=7; 非V5 → steps=28, guidance=5
   ├─ noise_schedule 透传
+  ├─ uc_preset 校验并透传（off/light/heavy，未知报错，缺省 heavy）
   │
   ▼
 NovelAIProvider.buildPayload()
   │
   ├─ buildV5Parameters() — V5 专用字段（已固化，不改）
   │    ├─ params_version=4, prefer_brownian=true, straight_alpha=true
-  │    ├─ qualityPresetId="standard", ucPresetId="heavy"
+  │    ├─ qualityPresetId="standard", ucPresetId="heavy"（负面档位为 off 时不设置 ucPresetId）
   │    ├─ v4_prompt.caption.base_caption = effectivePrompt
   │    ├─ v4_negative_prompt.caption.base_caption = effectiveNegative
   │    └─ autoSmea=false, dynamic_thresholding=false, cfg_rescale=0
@@ -366,17 +365,25 @@ NovelAI API (https://image.novelai.net/ai/generate-image)
   ▼
 Gallery + Metadata (SQLite: gallery + generation 表)
 ```
-> 注：图库例图专用链路 `/api/novelai/tag-example` 显式传 `uc_preset:"light"`，provider 将 `ucPresetId` 设为 `light`；普通生成不传该字段，保持 `ucPresetId="heavy"` 现状。`light` 的官方展开内容未在本轮真实 API 验证。
+> 注：图库例图专用链路 `/api/novelai/tag-example` 显式传 `uc_preset:"light"`，provider 将 `ucPresetId` 设为 `light`（该链路已固定，不随普通档位选择器改变）。`light` 与 `off` 的官方展开语义未在本轮真实 API 验证（见 OPEN QUESTION）。
 
-### Generation Preset（生成预设）
+### 生成档位（正面 / 负面提示词）
 
-| 预设 | Steps | CFG | Sampler | Scheduler | Quality Tags | Heavy UC | 说明 |
-|------|-------|-----|---------|-----------|-------------|----------|------|
-| 官网一致（默认） | 23 | 7 | Euler Ancestral | Karras | ON | ON | 与 NovelAI 官网 V5 默认行为一致 |
-| 高质量（实验） | 28 | 7 | Euler Ancestral | Karras | ON | ON | 仅增加 Steps，标记"实验" |
-| 高级自定义 | 用户控制 | 用户控制 | 用户控制 | 用户控制 | 用户控制 | 用户控制 | 展开全部底层参数 |
+生图面板提供两个直接选择器，替代旧的「生成预设 / 自动质量标签 / 推荐负面提示词」三套入口：
 
-预设选择保存在 `localStorage`，下次打开自动恢复。
+- **正面提示词档位**（`#nai-positive-tier`）
+  - `关闭`（`off`）：不注入客户端 auto 正面标签。
+  - `标准（V5 Full）`（`v5_standard`）：开启客户端 auto 正面标签。
+- **负面提示词档位**（`#nai-negative-tier`）
+  - `关闭`（`off`）：不注入客户端 auto 负面，且请求层发送 `uc_preset=off`（不发送 heavy）。
+  - `Light`（`light`）：请求层发送 `uc_preset=light`。
+  - `Heavy`（`heavy`）：请求层发送 `uc_preset=heavy`。
+
+默认 `v5_standard + heavy`，以保持当前 V5 Full 默认行为。档位选择保存在 `localStorage`（`nai_positive_tier` / `nai_negative_tier`），下次打开自动恢复。
+
+- **映射关系**：`v5_standard` → compiler `qualityTags=true`；`off` → `qualityTags=false`。负面档位非 `off` → `heavyUc=true`，`off` → `heavyUc=false`。
+- **Preview 与实际发送共用同一档位状态与同一 compiled result**（`naiCompileGeneration`），不会分叉。raw prompt 永不改写。
+- **V5 Curated 提示**：当模型为 `nai-diffusion-5-curated` 且选择 `v5_standard` 时，因该 preset 为 `UNVERIFIED`（无 Web Network 证据），客户端不注入专属正面数组（也不伪造 Curated 专属 UC）；UI 会显示简短提示。其 effective 即用户 raw。
 
 ### Prompt Compiler
 
@@ -407,6 +414,8 @@ Gallery + Metadata (SQLite: gallery + generation 表)
 | V5 Full | `nahida` | `masterpiece, blurry` | `nahida, very aesthetic, masterpiece, no text`（保留 masterpiece） | `nsfw, …, blank page, masterpiece, blurry` | 跨极性冲突仅 warning，两侧都保留 |
 | 任意 | `nahida, nsfw` | `nsfw, blurry` | 含 nsfw | 含 nsfw | 用户两侧同 token 都保留，报告冲突 |
 
+> **OPEN QUESTION（UC off 的 API 关闭语义）**：当负面档位为 `off` 时，provider 不设置 `ucPresetId` 字段（删除该字段），保证 UI 的 off 绝不发送 heavy。**「缺少 `ucPresetId` 是否等于 NovelAI API 的 No Default UC」未经真实 API 验证（UNVERIFIED）**——不要把第三方/旧 docs 当作 authority，也不在本轮声称已 Web 验证。`light` 与 `heavy` 保持现有映射。
+>
 > **OPEN QUESTION（server-side heavy preset）**：provider 仍发送 `ucPresetId="heavy"`（服务器 preset），其值未做真实 API 验证，本轮不做猜测性改动。**当前服务器端 heavy preset 保持现状**：V5 服务器 preset（`qualityPresetId="standard"` / `ucPresetId="heavy"`）不受本地 warning-only 改动影响。
 
 ### 关键文件
@@ -414,8 +423,8 @@ Gallery + Metadata (SQLite: gallery + generation 表)
 | 文件 | 职责 |
 |------|------|
 | `static/prompt-compiler.js` | Prompt Compiler 纯函数（模型家族 preset、跨极性冲突 warning-only、详细编译、兼容 wrapper） |
-| `static/app.js` | UI 状态、Preset 切换、Effective Preview（来源/冲突 warning 区）、naiGenerate 共用详细编译结果 |
-| `static/index.html` | 生成面板 UI（4 模型 selector、Preset Radio、Toggles、Effective Preview 折叠与来源区） |
+| `static/app.js` | UI 状态、正面/负面档位切换、Effective Preview（来源/冲突 warning 区）、naiGenerate 共用详细编译结果 |
+| `static/index.html` | 生成面板 UI（4 模型 selector、正面/负面档位选择器、Effective Preview 折叠与来源区） |
 | `server/generation-request.mjs` | 请求规范化、V5/非V5 默认值分离、4 个合法普通模型 exact-ID |
 | `server/novelai-provider.mjs` | V5 payload 构建（buildV5Parameters 已固化） |
 | `tests/test_prompt_compiler.mjs` | Prompt Compiler + 模型路由 exact-ID 回归测试（20 项） |

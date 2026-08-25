@@ -69,11 +69,18 @@
         <button type="button" class="active" data-nai-mode="txt2img">文生图</button>
         <button type="button" data-nai-mode="img2img">图生图</button>
       </div>
-      <div class="nai-preset-group" role="radiogroup" aria-label="生成预设">
-        <label class="nai-preset-radio"><input type="radio" name="nai-preset" value="website" checked /><span>官网一致（默认）</span></label>
-        <label class="nai-preset-radio"><input type="radio" name="nai-preset" value="high_quality" /><span>高质量 <em>实验</em></span></label>
-        <label class="nai-preset-radio"><input type="radio" name="nai-preset" value="custom" /><span>高级自定义</span></label>
+      <div class="nai-tier-grid">
+        <label><span>正面提示词档位</span><select id="nai-positive-tier" class="nai-select">
+          <option value="off">关闭</option>
+          <option value="v5_standard" selected>标准（V5 Full）</option>
+        </select></label>
+        <label><span>负面提示词档位</span><select id="nai-negative-tier" class="nai-select">
+          <option value="off">关闭</option>
+          <option value="light">Light</option>
+          <option value="heavy" selected>Heavy</option>
+        </select></label>
       </div>
+      <div id="nai-tier-hint" class="nai-tier-hint"></div>
       <section id="nai-img2img-panel" class="nai-img2img-panel" hidden>
         <input id="nai-img2img-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
         <button id="nai-img2img-pick" type="button" class="nai-source-picker">选择基础图</button>
@@ -124,12 +131,6 @@
       <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
       <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
       <div class="nai-quick-toggles">
-        <label class="nai-toggle-item" title="跟随 NovelAI 官网，为最终 Prompt 自动补充质量标签">
-          <input type="checkbox" id="nai-quality-tags" checked /><span>自动质量标签</span>
-        </label>
-        <label class="nai-toggle-item" title="使用 NovelAI 官网 Heavy UC 默认负面提示词">
-          <input type="checkbox" id="nai-heavy-uc" checked /><span>推荐负面提示词</span>
-        </label>
         <label class="nai-toggle-item" title="Prompt 追加 transparent background，API 使用 straight_alpha">
           <input type="checkbox" id="nai-transparent" /><span>透明背景</span>
         </label>
@@ -174,7 +175,6 @@
         <div class="nai-adv-row nai-adv-ctrl"><span>Guidance (CFG)</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="7" placeholder="NovelAI 默认" /></div>
         <div class="nai-adv-row nai-adv-ctrl"><span>CFG Rescale</span><input id="nai-cfg-rescale" type="number" step="0.01" min="0" max="1" value="0" placeholder="0" /></div>
         <div class="nai-adv-row nai-adv-ctrl"><span>Auto SMEA</span><select id="nai-auto-smea"><option value="false">Off</option><option value="true">On</option></select></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Quality Tags</span><select id="nai-quality"><option value="on">On</option><option value="off">Off</option></select></div>
       </details>
 
       <div id="nai-cost" class="nai-cost unknown"><span>Opus 本地预估</span><strong>正在读取参数</strong></div>
@@ -244,6 +244,21 @@
         <div class="empty">点击图片查看大图与提示词</div>
       </div>
     </aside>
+    <section id="gallery-review" class="gallery-review" hidden aria-label="沉浸式图片审阅">
+      <div class="gallery-review-bar">
+        <span id="gallery-review-count" class="gallery-review-count"></span>
+        <div class="gallery-review-bar-actions">
+          <button id="gallery-review-fav" class="gallery-review-icon" type="button" title="收藏" aria-label="收藏当前图片" aria-pressed="false">☆</button>
+          <button id="gallery-review-del" class="gallery-review-icon danger" type="button" title="删除当前图片" aria-label="删除当前图片">🗑</button>
+          <button id="gallery-review-exit" class="ghost" type="button">退出审阅</button>
+        </div>
+      </div>
+      <div class="gallery-review-stage">
+        <button id="gallery-review-prev" class="gallery-review-nav" type="button" title="上一张" aria-label="上一张">‹</button>
+        <div id="gallery-review-canvas" class="gallery-review-canvas"><div class="empty">暂无图片</div></div>
+        <button id="gallery-review-next" class="gallery-review-nav" type="button" title="下一张" aria-label="下一张">›</button>
+      </div>
+    </section>
   </main>
 
   <main class="layout">

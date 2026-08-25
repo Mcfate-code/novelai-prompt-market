@@ -271,6 +271,26 @@ test("keeps Heavy UC preset by default when uc_preset is omitted (普通生成)"
   assert.equal(payload.parameters.ucPresetId, "heavy");
 });
 
+test("uses Heavy UC preset when uc_preset is heavy", () => {
+  const payload = provider.buildPayload({
+    prompt: "1girl",
+    negative_prompt: "lowres",
+    settings: { model: "nai-diffusion-5-full" },
+    uc_preset: "heavy",
+  });
+  assert.equal(payload.parameters.ucPresetId, "heavy");
+});
+
+test("omits ucPresetId when uc_preset is off (UI off never sends heavy)", () => {
+  const payload = provider.buildPayload({
+    prompt: "1girl",
+    negative_prompt: "lowres",
+    settings: { model: "nai-diffusion-5-full" },
+    uc_preset: "off",
+  });
+  assert.equal("ucPresetId" in payload.parameters, false, "ucPresetId must be absent for off");
+});
+
 test("rejects an unknown uc_preset explicitly", () => {
   assert.throws(
     () => provider.buildPayload({

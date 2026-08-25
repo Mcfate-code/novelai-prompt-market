@@ -871,6 +871,61 @@ def gallery_delete(dir_name: str):
     return {"ok": True, "cleanup_path": str(cleanup_path.relative_to(BASE_DIR)) if cleanup_path else None}
 
 
+def _gallery_companion_files(file_path: Path) -> list[Path]:
+    """返回与主图片同目录、同名的伴随文件（JSON 元数据 / 缩略图等）。
+
+    只扫描 file_path 所在目录内的普通文件：stem 与主文件相同（如 xxx.json / xxx.txt）
+    或以主文件 stem 为前缀的派生文件（如 xxx.thumb.jpg / xxx-preview.webp）。
+    绝不触碰目录之外的文件。
+    """
+    if not file_path.is_file():
+        return []
+    directory = file_path.parent
+    stem = file_path.stem
+    companions: list[Path] = []
+    for candidate in directory.iterdir():
+        if not candidate.is_file() or candidate.name == file_path.name:
+            continue
+        if candidate.stem == stem or candidate.name.startswith(f"{stem}."):
+            companions.append(candidate)
+    return companions
+
+
+@app.post("/api/gallery/item/delete")
+def gallery_item_delete(body: GalleryItemRef):
+    """删除图库目录中的单张图片：文件与同名伴随文件移入待清理区，并移除活动索引。"""
+    target = _safe_gallery_path(body.dir_name)
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT id, file_path FROM gallery WHERE dir_name=? AND file_name=?",
+            (body.dir_name, body.file_name),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "图库图片不存在")
+        file_path = Path(row["file_path"])
+        if not file_path.is_absolute():
+            file_path = BASE_DIR / file_path
+        file_path = file_path.resolve()
+        if file_path.parent != target.resolve() or not file_path.is_file():
+            raise HTTPException(404, "图库图片文件不存在")
+
+        moved: list[str] = []
+        for candidate in [file_path, *_gallery_companion_files(file_path)]:
+            cleanup_path = _move_gallery_to_cleanup(candidate, "已删除图片")
+            if cleanup_path:
+                moved.append(str(cleanup_path.relative_to(BASE_DIR)))
+        conn.execute("DELETE FROM gallery WHERE id=?", (row["id"],))
+        conn.execute(
+            "DELETE FROM gallery_favorites WHERE dir_name=? AND file_name=?",
+            (body.dir_name, body.file_name),
+        )
+        conn.commit()
+        return {"ok": True, "deleted": body.file_name, "moved": moved}
+    finally:
+        conn.close()
+
+
 # ---------- 模型 / overlay ----------
 
 @app.get("/api/models")

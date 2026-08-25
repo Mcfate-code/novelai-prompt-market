@@ -504,6 +504,57 @@ class SettingsAndVisibilityTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_gallery_item_delete_moves_file_and_companions_and_removes_index(self):
+        source = self.gallery_dir / "demo"
+        source.mkdir()
+        (source / "image.jpg").write_bytes(b"gallery")
+        (source / "image.json").write_bytes(b"{}")
+        (source / "image.thumb.jpg").write_bytes(b"thumb")
+        conn = self.conn()
+        try:
+            conn.execute(
+                "INSERT INTO gallery (dir_name, file_name, prompt, file_path, created_at) VALUES (?,?,?,?,?)",
+                ("demo", "source.png", "prompt", "gallery/demo/image.jpg", db.now_iso()),
+            )
+            conn.execute(
+                "INSERT INTO gallery_favorites (dir_name, file_name, created_at) VALUES (?,?,?)",
+                ("demo", "source.png", db.now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = app.gallery_item_delete(app.GalleryItemRef(dir_name="demo", file_name="source.png"))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse((source / "image.jpg").exists())
+        self.assertFalse((source / "image.json").exists())
+        self.assertFalse((source / "image.thumb.jpg").exists())
+        moved = list((self.gallery_trash_dir / "已删除图片").glob("*"))
+        self.assertEqual(len(moved), 3)
+        conn = self.conn()
+        try:
+            self.assertIsNone(conn.execute("SELECT 1 FROM gallery WHERE dir_name='demo'").fetchone())
+            self.assertIsNone(conn.execute("SELECT 1 FROM gallery_favorites WHERE dir_name='demo'").fetchone())
+        finally:
+            conn.close()
+
+    def test_gallery_item_delete_rejects_missing_file(self):
+        source = self.gallery_dir / "demo"
+        source.mkdir()
+        conn = self.conn()
+        try:
+            conn.execute(
+                "INSERT INTO gallery (dir_name, file_name, prompt, file_path, created_at) VALUES (?,?,?,?,?)",
+                ("demo", "ghost.png", "prompt", "gallery/demo/ghost.png", db.now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with self.assertRaises(app.HTTPException) as ctx:
+            app.gallery_item_delete(app.GalleryItemRef(dir_name="demo", file_name="ghost.png"))
+        self.assertEqual(ctx.exception.status_code, 404)
+
     def test_gallery_zip_import_rolls_back_files_and_rows_on_batch_failure(self):
         archive = io.BytesIO()
         png_buffer = BytesIO()

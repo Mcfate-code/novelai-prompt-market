@@ -30,6 +30,8 @@ const LEGACY_MODEL_ALIASES = Object.freeze({
   "nai-diffusion-4.5-full": "nai-diffusion-4-5-full",
 });
 const ALLOWED_SAMPLERS = Object.freeze(new Set(["k_euler_ancestral", "k_euler", "k_dpmpp_2s_ancestral", "k_dpmpp_2m"]));
+const ALLOWED_UC_PRESETS = Object.freeze(new Set(["off", "light", "heavy"]));
+const DEFAULT_UC_PRESET = "heavy";
 const MAX_EDGE = 1536;
 const MAX_PIXELS = MAX_EDGE * MAX_EDGE;
 const MAX_SEED = 0xFFFFFFFF;
@@ -156,11 +158,20 @@ export function normalizeGenerationRequest(input = {}) {
       noise: clamp(finiteNumber(source.noise, 0), 0, 0.99),
     };
   }
+  const ucPresetRaw = input.uc_preset;
+  if (ucPresetRaw !== undefined && ucPresetRaw !== null && ucPresetRaw !== "" && !ALLOWED_UC_PRESETS.has(String(ucPresetRaw))) {
+    throw new Error(`不支持的 UC preset：${String(ucPresetRaw)}（仅支持 off / light / heavy）`);
+  }
+  const ucPreset = ucPresetRaw === undefined || ucPresetRaw === null || ucPresetRaw === ""
+    ? DEFAULT_UC_PRESET
+    : String(ucPresetRaw);
+
   return {
     mode,
     prompt,
     negative_prompt: String(input.negative_prompt || "").trim(),
     snapshot_id: input.snapshot_id ?? null,
+    uc_preset: ucPreset,
     quality_toggle: input.quality_toggle !== false,
     noise_schedule: input.noise_schedule || input.settings?.noise_schedule || null,
     settings: { ...settings, resolution_category: resolutionCategory || null },
@@ -189,6 +200,7 @@ export function createGenerationRecipe(request, seed = request.settings.seed) {
     prompt: request.prompt,
     negative_prompt: request.negative_prompt,
     snapshot_id: request.snapshot_id ?? null,
+    uc_preset: request.uc_preset ?? "heavy",
     quality_toggle: request.quality_toggle,
     noise_schedule: request.noise_schedule || null,
     settings: { ...request.settings, seed },

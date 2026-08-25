@@ -374,16 +374,18 @@ function isStructuredPromptModel(model) {
  * Called only for structured models (nai-diffusion-4/5-*).
  * Merges into the existing parameters object in-place.
  */
-// UC presets currently used by this provider. Only `light` (图库例图专用链路) and
-// `heavy` (普通生成默认) are supported here. Unknown values are rejected explicitly
-// rather than silently mapped to another preset.
-const ALLOWED_UC_PRESETS = Object.freeze(["light", "heavy"]);
+// UC presets used by this provider. `off` 表示不设置自动 UC preset（最终 payload 不含
+// ucPresetId，等于关闭自动 UC）；`light`（图库例图专用链路）与 `heavy`（普通生成默认）
+// 保持现有映射。未知值明确报错，不静默 fallback。
+// 注：`off` 是否等于 NovelAI API 的 "No Default UC" 尚未经真实 API 验证（见 README
+// OPEN QUESTION），此处最小安全实现为删除 ucPresetId 字段，保证 UI 的 off 不发送 heavy。
+const ALLOWED_UC_PRESETS = Object.freeze(["off", "light", "heavy"]);
 
 function normalizeUcPreset(value) {
   if (value === undefined || value === null || value === "") return "heavy";
   const preset = String(value);
   if (!ALLOWED_UC_PRESETS.includes(preset)) {
-    const error = new Error(`不支持的 UC preset：${preset}（仅支持 light / heavy）`);
+    const error = new Error(`不支持的 UC preset：${preset}（仅支持 off / light / heavy）`);
     error.code = "INVALID_UC_PRESET";
     throw error;
   }
@@ -429,8 +431,13 @@ function buildV5Parameters(parameters, model, prompt, negativePrompt, characters
 
   // Quality & UC presets
   parameters.qualityPresetId = "standard";
-  // 图库例图专用链路显式传 `light`，普通生成未传则保持 `heavy` 现状。
-  parameters.ucPresetId = ucPreset || "heavy";
+  // 图库例图专用链路显式传 `light`；普通生成未传则保持 `heavy` 现状。
+  // `off`：不设置 ucPresetId（关闭自动 UC preset）——UI 的 off 绝不发送 heavy。
+  if (ucPreset === "off") {
+    delete parameters.ucPresetId;
+  } else {
+    parameters.ucPresetId = ucPreset || "heavy";
+  }
 
   // Tag hints
   parameters.tag_hint_qt = 1;
