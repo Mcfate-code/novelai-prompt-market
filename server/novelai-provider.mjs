@@ -376,23 +376,37 @@ function isStructuredPromptModel(model) {
  */
 // UC presets used by this provider. `off` 表示不设置自动 UC preset（最终 payload 不含
 // ucPresetId，等于关闭自动 UC）；`light`（图库例图专用链路）与 `heavy`（普通生成默认）
-// 保持现有映射。未知值明确报错，不静默 fallback。
+// 保持现有映射；`furry_focus` / `human_focus` 为官方 UI preset 值，直接透传为 ucPresetId
+//（不在 provider 内复制 tag 数组）。未知值明确报错，不静默 fallback。
 // 注：`off` 是否等于 NovelAI API 的 "No Default UC" 尚未经真实 API 验证（见 README
 // OPEN QUESTION），此处最小安全实现为删除 ucPresetId 字段，保证 UI 的 off 不发送 heavy。
-const ALLOWED_UC_PRESETS = Object.freeze(["off", "light", "heavy"]);
+// `furry_focus` / `human_focus` 是否为 API 接受同样未在本轮真实 API 验证（见 README）。
+const ALLOWED_UC_PRESETS = Object.freeze(["off", "light", "heavy", "furry_focus", "human_focus"]);
+const ALLOWED_QUALITY_PRESETS = Object.freeze(["off", "standard", "light"]);
 
 function normalizeUcPreset(value) {
   if (value === undefined || value === null || value === "") return "heavy";
   const preset = String(value);
   if (!ALLOWED_UC_PRESETS.includes(preset)) {
-    const error = new Error(`不支持的 UC preset：${preset}（仅支持 off / light / heavy）`);
+    const error = new Error(`不支持的 UC preset：${preset}（仅支持 off / light / heavy / furry_focus / human_focus）`);
     error.code = "INVALID_UC_PRESET";
     throw error;
   }
   return preset;
 }
 
-function buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords, ucPreset) {
+function normalizeQualityPreset(value) {
+  if (value === undefined || value === null || value === "") return "standard";
+  const preset = String(value);
+  if (!ALLOWED_QUALITY_PRESETS.includes(preset)) {
+    const error = new Error(`不支持的 Quality preset：${preset}（仅支持 off / standard / light）`);
+    error.code = "INVALID_QUALITY_PRESET";
+    throw error;
+  }
+  return preset;
+}
+
+function buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords, qualityPreset, ucPreset, promptPresetsCompiled = false) {
   // Structured prompt fields (already partially set by buildPayload for V4/V5)
   parameters.prompt = null;
   parameters.params_version = model.startsWith("nai-diffusion-5-") ? 4 : 3;
@@ -430,10 +444,16 @@ function buildV5Parameters(parameters, model, prompt, negativePrompt, characters
   parameters.legacy_v3_extend = false;
 
   // Quality & UC presets
-  parameters.qualityPresetId = "standard";
+  if (promptPresetsCompiled || qualityPreset === "off") {
+    delete parameters.qualityPresetId;
+  } else {
+    parameters.qualityPresetId = qualityPreset;
+  }
   // 图库例图专用链路显式传 `light`；普通生成未传则保持 `heavy` 现状。
   // `off`：不设置 ucPresetId（关闭自动 UC preset）——UI 的 off 绝不发送 heavy。
-  if (ucPreset === "off") {
+  // `light` / `heavy` / `furry_focus` / `human_focus`：按官方 UI preset ID 原样透传
+  //（不在此复制 tag 数组；furry_focus/human_focus 的 API 接受性未实 API 验证，见 README）。
+  if (promptPresetsCompiled || ucPreset === "off") {
     delete parameters.ucPresetId;
   } else {
     parameters.ucPresetId = ucPreset || "heavy";
@@ -463,7 +483,7 @@ export function buildWebUiBaselineRequest() {
   return {
     prompt: "nahida\n, transparent background, very aesthetic, masterpiece, no text",
     negative_prompt:
-      "nsfw, lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page",
+      "lowres, artistic error, film grain, scan artifacts, worst quality, bad quality, jpeg artifacts, very displeasing, chromatic aberration, dithering, halftone, screentone, multiple views, logo, too many watermarks, negative space, blank page",
     quality_toggle: true,
     settings: {
       model: "nai-diffusion-5-full",
@@ -532,6 +552,7 @@ export class NovelAIProvider {
     const negativePrompt = String(request.negative_prompt || "");
     const characters = Array.isArray(request.characters) ? request.characters : [];
     const useCoords = characters.some((character) => !!character.position);
+    const qualityPreset = normalizeQualityPreset(request.quality_preset);
     const ucPreset = normalizeUcPreset(request.uc_preset);
     const parameters = {
       width: settings.width ?? 832,
@@ -548,7 +569,7 @@ export class NovelAIProvider {
     };
 
     if (isStructuredPromptModel(model)) {
-      buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords, ucPreset);
+      buildV5Parameters(parameters, model, prompt, negativePrompt, characters, useCoords, qualityPreset, ucPreset, request.prompt_presets_compiled === true);
     }
 
     let action = "generate";

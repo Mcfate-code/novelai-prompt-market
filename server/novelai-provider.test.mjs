@@ -250,6 +250,40 @@ test("honors a disabled quality toggle", () => {
   assert.equal(payload.parameters.qualityToggle, false);
 });
 
+test("maps quality standard/light/off to the V5 payload", () => {
+  for (const [quality_preset, expected] of [["standard", "standard"], ["light", "light"]]) {
+    const payload = provider.buildPayload({ prompt: "1girl", settings: { model: "nai-diffusion-5-full" }, quality_preset });
+    assert.equal(payload.parameters.qualityPresetId, expected);
+  }
+  const off = provider.buildPayload({ prompt: "1girl", settings: { model: "nai-diffusion-5-full" }, quality_preset: "off" });
+  assert.equal("qualityPresetId" in off.parameters, false);
+  const legacy = provider.buildPayload({ prompt: "1girl", settings: { model: "nai-diffusion-5-full" } });
+  assert.equal(legacy.parameters.qualityPresetId, "standard");
+  assert.throws(() => provider.buildPayload({ prompt: "1girl", quality_preset: "ultra", settings: { model: "nai-diffusion-5-full" } }), /不支持的 Quality preset/);
+});
+
+test("does not double-inject client-compiled positive and negative presets", () => {
+  const payload = provider.buildPayload({ prompt: "girl, amazing quality", negative_prompt: "blurry", quality_preset: "light", uc_preset: "heavy", prompt_presets_compiled: true, settings: { model: "nai-diffusion-5-full" } });
+  assert.equal("qualityPresetId" in payload.parameters, false);
+  assert.equal("ucPresetId" in payload.parameters, false);
+});
+
+test("simulates UI tiers through normalization into the provider payload", () => {
+  const normalized = normalizeGenerationRequest({
+    prompt: "girl, very aesthetic, amazing quality, no text",
+    negative_prompt: "lowres, blurry",
+    quality_preset: "light",
+    uc_preset: "off",
+    prompt_presets_compiled: true,
+    settings: { model: "nai-diffusion-5-full" },
+  });
+  const payload = provider.buildPayload(requestForSeed(normalized, 7));
+  assert.equal(normalized.quality_preset, "light");
+  assert.equal(normalized.uc_preset, "off");
+  assert.equal("qualityPresetId" in payload.parameters, false);
+  assert.equal("ucPresetId" in payload.parameters, false);
+});
+
 test("uses Light UC preset when uc_preset is light (图库例图专用链路)", () => {
   // 与 /api/novelai/tag-example 路由相同的原始调用形态（不经 normalizeGenerationRequest）。
   const payload = provider.buildPayload({
@@ -281,6 +315,19 @@ test("uses Heavy UC preset when uc_preset is heavy", () => {
   assert.equal(payload.parameters.ucPresetId, "heavy");
 });
 
+test("passes through official furry_focus / human_focus UC preset IDs", () => {
+  // 官方 UI preset 值原样透传为 ucPresetId（不在 provider 内复制 tag 数组）。
+  for (const value of ["furry_focus", "human_focus"]) {
+    const payload = provider.buildPayload({
+      prompt: "1girl",
+      negative_prompt: "lowres",
+      settings: { model: "nai-diffusion-5-full" },
+      uc_preset: value,
+    });
+    assert.equal(payload.parameters.ucPresetId, value, `ucPresetId must be ${value}`);
+  }
+});
+
 test("omits ucPresetId when uc_preset is off (UI off never sends heavy)", () => {
   const payload = provider.buildPayload({
     prompt: "1girl",
@@ -299,7 +346,7 @@ test("rejects an unknown uc_preset explicitly", () => {
       settings: { model: "nai-diffusion-5-full" },
       uc_preset: "ultra",
     }),
-    (error) => error.code === "INVALID_UC_PRESET" && /不支持/.test(error.message),
+    (error) => error.code === "INVALID_UC_PRESET" && /不支持/.test(error.message) && /furry_focus/.test(error.message),
   );
 });
 

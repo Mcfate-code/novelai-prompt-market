@@ -105,8 +105,8 @@ test("keeps the quality toggle through normalization and recipes", () => {
   assert.equal(recipe.quality_toggle, false);
 });
 
-test("normalizes and passes through uc_preset (off/light/heavy)", () => {
-  for (const value of ["off", "light", "heavy"]) {
+test("normalizes and passes through uc_preset (off/light/heavy/furry_focus/human_focus)", () => {
+  for (const value of ["off", "light", "heavy", "furry_focus", "human_focus"]) {
     const request = normalizeGenerationRequest({ prompt: "x", uc_preset: value });
     assert.equal(request.uc_preset, value, `normalized uc_preset must be ${value}`);
     const one = requestForSeed(request, 99);
@@ -123,4 +123,18 @@ test("defaults uc_preset to heavy for legacy requests without the field", () => 
 
 test("rejects an unknown uc_preset in normalization", () => {
   assert.throws(() => normalizeGenerationRequest({ prompt: "x", uc_preset: "ultra" }), /不支持的 UC preset/);
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", uc_preset: "ultra" }), /off \/ light \/ heavy \/ furry_focus \/ human_focus/);
+});
+
+test("normalizes quality_preset through seed requests and recipes", () => {
+  for (const value of ["off", "standard", "light"]) {
+    const request = normalizeGenerationRequest({ prompt: "x", quality_preset: value });
+    const one = requestForSeed(request, 99);
+    const recipe = createGenerationRecipe(one);
+    assert.equal(request.quality_preset, value);
+    assert.equal(one.quality_preset, value);
+    assert.equal(recipe.quality_preset, value);
+  }
+  assert.equal(normalizeGenerationRequest({ prompt: "x" }).quality_preset, "standard");
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", quality_preset: "ultra" }), /不支持的 Quality preset/);
 });

@@ -30,8 +30,10 @@ const LEGACY_MODEL_ALIASES = Object.freeze({
   "nai-diffusion-4.5-full": "nai-diffusion-4-5-full",
 });
 const ALLOWED_SAMPLERS = Object.freeze(new Set(["k_euler_ancestral", "k_euler", "k_dpmpp_2s_ancestral", "k_dpmpp_2m"]));
-const ALLOWED_UC_PRESETS = Object.freeze(new Set(["off", "light", "heavy"]));
+const ALLOWED_UC_PRESETS = Object.freeze(new Set(["off", "light", "heavy", "furry_focus", "human_focus"]));
 const DEFAULT_UC_PRESET = "heavy";
+const ALLOWED_QUALITY_PRESETS = Object.freeze(new Set(["off", "standard", "light"]));
+const DEFAULT_QUALITY_PRESET = "standard";
 const MAX_EDGE = 1536;
 const MAX_PIXELS = MAX_EDGE * MAX_EDGE;
 const MAX_SEED = 0xFFFFFFFF;
@@ -160,18 +162,29 @@ export function normalizeGenerationRequest(input = {}) {
   }
   const ucPresetRaw = input.uc_preset;
   if (ucPresetRaw !== undefined && ucPresetRaw !== null && ucPresetRaw !== "" && !ALLOWED_UC_PRESETS.has(String(ucPresetRaw))) {
-    throw new Error(`不支持的 UC preset：${String(ucPresetRaw)}（仅支持 off / light / heavy）`);
+    throw new Error(`不支持的 UC preset：${String(ucPresetRaw)}（仅支持 off / light / heavy / furry_focus / human_focus）`);
   }
   const ucPreset = ucPresetRaw === undefined || ucPresetRaw === null || ucPresetRaw === ""
     ? DEFAULT_UC_PRESET
     : String(ucPresetRaw);
+  const qualityPresetRaw = input.quality_preset;
+  if (qualityPresetRaw !== undefined && qualityPresetRaw !== null && qualityPresetRaw !== "" && !ALLOWED_QUALITY_PRESETS.has(String(qualityPresetRaw))) {
+    throw new Error(`不支持的 Quality preset：${String(qualityPresetRaw)}（仅支持 off / standard / light）`);
+  }
+  const qualityPreset = qualityPresetRaw === undefined || qualityPresetRaw === null || qualityPresetRaw === ""
+    ? DEFAULT_QUALITY_PRESET
+    : String(qualityPresetRaw);
 
   return {
     mode,
     prompt,
     negative_prompt: String(input.negative_prompt || "").trim(),
     snapshot_id: input.snapshot_id ?? null,
+    quality_preset: qualityPreset,
     uc_preset: ucPreset,
+    // The browser compiler keeps the expanded text for Preview/metadata. The provider
+    // uses this marker to avoid adding the same preset a second time.
+    prompt_presets_compiled: input.prompt_presets_compiled === true,
     quality_toggle: input.quality_toggle !== false,
     noise_schedule: input.noise_schedule || input.settings?.noise_schedule || null,
     settings: { ...settings, resolution_category: resolutionCategory || null },
@@ -200,7 +213,9 @@ export function createGenerationRecipe(request, seed = request.settings.seed) {
     prompt: request.prompt,
     negative_prompt: request.negative_prompt,
     snapshot_id: request.snapshot_id ?? null,
+    quality_preset: request.quality_preset ?? DEFAULT_QUALITY_PRESET,
     uc_preset: request.uc_preset ?? "heavy",
+    prompt_presets_compiled: request.prompt_presets_compiled === true,
     quality_toggle: request.quality_toggle,
     noise_schedule: request.noise_schedule || null,
     settings: { ...request.settings, seed },

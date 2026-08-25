@@ -3,9 +3,10 @@
  *
  * 设计原则：
  * - 只做 token 级（逗号分隔、trim、大小写无关精确比较）处理；不引入 fuzzy / embedding / LLM / 反义词推理。
- * - 质量/UC 标签按模型家族（model family）区分：V5 与 V4.5/V4 使用不同 preset（见 getModelPresetFamily）。
- * - V5 Full 的 Quality/Heavy-UC 以官网真实 Network 捕获为准（Web-verified）；V5 Curated 无 Web 证据，
- *   标记 V5_CURATED_PRESET: UNVERIFIED，不自动注入专属 preset。
+ * - Quality / UC 档位内容以「用户提供的官方档位事实」为唯一事实源（2026-08 同步），按统一官方档位内容
+ *   应用于所有模型家族（V5 Full / V5 Curated / V4.5 / V4）：Standard/Light Quality 与
+ *   light / heavy / furry_focus / human_focus 四个 UC preset 使用同一官方数组。
+ * - V5 Curated 不伪造 Curated 专属差异：不声称已单独抓到 Curated 专属 payload（V5_CURATED_PRESET: UNVERIFIED）。
  * - WEBUI PARITY 为默认行为目标：客户端只做跨极性冲突检测（warning-only），
  *   绝不从 payload 删除/抑制任何 token（不再有「用户显式 > 自动 preset」的本地 suppress）。
  *   用户如需调整，应自行编辑 Prompt/UC preset。
@@ -19,82 +20,134 @@ const V5_MODEL_PREFIX = "nai-diffusion-5-";
 const TRANSPARENT_BACKGROUND_TAG = "transparent background";
 
 /**
- * V4.5/V4 客户端 Quality preset 展开标签。
- * 注意：`masterpiece` 在旧 V4.5 docs 中仅 V4.5/V4 家族使用；但官网真实 Network 已证明 V5 Full
- * Standard Quality 同样包含 `very aesthetic, masterpiece, no text`（见 V5_FULL_STANDARD_QUALITY）。
- * 本数组仅用于 V4.5/V4 家族。
+ * 官方 Quality 档位（用户提供并冻结的唯一事实源，2026-08 同步）。
+ * Standard 精确为 `very aesthetic, masterpiece, no text`；
+ * Light 精确为 `very aesthetic, amazing quality, no text`。
  */
-const V4_QUALITY_TAGS = Object.freeze(["very aesthetic", "masterpiece", "no text"]);
+const QUALITY_PRESETS = Object.freeze({
+  standard: Object.freeze(["very aesthetic", "masterpiece", "no text"]),
+  light: Object.freeze(["very aesthetic", "amazing quality", "no text"]),
+});
+export { QUALITY_PRESETS };
 
 /**
- * V5 Full（nai-diffusion-5-full）Web-verified Standard Quality 自动正面标签。
- * 来源：从 NovelAI 官网真实 Network 捕获的 V5 Full（params_version=4）请求，
- * 其最终 effective positive 明确包含这三标签（顺序/内容固定）。
- * 官网真实 Network 高于旧 V4.5 文档，故 V5 Full 必须恢复，不得因旧 docs 误标为 V4.5-only 而删除。
+ * 官方 UC preset 档位（用户提供并冻结的唯一事实源，2026-08 同步）。
+ * 官方 heavy 明确不含 nsfw（修正 preset 数据本身，非冲突 suppress）。
+ * furry_focus / human_focus 为官方 UI preset 值；本轮未对真实 NovelAI API 验证其接受性（见 README）。
  */
-const V5_FULL_STANDARD_QUALITY = Object.freeze(["very aesthetic", "masterpiece", "no text"]);
+const UC_PRESETS = Object.freeze({
+  light: Object.freeze([
+    "lowres",
+    "bad hands",
+    "bad anatomy",
+    "artistic error",
+    "sepia",
+    "white haze",
+    "worst quality",
+    "very displeasing",
+    "jpeg artifacts",
+    "0::ai-generated::",
+  ]),
+  heavy: Object.freeze([
+    "lowres",
+    "artistic error",
+    "film grain",
+    "scan artifacts",
+    "worst quality",
+    "bad quality",
+    "jpeg artifacts",
+    "very displeasing",
+    "chromatic aberration",
+    "dithering",
+    "halftone",
+    "screentone",
+    "multiple views",
+    "logo",
+    "too many watermarks",
+    "negative space",
+    "blank page",
+  ]),
+  furry_focus: Object.freeze([
+    "{worst quality}",
+    "distracting watermark",
+    "unfinished",
+    "bad quality",
+    "{widescreen}",
+    "upscale",
+    "{sequence}",
+    "{{grandfathered content}}",
+    "blurred foreground",
+    "chromatic aberration",
+    "sketch",
+    "everyone",
+    "[sketch background]",
+    "simple",
+    "[flat colors]",
+    "ych (character)",
+    "outline",
+    "multiple scenes",
+    "[[horror (theme)]]",
+    "comic",
+  ]),
+  human_focus: Object.freeze([
+    "lowres",
+    "artistic error",
+    "film grain",
+    "scan artifacts",
+    "worst quality",
+    "bad quality",
+    "jpeg artifacts",
+    "very displeasing",
+    "chromatic aberration",
+    "dithering",
+    "halftone",
+    "screentone",
+    "multiple views",
+    "logo",
+    "too many watermarks",
+    "negative space",
+    "blank page",
+    "@_@",
+    "mismatched pupils",
+    "glowing eyes",
+    "bad anatomy",
+  ]),
+});
+export { UC_PRESETS };
 
 /**
- * V5 Full（nai-diffusion-5-full）Web-verified Heavy UC 完整基准。
- * 来源：从 NovelAI 官网真实 Network 捕获的 V5 Full Heavy UC 完整列表，原样保留，不按旧 V4.5 文档猜测或改写。
+ * 兼容旧常量名：V4/V5 统一指向官方数组（官方 heavy 明确不含 nsfw）。
  */
-const V5_FULL_HEAVY_UC = Object.freeze([
-  "nsfw",
-  "lowres",
-  "artistic error",
-  "film grain",
-  "scan artifacts",
-  "worst quality",
-  "bad quality",
-  "jpeg artifacts",
-  "very displeasing",
-  "chromatic aberration",
-  "dithering",
-  "halftone",
-  "screentone",
-  "multiple views",
-  "logo",
-  "too many watermarks",
-  "negative space",
-  "blank page",
-]);
+const V4_QUALITY_TAGS = QUALITY_PRESETS.standard;
+const V5_FULL_STANDARD_QUALITY = QUALITY_PRESETS.standard;
+const V5_FULL_LIGHT_QUALITY = QUALITY_PRESETS.light;
+const V5_FULL_HEAVY_UC = UC_PRESETS.heavy;
+const V4_HEAVY_UC = UC_PRESETS.heavy;
+
+const V5_AUTO_POSITIVE = QUALITY_PRESETS.standard;
+const V5_AUTO_NEGATIVE = UC_PRESETS.heavy;
 
 /**
- * V4.5/V4 客户端 Heavy UC（undesired content preset）展开内容。
- * 与 NovelAI 官网 ucPresetId=heavy 展开一致。
+ * 正面档位（#nai-positive-tier）→ 官方 Quality 数组。
+ * off=不注入；standard/light 为官方数组。
  */
-const V4_HEAVY_UC = Object.freeze([
-  "nsfw",
-  "lowres",
-  "artistic error",
-  "film grain",
-  "scan artifacts",
-  "worst quality",
-  "bad quality",
-  "jpeg artifacts",
-  "very displeasing",
-  "chromatic aberration",
-  "dithering",
-  "halftone",
-  "screentone",
-  "multiple views",
-  "logo",
-  "too many watermarks",
-  "negative space",
-  "blank page",
-]);
+const POSITIVE_TIERS = Object.freeze({
+  off: Object.freeze([]),
+  standard: QUALITY_PRESETS.standard,
+  light: QUALITY_PRESETS.light,
+});
 
 /**
- * V5 Full（nai-diffusion-5-full）已通过官网真实 Network 验证 Quality/Heavy-UC 自动注入；
- * V5 Curated（nai-diffusion-5-curated）暂无 Web Network 级 Quality/UC 证据，
- * 标记为 V5_CURATED_PRESET: UNVERIFIED，不自动猜测其专属 preset（不伪造 Curated 专属数组）。
- *
- * 客户端 auto 注入仅服务「WEBUI PARITY」：V5 Full 的 effective positive/negative 与官网真实 Network
- * 一致（冲突检测仅 warning，不删除 token）；V5 的服务器 preset
- * （qualityPresetId="standard" / ucPresetId="heavy"）仍由 provider 负责。
+ * 负面档位（#nai-negative-tier）→ 官方 UC 数组。
+ * off=不注入；light/heavy/furry_focus/human_focus 为官方数组。
  */
-const V5_AUTO_POSITIVE = Object.freeze([...V5_FULL_STANDARD_QUALITY]);
-const V5_AUTO_NEGATIVE = Object.freeze([...V5_FULL_HEAVY_UC]);
+const NEGATIVE_TIERS = Object.freeze({
+  off: Object.freeze([]),
+  light: UC_PRESETS.light,
+  heavy: UC_PRESETS.heavy,
+  furry_focus: UC_PRESETS.furry_focus,
+  human_focus: UC_PRESETS.human_focus,
+});
 
 /**
  * 依据模型 ID 返回 preset 家族。
@@ -108,32 +161,19 @@ export function getModelPresetFamily(model) {
 
 /**
  * 依据模型家族返回客户端自动注入的 prompt preset。
- * V5 Full 返回 Web-verified Quality/Heavy-UC；V5 Curated 返回空（UNVERIFIED）。
+ * 统一官方档位内容：所有模型家族（V5 Full / V5 Curated / V4.5 / V4）返回同一官方
+ * Standard Quality / Heavy UC 数组——不伪造 V5 Curated 专属差异（V5_CURATED_PRESET: UNVERIFIED）。
  * @param {string} model
  * @param {object} [options]
  * @param {boolean} [options.transparentBackground] 是否追加透明背景标签（追加到 auto positive）
  * @returns {{ positiveTags: string[], negativeTags: string[] }}
  */
 export function getAutoPromptPreset(model, options = {}) {
-  const family = getModelPresetFamily(model);
-  if (family === "v5") {
-    // V5 Full：使用 Web-verified Quality/UC；V5 Curated：UNVERIFIED，不自动注入专属 preset。
-    const isV5Full = String(model || "") === "nai-diffusion-5-full";
-    const positive = [...(isV5Full ? V5_AUTO_POSITIVE : [])];
-    if (options.transparentBackground && !positive.includes(TRANSPARENT_BACKGROUND_TAG)) {
-      positive.push(TRANSPARENT_BACKGROUND_TAG);
-    }
-    return {
-      positiveTags: positive,
-      negativeTags: [...(isV5Full ? V5_AUTO_NEGATIVE : [])],
-    };
-  }
-  // V4.5/V4：继续使用旧质量/UC 字符串（经冲突 resolver 处理）
-  const positive = [...V4_QUALITY_TAGS];
+  const positive = [...V5_AUTO_POSITIVE];
   if (options.transparentBackground && !positive.includes(TRANSPARENT_BACKGROUND_TAG)) {
     positive.push(TRANSPARENT_BACKGROUND_TAG);
   }
-  return { positiveTags: positive, negativeTags: [...V4_HEAVY_UC] };
+  return { positiveTags: positive, negativeTags: [...V5_AUTO_NEGATIVE] };
 }
 
 /**
@@ -195,7 +235,7 @@ function dedupeTokens(tokens) {
  * 原样返回，effective 组装由调用方使用未抑制的 auto 数组完成。
  *
  * 规则（大小写无关的精确 token 比较，不做 fuzzy / embedding / LLM / 反义词推理）：
- * - 用户 positive 与 auto negative 冲突（如 positive `nsfw` + auto Heavy UC `nsfw`）→ 两边保留，仅 warning。
+ * - 用户 positive 与 auto negative 冲突（如 positive `lowres` + auto Heavy UC `lowres`）→ 两边保留，仅 warning。
  * - 用户 negative 与 auto positive 冲突（如 negative `masterpiece` + auto Quality `masterpiece`）→ 两边保留，仅 warning。
  * - 用户自己同时把同一 token 写进 positive 与 negative → 两边都保留，报告冲突。
  * - 同一极性内去重保留现有行为。
@@ -255,9 +295,11 @@ function resolveCrossPolarity(userPositive, userNegative, autoPositive, autoNega
  * @param {string} rawNegative - 用户原始 negative prompt
  * @param {string} model - NovelAI 模型 ID（决定 preset 家族）
  * @param {object} [options]
- * @param {boolean} [options.qualityTags] 是否启用客户端 auto quality tags（V5 Full / V4.5/V4 有效；V5 Curated 恒为空）
- * @param {boolean} [options.heavyUc] 是否启用客户端 auto heavy UC（V5 Full / V4.5/V4 有效；V5 Curated 恒为空）
+ * @param {boolean} [options.qualityTags] 是否启用客户端 auto quality tags（旧布尔入口，被 positiveTier 覆盖后仍可强制置空）
+ * @param {boolean} [options.heavyUc] 是否启用客户端 auto heavy UC（旧布尔入口，被 negativeTier 覆盖后仍可强制置空）
  * @param {boolean} [options.transparentBackground] 是否追加透明背景标签
+ * @param {string} [options.positiveTier] 正面档位：off | standard | light（官方 Quality 数组；优先于模型默认）
+ * @param {string} [options.negativeTier] 负面档位：off | light | heavy | furry_focus | human_focus（官方 UC 数组；优先于模型默认）
  * @param {string[]} [options.autoPositive] 覆盖 auto positive 候选（测试/高级用途）
  * @param {string[]} [options.autoNegative] 覆盖 auto negative 候选（测试/高级用途）
  * @returns {{
@@ -281,6 +323,8 @@ export function compileGenerationPrompts(rawPositive, rawNegative, model, option
     qualityTags = true,
     heavyUc = true,
     transparentBackground = false,
+    positiveTier = null,
+    negativeTier = null,
   } = options;
 
   const userPositive = dedupeTokens(splitTokens(rawPositive));
@@ -289,6 +333,24 @@ export function compileGenerationPrompts(rawPositive, rawNegative, model, option
   const preset = getAutoPromptPreset(model, { transparentBackground });
   let autoPositive = Array.isArray(options.autoPositive) ? [...options.autoPositive] : preset.positiveTags;
   let autoNegative = Array.isArray(options.autoNegative) ? [...options.autoNegative] : preset.negativeTags;
+
+  // 官方档位（UI selector 值）优先：按档位选择官方 Quality/UC 数组，覆盖模型家族默认。
+  // 未知档位明确报错，不静默 fallback。
+  if (positiveTier !== null && positiveTier !== undefined) {
+    if (!Object.prototype.hasOwnProperty.call(POSITIVE_TIERS, positiveTier)) {
+      throw new Error(`不支持的正面档位：${positiveTier}（仅支持 off / standard / light）`);
+    }
+    autoPositive = [...POSITIVE_TIERS[positiveTier]];
+    if (transparentBackground && positiveTier !== "off" && !autoPositive.includes(TRANSPARENT_BACKGROUND_TAG)) {
+      autoPositive.push(TRANSPARENT_BACKGROUND_TAG);
+    }
+  }
+  if (negativeTier !== null && negativeTier !== undefined) {
+    if (!Object.prototype.hasOwnProperty.call(NEGATIVE_TIERS, negativeTier)) {
+      throw new Error(`不支持的负面档位：${negativeTier}（仅支持 off / light / heavy / furry_focus / human_focus）`);
+    }
+    autoNegative = [...NEGATIVE_TIERS[negativeTier]];
+  }
 
   if (!qualityTags) autoPositive = [];
   if (!heavyUc) autoNegative = [];
@@ -366,7 +428,7 @@ export function compileNegativeDetailed(rawNegative, model, options = {}) {
  * @param {object} [opts]
  * @param {boolean} [opts.qualityTags]
  * @param {boolean} [opts.transparentBackground]
- * @param {string} [opts.model] 默认按 V5 Full（nai-diffusion-5-full）处理，注入 Web-verified Quality
+ * @param {string} [opts.model] 默认按 V5 Full（nai-diffusion-5-full）处理，注入官方 Standard Quality
  * @returns {string}
  */
 export function compilePrompt(rawPrompt, opts = {}) {
@@ -380,7 +442,7 @@ export function compilePrompt(rawPrompt, opts = {}) {
  * @param {string} rawNegative
  * @param {object} [opts]
  * @param {boolean} [opts.heavyUc]
- * @param {string} [opts.model] 默认按 V5 Full（nai-diffusion-5-full）处理，注入 Web-verified Heavy UC
+ * @param {string} [opts.model] 默认按 V5 Full（nai-diffusion-5-full）处理，注入官方 Heavy UC
  * @returns {string}
  */
 export function compileNegative(rawNegative, opts = {}) {
@@ -402,9 +464,14 @@ if (typeof window !== "undefined") {
     splitTokens,
     joinTokens,
     TRANSPARENT_BACKGROUND_TAG,
+    QUALITY_PRESETS,
+    UC_PRESETS,
+    POSITIVE_TIERS,
+    NEGATIVE_TIERS,
     V4_QUALITY_TAGS,
     V4_HEAVY_UC,
     V5_FULL_STANDARD_QUALITY,
+    V5_FULL_LIGHT_QUALITY,
     V5_FULL_HEAVY_UC,
     V5_AUTO_POSITIVE,
     V5_AUTO_NEGATIVE,

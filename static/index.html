@@ -72,12 +72,15 @@
       <div class="nai-tier-grid">
         <label><span>正面提示词档位</span><select id="nai-positive-tier" class="nai-select">
           <option value="off">关闭</option>
-          <option value="v5_standard" selected>标准（V5 Full）</option>
+          <option value="standard" selected>Standard</option>
+          <option value="light">Light</option>
         </select></label>
         <label><span>负面提示词档位</span><select id="nai-negative-tier" class="nai-select">
           <option value="off">关闭</option>
           <option value="light">Light</option>
           <option value="heavy" selected>Heavy</option>
+          <option value="furry_focus">Furry Focus</option>
+          <option value="human_focus">Human Focus</option>
         </select></label>
       </div>
       <div id="nai-tier-hint" class="nai-tier-hint"></div>
@@ -246,17 +249,24 @@
     </aside>
     <section id="gallery-review" class="gallery-review" hidden aria-label="沉浸式图片审阅">
       <div class="gallery-review-bar">
-        <span id="gallery-review-count" class="gallery-review-count"></span>
+        <button id="gallery-review-back" class="gallery-review-icon" type="button" title="返回图库" aria-label="返回图库">←</button>
         <div class="gallery-review-bar-actions">
           <button id="gallery-review-fav" class="gallery-review-icon" type="button" title="收藏" aria-label="收藏当前图片" aria-pressed="false">☆</button>
           <button id="gallery-review-del" class="gallery-review-icon danger" type="button" title="删除当前图片" aria-label="删除当前图片">🗑</button>
-          <button id="gallery-review-exit" class="ghost" type="button">退出审阅</button>
+          <button id="gallery-review-exit" class="gallery-review-icon" type="button" title="退出审阅 (Esc)" aria-label="退出审阅">×</button>
         </div>
       </div>
       <div class="gallery-review-stage">
-        <button id="gallery-review-prev" class="gallery-review-nav" type="button" title="上一张" aria-label="上一张">‹</button>
+        <button id="gallery-review-prev" class="gallery-review-nav" type="button" title="上一张 (←)" aria-label="上一张">‹</button>
         <div id="gallery-review-canvas" class="gallery-review-canvas"><div class="empty">暂无图片</div></div>
-        <button id="gallery-review-next" class="gallery-review-nav" type="button" title="下一张" aria-label="下一张">›</button>
+        <button id="gallery-review-next" class="gallery-review-nav" type="button" title="下一张 (→)" aria-label="下一张">›</button>
+      </div>
+      <div class="gallery-review-footer">
+        <span id="gallery-review-count" class="gallery-review-count"></span>
+        <div class="gallery-review-zoom" role="group" aria-label="缩放">
+          <button id="gallery-review-zoom-fit" class="gallery-review-zoom-btn" type="button" title="适应窗口 (F)" aria-pressed="true">Fit</button>
+          <button id="gallery-review-zoom-100" class="gallery-review-zoom-btn" type="button" title="原始大小 1:1 (1)" aria-pressed="false">1:1</button>
+        </div>
       </div>
     </section>
   </main>

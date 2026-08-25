@@ -404,6 +404,7 @@ const navHistory = [];      // 浏览历史栈：{catalogId, page, query, scroll
 const NAV_MAX = 30;
 let pendingScroll = null;   // 异步渲染完成后要恢复的滚动位置
 let contentRequestSeq = 0;  // 丢弃过期的分类/搜索响应
+let showingSearchResults = false;  // 主标签列表当前展示的是搜索结果（可能出现在 favorites/recent 视图内）
 
 function renderTree() {
   const el = $("#category-tree");
@@ -919,10 +920,12 @@ function bindThumbPreview() {
 bindThumbPreview();
 
 function renderCatalogTags(data) {
+  showingSearchResults = false;
   renderTagCards(data.tags.map((t) => ({ tag: t.tag, zh: t.zh, post_count: t.post_count, is_deprecated: t.is_deprecated })));
 }
 
 function renderSearchResults(results) {
+  showingSearchResults = true;
   $("#browse-title").textContent = `搜索结果`;
   renderTagCards(results.map((r) => ({ tag: r.tag, zh: r.zh, post_count: r.post_count, favorite: r.favorite, match_reason: r.match_reason || r.match_type, section: r.section, is_deprecated: r.is_deprecated })));
 }
@@ -1192,15 +1195,43 @@ function removeCharacter(i) {
   rebuildTargetSelect(); commitPromptChange();
 }
 
+const favoritePending = new Set();  // 正在请求中的 tag，防止同一 tag 快速连点造成并发重复 POST/DELETE
+
 async function toggleFavorite(tag) {
-  if (state.favorites.has(tag)) {
-    await api(`/api/favorites/${encodeURIComponent(tag)}`, { method: "DELETE" });
-    state.favorites.delete(tag);
-  } else {
-    await api("/api/favorites", { method: "POST", body: JSON.stringify({ tag }) });
-    state.favorites.add(tag);
+  if (favoritePending.has(tag)) return;  // 该 tag 的收藏请求进行中，忽略本次点击
+  favoritePending.add(tag);
+  try {
+    if (state.favorites.has(tag)) {
+      await api(`/api/favorites/${encodeURIComponent(tag)}`, { method: "DELETE" });
+      state.favorites.delete(tag);
+    } else {
+      await api("/api/favorites", { method: "POST", body: JSON.stringify({ tag }) });
+      state.favorites.add(tag);
+    }
+  } finally {
+    favoritePending.delete(tag);  // 成功或失败都清除，失败后仍可重试
   }
-  refreshCurrentView();
+  if (state.view === "favorites" && !showingSearchResults) {
+    // 真正的收藏视图（不含收藏视图内发起的搜索结果）：仅局部重渲染，让取消收藏的卡片从列表消失，不离开当前视图
+    const st = $("#tag-list").scrollTop;
+    renderFavoritesView();
+    $("#tag-list").scrollTop = st;
+  } else {
+    // 目录浏览 / 搜索结果 / 最近视图：原地更新星标，不重新请求、不清空搜索上下文、不改变 state.view
+    updateFavoriteButtons(tag);
+  }
+}
+
+// 原地更新当前可见的 .fav-toggle 状态（.on class、星标、标题）；页面中有多个相同 tag 卡片时同步
+function updateFavoriteButtons(tag) {
+  const fav = state.favorites.has(tag);
+  document.querySelectorAll(".fav-toggle").forEach((b) => {
+    if (b.dataset.fav === tag) {
+      b.classList.toggle("on", fav);
+      b.textContent = fav ? "★" : "☆";
+      b.title = fav ? "取消收藏" : "收藏";
+    }
+  });
 }
 
 function refreshCurrentView() {
@@ -1755,11 +1786,13 @@ function setViewTab(view) {
 }
 
 function renderFavoritesView() {
+  showingSearchResults = false;
   $("#browse-title").textContent = "我的收藏";
   renderTagCards([...state.favorites].map((t) => ({ tag: t, zh: zhMap[t] || "", post_count: 0 })));
 }
 
 function renderRecentView() {
+  showingSearchResults = false;
   $("#browse-title").textContent = "最近使用的标签";
   renderTagCards(state.recent.map((t) => ({ tag: t, zh: zhMap[t] || "", post_count: 0 })));
 }
@@ -1863,6 +1896,11 @@ $("#nai-tag-target")?.addEventListener("change", (e) => {
   state.target = v === "base" || (m && naiCharacters[Number(m[1])]) ? v : "base";
 });
 $("#search-input").addEventListener("input", (e) => doSearch(e.target.value));
+// 聚焦搜索框时自动回到超市（browse）视图，使搜索结果可见；不清空已有内容。
+// focus 与 input 是独立事件，不会干扰后续 input→runSearch 流程。
+$("#search-input").addEventListener("focus", () => {
+  if (state.view !== "browse") showView("browse");
+});
 $("#cat-filter").addEventListener("change", () => doSearch($("#search-input").value));
 bind("#semantic-search-btn", "click", runSemanticSearch);
 const semanticCloseBtn = $("#semantic-close");
@@ -1935,6 +1973,8 @@ let galleryItems = [];
 let selectedGalleryFiles = new Set();
 let galleryReviewMode = false;
 let galleryReviewIndex = -1;
+let galleryReviewZoomMode = "fit"; // "fit" 完整 contain | "1:1" 原生 CSS 像素尺寸，滚动查看
+let lastGalleryCardIndex = -1; // 最近点击/预览的卡片索引，进入审阅时作为起点（无则 0）
 let galleryPreviewSeq = 0; // showGalleryPreview 请求序列号，防止异步回退乱序覆盖较新的选中项
 const GALLERY_ZOOM_KEY = "tags-market-gallery-zoom";
 const GALLERY_ZOOM_LEVELS = ["small", "medium", "large"];
@@ -1969,16 +2009,37 @@ function setGalleryReviewMode(enabled) {
   const button = $("#gallery-review-btn");
   const review = $("#gallery-review");
   layout.classList.toggle("review-mode", enabled);
+  document.body.classList.toggle("review-active", enabled);
   button.setAttribute("aria-pressed", String(enabled));
   button.textContent = enabled ? "退出审阅" : "审阅模式";
   if (review) review.hidden = !enabled;
   if (!enabled) {
     galleryReviewIndex = -1;
+    setGalleryReviewZoom("fit");
     document.querySelectorAll(".gallery-card.review-selected").forEach((el) => el.classList.remove("review-selected"));
     return;
   }
   if (galleryItems.length && galleryReviewIndex < 0) galleryReviewIndex = 0;
   renderGalleryReview();
+}
+// 统一进入审阅入口：索引 clamp，选中并渲染；可被双击卡片 / 审阅按钮 / 删除后恢复调用
+function openReview(index) {
+  if (!galleryItems.length) return;
+  if (!galleryReviewMode) setGalleryReviewMode(true);
+  selectGalleryReviewItem(Math.max(0, Math.min(galleryItems.length - 1, index)));
+}
+// 统一退出审阅入口：Esc、左上返回、右上 × 共用；恢复图库布局且不重载网格（滚动与当前卡片保持不变）
+function exitReview() {
+  setGalleryReviewMode(false);
+}
+function setGalleryReviewZoom(mode) {
+  galleryReviewZoomMode = mode === "1:1" ? "1:1" : "fit";
+  const canvas = $("#gallery-review-canvas");
+  if (canvas) canvas.classList.toggle("zoom-100", galleryReviewZoomMode === "1:1");
+  const fitBtn = $("#gallery-review-zoom-fit");
+  const oneBtn = $("#gallery-review-zoom-100");
+  if (fitBtn) fitBtn.setAttribute("aria-pressed", String(galleryReviewZoomMode === "fit"));
+  if (oneBtn) oneBtn.setAttribute("aria-pressed", String(galleryReviewZoomMode === "1:1"));
 }
 function selectGalleryReviewItem(index) {
   if (!galleryItems.length) { galleryReviewIndex = -1; renderGalleryReview(); return; }
@@ -1992,6 +2053,7 @@ function selectGalleryReviewItem(index) {
 function renderGalleryReview() {
   const canvas = $("#gallery-review-canvas");
   if (!canvas) return;
+  canvas.classList.toggle("zoom-100", galleryReviewZoomMode === "1:1");
   const total = galleryItems.length;
   const item = galleryItems[galleryReviewIndex] ?? null;
   const prevBtn = $("#gallery-review-prev");
@@ -2108,6 +2170,7 @@ async function openGalleryDir(dirName) {
   try {
     const data = await api(`/api/gallery/${encodeURIComponent(dirName)}`);
     galleryItems = data.items;
+    lastGalleryCardIndex = -1;
     const grid = $("#gallery-grid");
     applyGalleryZoom();
     if (!data.items.length) { galleryReviewIndex = -1; grid.innerHTML = `<div class="empty">该目录暂无图片</div>`; updateGallerySelectionUi(); pendingScroll = null; return; }
@@ -2135,8 +2198,13 @@ async function openGalleryDir(dirName) {
       checkbox.addEventListener("change", () => toggleGalleryFile(dirName, card.dataset.file, checkbox.checked));
       card.addEventListener("click", (e) => {
         if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select") || e.target.closest(".gallery-action-btn")) return;
+        lastGalleryCardIndex = galleryItems.findIndex((x) => x.file_name === card.dataset.file);
         showGalleryPreview(dirName, card.dataset.file);
         if (galleryReviewMode) selectGalleryReviewItem(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
+      });
+      card.addEventListener("dblclick", (e) => {
+        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select") || e.target.closest(".gallery-action-btn")) return;
+        openReview(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
       });
       card.querySelector(".gallery-fav").addEventListener("click", (e) => {
         e.stopPropagation();
@@ -2176,17 +2244,26 @@ async function openGalleryDir(dirName) {
   } catch (e) { toast("目录加载失败：" + e.message); }
 }
 
-$("#gallery-review-btn").addEventListener("click", () => setGalleryReviewMode(!galleryReviewMode));
-$("#gallery-review-exit").addEventListener("click", () => setGalleryReviewMode(false));
+$("#gallery-review-btn").addEventListener("click", () => {
+  if (galleryReviewMode) { exitReview(); return; }
+  openReview(lastGalleryCardIndex >= 0 ? lastGalleryCardIndex : 0);
+});
+$("#gallery-review-back").addEventListener("click", () => { exitReview(); $("#gallery-review-back").blur(); });
+$("#gallery-review-exit").addEventListener("click", () => { exitReview(); $("#gallery-review-exit").blur(); });
 $("#gallery-review-prev").addEventListener("click", () => { selectGalleryReviewItem(galleryReviewIndex - 1); $("#gallery-review-prev").blur(); });
 $("#gallery-review-next").addEventListener("click", () => { selectGalleryReviewItem(galleryReviewIndex + 1); $("#gallery-review-next").blur(); });
 $("#gallery-review-fav").addEventListener("click", (e) => { e.stopPropagation(); toggleGalleryReviewFav(); $("#gallery-review-fav").blur(); });
 $("#gallery-review-del").addEventListener("click", (e) => { e.stopPropagation(); deleteGalleryReviewItem(); $("#gallery-review-del").blur(); });
+$("#gallery-review-zoom-fit").addEventListener("click", () => { setGalleryReviewZoom("fit"); $("#gallery-review-zoom-fit").blur(); });
+$("#gallery-review-zoom-100").addEventListener("click", () => { setGalleryReviewZoom("1:1"); $("#gallery-review-zoom-100").blur(); });
+$("#gallery-review-canvas").addEventListener("dblclick", () => setGalleryReviewZoom(galleryReviewZoomMode === "1:1" ? "fit" : "1:1"));
 document.addEventListener("keydown", (event) => {
   if (!galleryReviewMode || state.view !== "gallery") return;
   const target = event.target;
   if (target.matches("input, textarea, select, [contenteditable='true']")) return;
-  if (event.key === "Escape") { setGalleryReviewMode(false); return; }
+  if (event.key === "Escape") { exitReview(); return; }
+  if (event.key === "f" || event.key === "F") { event.preventDefault(); setGalleryReviewZoom("fit"); return; }
+  if (event.key === "1") { event.preventDefault(); setGalleryReviewZoom("1:1"); return; }
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
   event.preventDefault();
   selectGalleryReviewItem(galleryReviewIndex + (event.key === "ArrowRight" ? 1 : -1));
@@ -2355,30 +2432,42 @@ let naiGenerationMode = "txt2img";
 let naiImg2ImgSource = null;
 let naiCharacters = [];
 // P0: Generation 档位 & Prompt Compiler state
-// positive tier: off | v5_standard；negative tier: off | light | heavy
-// 默认 v5_standard + heavy 以保持当前 V5 Full 默认行为。
-let naiPositiveTier = "v5_standard";
+// positive tier: off | standard | light；negative tier: off | light | heavy | furry_focus | human_focus
+// 默认 standard + heavy 以保持当前 V5 Full 默认行为。
+let naiPositiveTier = "standard";
 let naiNegativeTier = "heavy";
 let naiTransparentBg = false;
 
-// 旧 metadata/localStorage 兼容：旧 qualityTags=true/false -> v5_standard/off
+// 档位值规范化：正面档位旧值 v5_standard 兼容映射为 standard；未知值回退默认。
+function naiNormalizePositiveTier(value) {
+  if (value === "standard" || value === "light") return value;
+  if (value === "v5_standard") return "standard"; // 旧 localStorage/metadata 值兼容
+  return "off";
+}
+function naiNormalizeNegativeTier(value) {
+  if (value === "light" || value === "heavy" || value === "furry_focus" || value === "human_focus") return value;
+  if (value === "off") return "off";
+  return "heavy"; // 旧/未知值回退默认 heavy
+}
+
+// 旧 metadata/localStorage 兼容：旧 qualityTags=true/false -> standard/off
 // 旧 heavyUc=true/false -> heavy/off
 {
   // 新档位键优先。
   const newPos = localStorage.getItem("nai_positive_tier");
   const newNeg = localStorage.getItem("nai_negative_tier");
-  if (newPos === "off" || newPos === "v5_standard") naiPositiveTier = newPos;
-  if (newNeg === "off" || newNeg === "light" || newNeg === "heavy") naiNegativeTier = newNeg;
+  if (newPos !== null) naiPositiveTier = naiNormalizePositiveTier(newPos);
+  if (newNeg !== null) naiNegativeTier = naiNormalizeNegativeTier(newNeg);
   // 旧 metadata 兼容。
   const legacyPos = localStorage.getItem("nai_quality_tags");
   const legacyNegRaw = localStorage.getItem("nai_heavy_uc");
   const legacyUcPreset = localStorage.getItem("nai_uc_preset");
-  if (!newNeg && (legacyUcPreset === "off" || legacyUcPreset === "light" || legacyUcPreset === "heavy")) {
-    naiNegativeTier = legacyUcPreset;
-  } else if (!newNeg && legacyNegRaw !== null) {
+  if (newNeg === null && legacyUcPreset !== null) {
+    naiNegativeTier = naiNormalizeNegativeTier(legacyUcPreset);
+  } else if (newNeg === null && legacyNegRaw !== null) {
     naiNegativeTier = legacyNegRaw === "false" ? "off" : "heavy";
   }
-  if (!newPos && legacyPos !== null) naiPositiveTier = legacyPos === "false" ? "off" : "v5_standard";
+  if (newPos === null && legacyPos !== null) naiPositiveTier = legacyPos === "false" ? "off" : "standard";
 }
 
 function naiNormalizeNumberInput(v, fallback = null) {
@@ -2564,8 +2653,8 @@ function naiCompileGeneration(rawPrompt, rawNegative) {
   const params = naiCollectParameters();
   const { compileGenerationPrompts } = window.PromptCompiler;
   const result = compileGenerationPrompts(rawPrompt, rawNegative, params.model, {
-    qualityTags: naiPositiveTier === "v5_standard",
-    heavyUc: naiNegativeTier !== "off",
+    positiveTier: naiPositiveTier,
+    negativeTier: naiNegativeTier,
     transparentBackground: naiTransparentBg,
   });
   return { result, params };
@@ -2728,25 +2817,24 @@ function initGenerateView() {
   loadNaiGallery();
   loadNaiApiStatus();
   // P0: Initialize 档位选择器（正面 / 负面）
-  naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "v5_standard");
+  naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "standard");
   naiSetSelectValue("#nai-negative-tier", naiNegativeTier, "heavy");
   naiUpdateTierHint();
   naiUpdateEffectivePreview();
   if (!naiSSEOpened) { naiSSEOpened = true; naiSSE(); }
 }
 
-// 更新档位提示：V5 Curated 选择 v5_standard 时因 preset UNVERIFIED 不注入专属数组。
+// 更新档位提示：档位内容为「用户提供的官方档位事实」，统一应用于所有模型家族；
+// V5 Curated 不伪造专属差异，也不声称已抓到 Curated 专属 payload。
 function naiUpdateTierHint() {
   const hint = $("#nai-tier-hint");
   if (!hint) return;
   const model = $("#nai-model").value;
-  const pos = naiPositiveTier;
-  const neg = naiNegativeTier;
   const notes = [];
-  if (model === "nai-diffusion-5-curated" && pos === "v5_standard") {
-    notes.push("V5 Curated 的专属 Quality preset 未验证（UNVERIFIED），本档位不注入正面数组");
+  if (model === "nai-diffusion-5-curated") {
+    notes.push("V5 Curated 与 V5 Full 使用同一官方档位内容（用户提供的官方档位事实），不声称抓到 Curated 专属 payload");
   }
-  if (neg === "off") {
+  if (naiNegativeTier === "off") {
     notes.push("负面档位为关闭：客户端不注入自动 UC，且请求层发送 uc_preset=off（不发送 heavy）");
   }
   hint.textContent = notes.join("；");
@@ -2821,7 +2909,7 @@ async function naiGenerate() {
       resolution_category: parameters.resolution_category,
       mode: naiGenerationMode,
       // 兼容旧字段：qualityTags / heavyUc 由档位派生，保留供旧 metadata 恢复。
-      qualityTags: naiPositiveTier === "v5_standard",
+      qualityTags: naiPositiveTier !== "off",
       heavyUc: naiNegativeTier !== "off",
       ...(characters.length ? { characterPrompts: characters } : {}),
     };
@@ -2845,9 +2933,11 @@ async function naiGenerate() {
           seed: parameters.seed,
           noise_schedule: parameters.scheduler || "karras",
         },
-        count,
-        uc_preset: naiNegativeTier,
-        quality_toggle: naiPositiveTier === "v5_standard",
+         count,
+         quality_preset: naiPositiveTier,
+         uc_preset: naiNegativeTier,
+         prompt_presets_compiled: true,
+         quality_toggle: naiPositiveTier !== "off",
         snapshot_id: snapshotId,
         name: "manual",
         meta,
@@ -3136,19 +3226,19 @@ function applyGenerationConfig(cfg) {
   if (cfg.seed_mode) $("#nai-seed-mode").value = cfg.seed_mode;
   if (cfg.seed != null) $("#nai-seed").value = String(cfg.seed);
   // 档位（正面 / 负面）：新字段优先；旧字段 qualityTags / heavyUc 兼容映射。
-  if (cfg.positiveTier === "off" || cfg.positiveTier === "v5_standard") {
-    naiPositiveTier = cfg.positiveTier;
+  if (cfg.positiveTier != null) {
+    naiPositiveTier = naiNormalizePositiveTier(cfg.positiveTier);
   } else if (cfg.qualityTags != null) {
-    naiPositiveTier = !!cfg.qualityTags ? "v5_standard" : "off";
+    naiPositiveTier = !!cfg.qualityTags ? "standard" : "off";
   }
-  if (cfg.negativeTier === "off" || cfg.negativeTier === "light" || cfg.negativeTier === "heavy") {
-    naiNegativeTier = cfg.negativeTier;
-  } else if (cfg.ucPreset === "off" || cfg.ucPreset === "light" || cfg.ucPreset === "heavy") {
-    naiNegativeTier = cfg.ucPreset;
+  if (cfg.negativeTier != null) {
+    naiNegativeTier = naiNormalizeNegativeTier(cfg.negativeTier);
+  } else if (cfg.ucPreset != null) {
+    naiNegativeTier = naiNormalizeNegativeTier(cfg.ucPreset);
   } else if (cfg.heavyUc != null) {
     naiNegativeTier = !!cfg.heavyUc ? "heavy" : "off";
   }
-  naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "v5_standard");
+  naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "standard");
   naiSetSelectValue("#nai-negative-tier", naiNegativeTier, "heavy");
   if (cfg.transparentBackground != null) {
     naiTransparentBg = !!cfg.transparentBackground;
@@ -3205,9 +3295,10 @@ function extractMetaFromGalleryItem(item) {
     cfgRescale: s.cfg_rescale ?? 0,
     seed: s.seed,
     seed_mode: s.seed_mode || "fixed",
-    positiveTier: recipe.quality_toggle === false ? "off" : "v5_standard",
-    negativeTier: "heavy",
-    ucPreset: "heavy",
+    // 新 recipe 已保存档位；旧 recipe 缺省兼容 standard/heavy。
+    positiveTier: recipe.quality_preset || (recipe.quality_toggle === false ? "off" : "standard"),
+    negativeTier: recipe.uc_preset || "heavy",
+    ucPreset: recipe.uc_preset || "heavy",
     transparentBackground: false,
     qualityTags: true,
     heavyUc: true,
@@ -3331,7 +3422,7 @@ $("#nai-history-refresh").addEventListener("click", loadNaiGallery);
 
 // ---- P0: 档位选择器（正面 / 负面）/ Transparent / Effective Preview ----
 $("#nai-positive-tier").addEventListener("change", () => {
-  naiPositiveTier = $("#nai-positive-tier").value === "v5_standard" ? "v5_standard" : "off";
+  naiPositiveTier = naiNormalizePositiveTier($("#nai-positive-tier").value);
   localStorage.setItem("nai_positive_tier", naiPositiveTier);
   naiUpdateTierHint();
   naiUpdateEffectivePreview();

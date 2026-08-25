@@ -4,10 +4,12 @@
  *
  * 覆盖：
  * - V5 Full / V5 Curated 的 selector/config/provider exact model ID
+ * - 官方 Quality / UC 档位内容（用户提供的官方档位事实，2026-08 同步）：
+ *   Standard/Light Quality 精确数组；light/heavy/furry_focus/human_focus UC 精确数组（heavy 不含 nsfw）
  * - 跨极性 exact-token 冲突检测为 warning-only（不删除任何 token，恢复 WebUI parity）
  * - 用户自己 pos/neg 同 token 冲突保留 + 报告
- * - 无冲突 baseline：V5 Full 注入 Web-verified Standard Quality / Heavy UC；V5 Curated UNVERIFIED 不注入
- * - unknown model 明确报错、不 fallback
+ * - 无冲突 baseline：统一官方档位内容应用于所有模型家族（V5 Curated 不伪造专属差异）
+ * - unknown model / unknown tier 明确报错、不 fallback
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -20,6 +22,8 @@ import {
   compilePrompt,
   getModelPresetFamily,
   getAutoPromptPreset,
+  QUALITY_PRESETS,
+  UC_PRESETS,
 } from "../static/prompt-compiler.js";
 import { normalizeGenerationRequest } from "../server/generation-request.mjs";
 import { NovelAIProvider } from "../server/novelai-provider.mjs";
@@ -33,10 +37,29 @@ const MODELS = {
   v4Full: "nai-diffusion-4-full",
 };
 
+// 官方档位内容（与 prompt-compiler.js 内常量一致；测试作为精确断言基准）
+const OFFICIAL_QUALITY = {
+  standard: ["very aesthetic", "masterpiece", "no text"],
+  light: ["very aesthetic", "amazing quality", "no text"],
+};
+const OFFICIAL_UC = {
+  light: ["lowres", "bad hands", "bad anatomy", "artistic error", "sepia", "white haze", "worst quality", "very displeasing", "jpeg artifacts", "0::ai-generated::"],
+  heavy: ["lowres", "artistic error", "film grain", "scan artifacts", "worst quality", "bad quality", "jpeg artifacts", "very displeasing", "chromatic aberration", "dithering", "halftone", "screentone", "multiple views", "logo", "too many watermarks", "negative space", "blank page"],
+  furry_focus: ["{worst quality}", "distracting watermark", "unfinished", "bad quality", "{widescreen}", "upscale", "{sequence}", "{{grandfathered content}}", "blurred foreground", "chromatic aberration", "sketch", "everyone", "[sketch background]", "simple", "[flat colors]", "ych (character)", "outline", "multiple scenes", "[[horror (theme)]]", "comic"],
+  human_focus: ["lowres", "artistic error", "film grain", "scan artifacts", "worst quality", "bad quality", "jpeg artifacts", "very displeasing", "chromatic aberration", "dithering", "halftone", "screentone", "multiple views", "logo", "too many watermarks", "negative space", "blank page", "@_@", "mismatched pupils", "glowing eyes", "bad anatomy"],
+};
+
 function readSelectorOptions() {
   const html = readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
   const m = html.match(/<select id="nai-model"[^>]*>([\s\S]*?)<\/select>/);
   assert.ok(m, "nai-model selector not found in index.html");
+  return [...m[1].matchAll(/<option value="([^"]+)"/g)].map((x) => x[1]);
+}
+
+function readTierSelectorOptions(id) {
+  const html = readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
+  const m = html.match(new RegExp(`<select id="${id}"[^>]*>([\\s\\S]*?)</select>`));
+  assert.ok(m, `${id} selector not found in index.html`);
   return [...m[1].matchAll(/<option value="([^"]+)"/g)].map((x) => x[1]);
 }
 
@@ -52,6 +75,11 @@ test("model selector exposes the 4 current legal txt2img model IDs", () => {
   // 普通 txt2img selector 不得包含 inpainting / V3 / Furry
   assert.ok(!options.some((id) => id.includes("-inpainting")), "inpainting must not be in txt2img selector");
   assert.ok(!options.some((id) => /v3|furry/i.test(id)), "V3/Furry must not be in selector");
+});
+
+test("tier selectors expose the official tier options (#nai-positive-tier / #nai-negative-tier)", () => {
+  assert.deepEqual(readTierSelectorOptions("nai-positive-tier"), ["off", "standard", "light"]);
+  assert.deepEqual(readTierSelectorOptions("nai-negative-tier"), ["off", "light", "heavy", "furry_focus", "human_focus"]);
 });
 
 for (const [name, id] of Object.entries(MODELS)) {
@@ -71,15 +99,15 @@ for (const [name, id] of Object.entries(MODELS)) {
 
 // ---- 2. Cross-polarity conflict detection: warning-only (WebUI parity) ----
 
-test("user positive nsfw + auto negative nsfw -> both sides kept, warning only", () => {
-  // V4.5 家族 auto negative 含 nsfw（旧 heavy UC）
-  const res = compileGenerationPrompts("nahida, nsfw", "blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
-  assert.ok(res.userPositive.some((t) => t.toLowerCase() === "nsfw"), "user positive nsfw preserved");
-  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "nsfw"), "auto negative nsfw kept, NOT removed (warning-only)");
-  assert.ok(res.crossPolarityWarnings.some((t) => t.toLowerCase() === "nsfw"), "nsfw reported in crossPolarityWarnings");
+test("user positive lowres + auto negative lowres -> both sides kept, warning only", () => {
+  // 官方 heavy UC 含 lowres（不含 nsfw）
+  const res = compileGenerationPrompts("nahida, lowres", "blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
+  assert.ok(res.userPositive.some((t) => t.toLowerCase() === "lowres"), "user positive lowres preserved");
+  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "lowres"), "auto negative lowres kept, NOT removed (warning-only)");
+  assert.ok(res.crossPolarityWarnings.some((t) => t.toLowerCase() === "lowres"), "lowres reported in crossPolarityWarnings");
   assert.deepEqual(res.suppressedAuto.negative, [], "suppressedAuto is empty (deprecated, no deletion)");
-  assert.ok(res.effectivePositive.includes("nsfw"), "user positive nsfw still in effective positive");
-  assert.ok(res.effectiveNegative.split(",").some((t) => t.trim().toLowerCase() === "nsfw"), "auto negative nsfw still in effective negative");
+  assert.ok(res.effectivePositive.includes("lowres"), "user positive lowres still in effective positive");
+  assert.ok(res.effectiveNegative.split(",").some((t) => t.trim().toLowerCase() === "lowres"), "auto negative lowres still in effective negative");
 });
 
 test("user negative masterpiece + auto positive masterpiece -> both sides kept, warning only", () => {
@@ -103,38 +131,41 @@ test("user positive chromatic aberration + auto UC chromatic aberration -> both 
   assert.ok(res.effectiveNegative.split(",").some((t) => t.trim().toLowerCase() === "chromatic aberration"), "auto UC chromatic aberration still in effective negative");
 });
 
-test("user positive+negative same token nsfw -> both kept, conflict reported", () => {
-  const res = compileGenerationPrompts("nahida, nsfw", "nsfw, blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
-  assert.ok(res.userPositive.some((t) => t.toLowerCase() === "nsfw"), "user positive nsfw kept");
-  assert.ok(res.userNegative.some((t) => t.toLowerCase() === "nsfw"), "user negative nsfw kept");
-  assert.ok(res.userCrossPolarityConflicts.some((t) => t.toLowerCase() === "nsfw"), "nsfw reported as user cross-polarity conflict");
-  assert.ok(res.crossPolarityWarnings.some((t) => t.toLowerCase() === "nsfw"), "nsfw also reported in crossPolarityWarnings");
-  assert.ok(res.effectivePositive.includes("nsfw"));
-  assert.ok(res.effectiveNegative.split(",").some((t) => t.trim().toLowerCase() === "nsfw"), "user negative nsfw still in effective negative");
+test("user positive+negative same token lowres -> both kept, conflict reported", () => {
+  const res = compileGenerationPrompts("nahida, lowres", "lowres, blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
+  assert.ok(res.userPositive.some((t) => t.toLowerCase() === "lowres"), "user positive lowres kept");
+  assert.ok(res.userNegative.some((t) => t.toLowerCase() === "lowres"), "user negative lowres kept");
+  assert.ok(res.userCrossPolarityConflicts.some((t) => t.toLowerCase() === "lowres"), "lowres reported as user cross-polarity conflict");
+  assert.ok(res.crossPolarityWarnings.some((t) => t.toLowerCase() === "lowres"), "lowres also reported in crossPolarityWarnings");
+  assert.ok(res.effectivePositive.includes("lowres"));
+  assert.ok(res.effectiveNegative.split(",").some((t) => t.trim().toLowerCase() === "lowres"), "user negative lowres still in effective negative");
 });
 
-// ---- 3. No-conflict baseline; V5 Full Web-verified quality stays, V5 Curated UNVERIFIED ----
+// ---- 3. No-conflict baseline; uniform official tier content (heavy 不含 nsfw) ----
 
-test("no-conflict nahida on V4.5 uses legacy quality/UC baseline", () => {
+test("no-conflict nahida on V4.5 uses official quality/UC baseline", () => {
   const res = compileGenerationPrompts("nahida", "blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
-  assert.ok(res.autoPositive.some((t) => t.toLowerCase() === "masterpiece"), "V4.5 keeps legacy quality tags");
-  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "nsfw"), "V4.5 keeps legacy heavy UC");
+  assert.ok(res.autoPositive.some((t) => t.toLowerCase() === "masterpiece"), "V4.5 keeps official standard quality tags");
+  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "lowres"), "V4.5 keeps official heavy UC");
+  assert.ok(!res.autoNegative.some((t) => t.toLowerCase() === "nsfw"), "official heavy UC must NOT contain nsfw");
   assert.deepEqual(res.userCrossPolarityConflicts, []);
 });
 
-test("no-conflict nahida on V5 Full injects Web-verified Standard Quality, no explicit-suppression", () => {
+test("no-conflict nahida on V5 Full injects official Standard Quality, no explicit-suppression", () => {
   const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
-  assert.deepEqual(res.autoPositive, ["very aesthetic", "masterpiece", "no text"], "V5 Full Web-verified quality tags");
-  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "nsfw"), "V5 Full keeps Web-verified heavy UC");
-  assert.equal(res.effectivePositive, "nahida, very aesthetic, masterpiece, no text", "V5 Full effective positive matches Web Network");
+  assert.deepEqual(res.autoPositive, OFFICIAL_QUALITY.standard, "V5 Full official standard quality tags");
+  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "lowres"), "V5 Full keeps official heavy UC");
+  assert.ok(!res.autoNegative.some((t) => t.toLowerCase() === "nsfw"), "official heavy UC must NOT contain nsfw");
+  assert.equal(res.effectivePositive, "nahida, very aesthetic, masterpiece, no text", "V5 Full effective positive matches official standard");
   assert.ok(res.effectivePositive.includes("masterpiece"), "masterpiece must be present, not suppressed");
 });
 
-test("V5 Curated auto arrays remain empty (V5_CURATED_PRESET: UNVERIFIED)", () => {
-  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Curated, { qualityTags: true, heavyUc: true });
-  assert.deepEqual(res.autoPositive, [], "V5 Curated must not auto-guess a dedicated preset");
-  assert.deepEqual(res.autoNegative, [], "V5 Curated must not auto-guess a dedicated preset");
-  assert.equal(res.effectivePositive, "nahida", "V5 Curated effective == raw (UNVERIFIED)");
+test("V5 Curated uses the same uniform official tier content (no fabricated Curated-specific preset)", () => {
+  // 官方档位内容统一应用于所有模型家族；不伪造 Curated 专属差异。
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Curated, { positiveTier: "standard", negativeTier: "heavy" });
+  assert.deepEqual(res.autoPositive, OFFICIAL_QUALITY.standard, "V5 Curated applies the same official standard quality (user-provided official facts)");
+  assert.deepEqual(res.autoNegative, OFFICIAL_UC.heavy, "V5 Curated applies the same official heavy UC (no fabricated Curated-specific array)");
+  assert.equal(res.effectivePositive, "nahida, very aesthetic, masterpiece, no text");
 });
 
 test("regression: V5 Full nahida + quality=standard -> nahida, very aesthetic, masterpiece, no text", () => {
@@ -158,68 +189,120 @@ test("getModelPresetFamily distinguishes v5 vs v4_5_or_v4", () => {
   assert.equal(getModelPresetFamily(MODELS.v4Full), "v4_5_or_v4");
 });
 
-test("getAutoPromptPreset: V5 Full Web-verified; V5 Curated empty (UNVERIFIED); V4 populated", () => {
-  assert.deepEqual(getAutoPromptPreset(MODELS.v5Full).positiveTags, ["very aesthetic", "masterpiece", "no text"]);
-  assert.ok(getAutoPromptPreset(MODELS.v5Full).negativeTags.includes("nsfw"));
-  assert.deepEqual(getAutoPromptPreset(MODELS.v5Curated).positiveTags, []);
-  assert.deepEqual(getAutoPromptPreset(MODELS.v5Curated).negativeTags, []);
-  assert.ok(getAutoPromptPreset(MODELS.v45Full).positiveTags.includes("masterpiece"));
-  assert.ok(getAutoPromptPreset(MODELS.v45Full).negativeTags.includes("nsfw"));
+test("getAutoPromptPreset: uniform official content across all model families (no nsfw)", () => {
+  for (const id of [MODELS.v5Full, MODELS.v5Curated, MODELS.v45Full, MODELS.v4Full]) {
+    const preset = getAutoPromptPreset(id);
+    assert.deepEqual(preset.positiveTags, OFFICIAL_QUALITY.standard, `${id} positive = official standard`);
+    assert.deepEqual(preset.negativeTags, OFFICIAL_UC.heavy, `${id} negative = official heavy`);
+    assert.ok(!preset.negativeTags.includes("nsfw"), `${id} heavy must NOT contain nsfw`);
+  }
+  // transparent background appended to auto positive
+  const bg = getAutoPromptPreset(MODELS.v5Full, { transparentBackground: true });
+  assert.deepEqual(bg.positiveTags, [...OFFICIAL_QUALITY.standard, "transparent background"]);
 });
 
-// ---- 3b. Tier mapping: positive/negative tier -> qualityTags / heavyUc ----
+// ---- 3b. Tier mapping: positive/negative tier -> 官方 Quality/UC 数组 ----
 // 前端档位选择器（#nai-positive-tier / #nai-negative-tier）在 app.js 的 naiCompileGeneration
-// 映射为 compiler 的 qualityTags / heavyUc 布尔值：
-//   positive: off=false, v5_standard=true
-//   negative: off=false, 其余=true
-// 此处用纯函数验证该映射的编译结果。
+// 映射为 compiler 的 positiveTier / negativeTier 档位值：
+//   positive: off | standard | light
+//   negative: off | light | heavy | furry_focus | human_focus
+// 此处用纯函数验证该映射的编译结果（官方数组精确断言）。
 
 test("positive off -> no auto positive injected", () => {
-  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: false, heavyUc: true });
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "off", negativeTier: "heavy" });
   assert.deepEqual(res.autoPositive, [], "positive off must not inject auto positive");
   assert.equal(res.effectivePositive, "nahida");
 });
 
-test("V5 Full + positive v5_standard + raw nahida -> strict Web-verified quality", () => {
-  // v5_standard -> qualityTags=true
-  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
+test("V5 Full + positive standard + raw nahida -> strict official Standard Quality", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "heavy" });
+  assert.deepEqual(res.autoPositive, OFFICIAL_QUALITY.standard, "standard positive exactly = very aesthetic, masterpiece, no text");
   assert.equal(res.effectivePositive, "nahida, very aesthetic, masterpiece, no text");
-  assert.deepEqual(res.autoPositive, ["very aesthetic", "masterpiece", "no text"]);
+  assert.equal(res.effectivePositive, "nahida, " + OFFICIAL_QUALITY.standard.join(", "));
 });
 
-test("V5 Curated + positive v5_standard -> no fabricated Curated preset (UNVERIFIED)", () => {
-  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Curated, { qualityTags: true, heavyUc: true });
-  assert.deepEqual(res.autoPositive, [], "V5 Curated must not fabricate a dedicated positive preset");
-  assert.deepEqual(res.autoNegative, [], "V5 Curated must not fabricate a dedicated negative preset");
-  assert.equal(res.effectivePositive, "nahida");
+test("V5 Full + positive light -> official Light Quality exactly", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "light", negativeTier: "heavy" });
+  assert.deepEqual(res.autoPositive, OFFICIAL_QUALITY.light, "light positive exactly = very aesthetic, amazing quality, no text");
+  assert.equal(res.effectivePositive, "nahida, very aesthetic, amazing quality, no text");
+});
+
+test("QUALITY_PRESETS exposed by compiler match the user-provided official facts", () => {
+  assert.deepEqual(QUALITY_PRESETS.standard, OFFICIAL_QUALITY.standard);
+  assert.deepEqual(QUALITY_PRESETS.light, OFFICIAL_QUALITY.light);
 });
 
 test("negative off -> no client auto negative injected", () => {
-  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: false });
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "off" });
   assert.deepEqual(res.autoNegative, [], "negative off must not inject client auto negative");
   assert.equal(res.effectiveNegative, "blurry");
 });
 
-test("negative light/heavy -> client auto negative present (request layer preset is separate)", () => {
-  const light = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
-  assert.ok(light.autoNegative.length > 0, "negative heavy keeps client auto UC");
-  // light 也复用客户端 heavy UC 数组（服务端 ucPresetId 决定实际展开）；此处仅验证档位开启则注入。
-  const heavy = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { qualityTags: true, heavyUc: true });
-  assert.ok(heavy.autoNegative.length > 0, "negative light/heavy both enable client auto UC injection");
+test("negative heavy -> official Heavy UC exactly, no nsfw", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "heavy" });
+  assert.deepEqual(res.autoNegative, OFFICIAL_UC.heavy, "heavy negative exactly = official heavy list");
+  assert.ok(!res.autoNegative.includes("nsfw"), "official Heavy 明确不含 nsfw");
+  assert.equal(res.effectiveNegative, OFFICIAL_UC.heavy.join(", ") + ", blurry", "UC 追加到负面开头");
+});
+
+test("negative light -> official Light UC exactly with 0::ai-generated::", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "light" });
+  assert.deepEqual(res.autoNegative, OFFICIAL_UC.light, "light negative exactly = official light list");
+  assert.ok(res.autoNegative.includes("0::ai-generated::"), "light UC contains 0::ai-generated::");
+});
+
+test("negative furry_focus -> official Furry Focus UC exactly", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "furry_focus" });
+  assert.deepEqual(res.autoNegative, OFFICIAL_UC.furry_focus, "furry_focus negative exactly = official Furry Focus list");
+});
+
+test("negative human_focus -> official Human Focus UC exactly", () => {
+  const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "human_focus" });
+  assert.deepEqual(res.autoNegative, OFFICIAL_UC.human_focus, "human_focus negative exactly = official Human Focus list");
+});
+
+test("UC_PRESETS exposed by compiler match the user-provided official facts (no nsfw anywhere)", () => {
+  assert.deepEqual(UC_PRESETS.light, OFFICIAL_UC.light);
+  assert.deepEqual(UC_PRESETS.heavy, OFFICIAL_UC.heavy);
+  assert.deepEqual(UC_PRESETS.furry_focus, OFFICIAL_UC.furry_focus);
+  assert.deepEqual(UC_PRESETS.human_focus, OFFICIAL_UC.human_focus);
+  for (const key of ["light", "heavy", "furry_focus", "human_focus"]) {
+    assert.ok(!UC_PRESETS[key].includes("nsfw"), `${key} must not contain nsfw`);
+  }
+});
+
+test("unknown positive tier / unknown negative tier -> clear error, no fallback", () => {
+  assert.throws(
+    () => compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "ultra", negativeTier: "heavy" }),
+    /不支持的正面档位/,
+  );
+  assert.throws(
+    () => compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: "ultra" }),
+    /不支持的负面档位/,
+  );
+});
+
+test("negative light/heavy/furry_focus/human_focus -> client auto negative present (request layer preset is separate)", () => {
+  for (const tier of ["light", "heavy", "furry_focus", "human_focus"]) {
+    const res = compileGenerationPrompts("nahida", "blurry", MODELS.v5Full, { positiveTier: "standard", negativeTier: tier });
+    assert.ok(res.autoNegative.length > 0, `negative ${tier} keeps client auto UC`);
+    assert.deepEqual(res.autoNegative, OFFICIAL_UC[tier], `negative ${tier} uses the exact official array`);
+  }
 });
 
 // ---- 4. Legacy string wrappers still work (backward compat) ----
 
 test("legacy compilePrompt/compileNegative wrappers return strings", () => {
-  // 默认按 V5 Full（Web-verified Quality/Heavy UC）
+  // 默认官方 Standard Quality / Heavy UC
   assert.equal(compilePrompt("nahida"), "nahida, very aesthetic, masterpiece, no text");
-  assert.ok(compileNegative("blurry").includes("nsfw"));
+  assert.ok(compileNegative("blurry").includes("lowres"));
+  assert.ok(!compileNegative("blurry").includes("nsfw"), "official heavy must not contain nsfw");
   assert.ok(compileNegative("blurry").endsWith(", blurry"));
-  // 显式传 V4.5 模型仍得到旧 quality/UC
+  // 显式传 V4.5 模型仍得到官方 quality/UC
   assert.equal(compilePrompt("nahida", { model: MODELS.v45Full }), "nahida, very aesthetic, masterpiece, no text");
-  assert.ok(compileNegative("blurry", { model: MODELS.v45Full }).includes("nsfw"));
-  // 显式传 V5 Curated（UNVERIFIED）：不注入任何 auto preset
-  assert.equal(compilePrompt("nahida", { model: MODELS.v5Curated }), "nahida");
+  assert.ok(compileNegative("blurry", { model: MODELS.v45Full }).includes("lowres"));
+  // 显式传 V5 Curated：与 V5 Full 相同官方档位内容（统一官方档位事实）
+  assert.equal(compilePrompt("nahida", { model: MODELS.v5Curated }), "nahida, very aesthetic, masterpiece, no text");
 });
 
 // ---- 5. Unknown model -> clear error, no fallback ----
@@ -243,9 +326,9 @@ test("unknown model is rejected, not silently fallback", () => {
 // ---- 6. Case-insensitive exact-token conflict detection (warning-only) ----
 
 test("cross-polarity conflict detection is case-insensitive exact token", () => {
-  const res = compileGenerationPrompts("nahida, NSFW", "blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
-  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "nsfw"), "auto negative nsfw kept (warning-only)");
-  assert.ok(res.crossPolarityWarnings.some((t) => t.toLowerCase() === "nsfw"), "NSFW (uppercase) reported as warning");
+  const res = compileGenerationPrompts("nahida, LOWRES", "blurry", MODELS.v45Full, { qualityTags: true, heavyUc: true });
+  assert.ok(res.autoNegative.some((t) => t.toLowerCase() === "lowres"), "auto negative lowres kept (warning-only)");
+  assert.ok(res.crossPolarityWarnings.some((t) => t.toLowerCase() === "lowres"), "LOWRES (uppercase) reported as warning");
   assert.deepEqual(res.suppressedAuto.negative, [], "suppressedAuto is empty (deprecated)");
 });
 
@@ -284,7 +367,7 @@ test("structured display prompt resolves to base prompt before compile (P0 previ
   const compilePromptInput = structured?.prompt ?? rawPrompt;
   const compileNegativeInput = structured?.negative_prompt ?? rawNeg;
   const fixed = compileGenerationPrompts(compilePromptInput, compileNegativeInput, MODELS.v5Full, { qualityTags: true, heavyUc: true });
-  assert.equal(fixed.effectivePositive, "1girl, forest, nahida, very aesthetic, masterpiece, no text", "resolved base prompt compiles cleanly (V5 Full Web-verified quality)");
+  assert.equal(fixed.effectivePositive, "1girl, forest, nahida, very aesthetic, masterpiece, no text", "resolved base prompt compiles cleanly (official Standard Quality)");
   assert.ok(!fixed.effectivePositive.includes("Base:"), "no structured marker leaks after resolving to base prompt");
 
   // 非结构化路径行为不变：无 draft 匹配时退回原始输入
@@ -325,9 +408,9 @@ test("empty structured basePrompt stays empty in Preview/Generate, no fallback t
   assert.ok(!rawGenerationPrompt.includes("Base:"), "no 'Base:' leak");
   assert.ok(!rawGenerationPrompt.includes("Character:"), "no 'Character:' leak");
 
-  // 空 basePrompt 编译结果同样干净（不含结构化标记），V5 Full 会追加 Web-verified quality
+  // 空 basePrompt 编译结果同样干净（不含结构化标记），V5 Full 会追加官方 Standard Quality
   const fixed = compileGenerationPrompts(rawGenerationPrompt, structured?.negative_prompt ?? rawNeg, MODELS.v5Full, { qualityTags: true, heavyUc: true });
-  assert.equal(fixed.effectivePositive, "very aesthetic, masterpiece, no text", "empty basePrompt compiles to only V5 Full Web-verified quality");
+  assert.equal(fixed.effectivePositive, "very aesthetic, masterpiece, no text", "empty basePrompt compiles to only official Standard Quality");
   assert.ok(!fixed.effectivePositive.includes("Base:"));
   assert.ok(!fixed.effectivePositive.includes("Character:"));
 

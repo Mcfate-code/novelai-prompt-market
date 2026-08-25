@@ -189,6 +189,16 @@ generation
 
 当前暴露的 V5 Full 与 V5 Curated 在现有 UI 功能上能力相同，因此暂不需要独立 capability gating。未来若引入能力不同模型，应直接以 `config/model_overlays.json` 的 `supports` 为事实来源，不在前端维护重复 capability 表。
 
+### 图库审阅（Review Mode）
+
+图库提供独立的沉浸式审阅工作区（Lightroom 式全屏暗色 workspace）：
+
+- **进入**：双击任意图片卡片，从该图片开始审阅；或点击「审阅模式」从当前选中的图片开始（未选中时从第一张）。
+- **操作**：`←` / `→` 或左右箭头按钮翻页；`Esc`、左上「返回图库」或右上「×」退出并恢复图库三栏布局，当前滚动位置与卡片保持不变。
+- **缩放**：默认 Fit（完整 contain、不裁切、充分利用视口）；底部 `1:1` 显示图片原始像素尺寸并可滚动查看，`F` / `f` 切回 Fit、`1` 切到 1:1，双击图片也可切换。
+- **整理**：右上收藏 / 删除与图库卡片状态实时同步；删除沿用原有确认、删除后翻到下一/上一张、删空退出的逻辑。
+- 审阅为独立全屏暗色工作区，不销毁页面 DOM，退出后普通布局原样恢复。
+
 ### Tag Target Selector
 
 标签超市新增一个始终可见的小型目标选择器「添加到：[Base / Scene ▼]」，用于决定点击标签写入哪里：
@@ -240,8 +250,8 @@ git diff --check
 当前非付费回归基线：
 
 - Python：`93/93` 通过。
-- Node（server）：`28/28` 通过，覆盖 GenerationRequest、V5 payload、严格串行、取消、Recipe、图库同步、Img2Img 基础图持久化路由和 Payload 回归。
-- Prompt Compiler：覆盖模型家族 preset、跨极性冲突 warning-only（WEBUI PARITY，不删除 token）、用户同侧冲突报告、V5 Full Web-verified Standard Quality/Heavy UC 注入、V5 Curated UNVERIFIED 不注入、unknown model 明确报错、legacy wrapper。
+- Node（server）：`31/31` 通过，覆盖 GenerationRequest、UC preset 四档透传、V5 payload、严格串行、取消、Recipe、图库同步、Img2Img 基础图持久化路由和 Payload 回归。
+- Prompt Compiler：覆盖统一官方 Quality/UC 档位内容（Standard/Light Quality 与 light/heavy/furry_focus/human_focus UC 精确数组，heavy 不含 nsfw）、跨极性冲突 warning-only（WEBUI PARITY，不删除 token）、用户同侧冲突报告、unknown model / unknown tier 明确报错、legacy wrapper。
 - `static/app.js`、`server/server.mjs`、`server/api-batch.mjs`、`static/prompt-compiler.js` 语法通过。
 - 桌面与移动端布局数据以最近一次浏览器验收结果为准。
 
@@ -279,9 +289,9 @@ git diff --check
 
 2. **Effective Prompt 生成**：对于结构化模型，`buildPayload` 将 `prompt` 设为 `null`，实际提示词通过 `v4_prompt.caption.base_caption` 传递。用户输入的原始 prompt 即为 effective prompt。
 
-3. **Quality Tags 进入 effective prompt 的方式**：Quality Tags 不再作为独立字段发送。`qualityPresetId: "standard"` 告知 NovelAI 服务端使用标准质量预设，服务端自行将对应 quality tags 注入 effective prompt。
+3. **Quality/UC 档位的请求方式**：普通生成显式发送 `quality_preset`（`off` / `standard` / `light`）与 `uc_preset`（`off` / `light` / `heavy` / `furry_focus` / `human_focus`）。provider 将其映射到对应的 `qualityPresetId` / `ucPresetId`；缺省请求兼容为 `standard` / `heavy`。
 
-4. **Heavy UC 进入 effective negative 的方式**：`ucPresetId: "heavy"` 告知 NovelAI 服务端使用重型 UC 预设。用户提供的 `negative_prompt` 通过 `v4_negative_prompt.caption.base_caption` 传递，服务端将 heavy UC 预设内容合并到最终 UC 中。
+4. **编译文本与 server preset 的单一事实源**：浏览器仍将官方 Quality/UC 数组展开到 effective prompt，供 Preview 与 metadata 展示；普通生成额外发送 `prompt_presets_compiled: true`，provider 因此不再重复发送对应 server preset ID。例图专用链路不带该标记，继续由 `uc_preset: "light"` 发送 `ucPresetId: "light"`。
 
 5. **v4_prompt / v4_negative_prompt 在 V5 中仍会发送**：尽管命名为 `v4_*`，这两个结构化 prompt 对象在 V5 模型中仍然使用，是 NovelAI API 的标准格式。
 
@@ -307,7 +317,7 @@ git diff --check
 
 10. **WEBUI PARITY（跨极性冲突 warning-only）**：见下文「Prompt Compiler」。默认行为目标为与官网 WebUI 对齐：客户端**只做跨极性冲突检测（warning-only），不删除/抑制任何 token**，因此不改变请求 payload。跨极性冲突 token 与用户同侧冲突可在 Effective Preview 查看，仅作提示。用户如需调整，应自行编辑 Prompt/UC preset。**本地不声称当前官网登录 WebUI/Network 无法访问的 V5 Curated preset 已验证（V5_CURATED_PRESET: UNVERIFIED）。**
 
-11. **本轮明确未加入**：`*-inpainting` 不进普通 txt2img selector；V3 / Furry / Curated inpainting 因当前 provider/能力未充分验证，不加入本轮。**V5 Curated 的独立客户端 quality/UC preset 值未确认（V5_CURATED_PRESET: UNVERIFIED）**，不做猜测、不伪造 Curated 专属数组。
+11. **本轮明确未加入**：`*-inpainting` 不进普通 txt2img selector；V3 / Furry / Curated inpainting 因当前 provider/能力未充分验证，不加入本轮。**Quality/UC 档位内容为用户提供的官方档位事实（2026-08 同步），统一应用于所有模型家族**；V5 Curated 不伪造专属差异，也不声称已单独抓到 Curated 专属 payload（V5_CURATED_PRESET 仍为 UNVERIFIED）。
 
 ## NovelAI V5 Generation Pipeline
 
@@ -318,16 +328,17 @@ git diff --check
 ```text
 UI (index.html)
   │
-  ├─ 正面提示词档位 (#nai-positive-tier: off | v5_standard, 默认 v5_standard)
-  ├─ 负面提示词档位 (#nai-negative-tier: off | light | heavy, 默认 heavy)
+  ├─ 正面提示词档位 (#nai-positive-tier: off | standard | light, 默认 standard)
+  ├─ 负面提示词档位 (#nai-negative-tier: off | light | heavy | furry_focus | human_focus, 默认 heavy)
   ├─ Transparent Background Toggle (□ 透明背景, 默认 OFF)
   │
   ▼
-Prompt Compiler (static/prompt-compiler.js, 纯函数, 按模型家族)
+Prompt Compiler (static/prompt-compiler.js, 纯函数)
   │
   ├─ getModelPresetFamily(model) → 'v5' | 'v4_5_or_v4'
-  ├─ getAutoPromptPreset(model) → V5 Full: Web-verified Quality/Heavy-UC; V5 Curated: UNVERIFIED 空; V4.5/V4: 旧质量/UC
-  ├─ compileGenerationPrompts(rawPos, rawNeg, model)
+  ├─ getAutoPromptPreset(model) → 统一官方档位内容（Standard Quality / Heavy UC，所有模型家族一致）
+  ├─ compileGenerationPrompts(rawPos, rawNeg, model, { positiveTier, negativeTier })
+  │    → positiveTier: off | standard | light；negativeTier: off | light | heavy | furry_focus | human_focus
   │    → 跨极性冲突检测（warning-only，不删除任何 token）—— WEBUI PARITY
   │    → raw 永不改写；只改变 effective 输出（auto 数组原样拼入，不抑制）
   │    → 返回 { userPositive, userNegative, autoPositive, autoNegative,
@@ -340,21 +351,25 @@ naiGenerate() → POST /api/novelai/generate
   │
   ├─ prompt = effectivePositive
   ├─ negative_prompt = effectiveNegative
-  ├─ uc_preset = 负面档位（off / light / heavy）
+   ├─ quality_preset = 正面档位（off / standard / light）
+   ├─ uc_preset = 负面档位（off / light / heavy / furry_focus / human_focus）
+   ├─ prompt_presets_compiled = true（已展开的 Preview/Generate 文本，避免 provider 重复注入）
   │
   ▼
 Backend normalizeGenerationRequest()
   │
   ├─ 按模型选择默认值：V5 → steps=23, guidance=7; 非V5 → steps=28, guidance=5
   ├─ noise_schedule 透传
-  ├─ uc_preset 校验并透传（off/light/heavy，未知报错，缺省 heavy）
+   ├─ quality_preset 校验并透传（off/standard/light，未知报错，缺省 standard）
+   ├─ uc_preset 校验并透传（off/light/heavy/furry_focus/human_focus，未知报错，缺省 heavy）
   │
   ▼
 NovelAIProvider.buildPayload()
   │
   ├─ buildV5Parameters() — V5 专用字段（已固化，不改）
   │    ├─ params_version=4, prefer_brownian=true, straight_alpha=true
-  │    ├─ qualityPresetId="standard", ucPresetId="heavy"（负面档位为 off 时不设置 ucPresetId）
+   │    ├─ qualityPresetId=standard/light（off 或已编译文本时不设置），ucPresetId="heavy"（负面档位为 off 或已编译文本时不设置；
+  │    │    light / furry_focus / human_focus 按官方 UI preset ID 原样透传）
   │    ├─ v4_prompt.caption.base_caption = effectivePrompt
   │    ├─ v4_negative_prompt.caption.base_caption = effectiveNegative
   │    └─ autoSmea=false, dynamic_thresholding=false, cfg_rescale=0
@@ -369,65 +384,71 @@ Gallery + Metadata (SQLite: gallery + generation 表)
 
 ### 生成档位（正面 / 负面提示词）
 
-生图面板提供两个直接选择器，替代旧的「生成预设 / 自动质量标签 / 推荐负面提示词」三套入口：
+生图面板提供两个直接选择器，替代旧的「生成预设 / 自动质量标签 / 推荐负面提示词」三套入口。档位内容为用户提供的**官方档位事实**（2026-08 同步），统一应用于所有模型家族：
 
 - **正面提示词档位**（`#nai-positive-tier`）
   - `关闭`（`off`）：不注入客户端 auto 正面标签。
-  - `标准（V5 Full）`（`v5_standard`）：开启客户端 auto 正面标签。
+  - `Standard`（`standard`）：官方 Standard Quality —— `very aesthetic, masterpiece, no text`。
+  - `Light`（`light`）：官方 Light Quality —— `very aesthetic, amazing quality, no text`。
 - **负面提示词档位**（`#nai-negative-tier`）
   - `关闭`（`off`）：不注入客户端 auto 负面，且请求层发送 `uc_preset=off`（不发送 heavy）。
-  - `Light`（`light`）：请求层发送 `uc_preset=light`。
-  - `Heavy`（`heavy`）：请求层发送 `uc_preset=heavy`。
+  - `Light`（`light`）：官方 Light UC（含 `0::ai-generated::`）。
+  - `Heavy`（`heavy`）：官方 Heavy UC（17 项，**明确不含 nsfw**）。
+  - `Furry Focus`（`furry_focus`）：官方 Furry Focus UC。
+  - `Human Focus`（`human_focus`）：官方 Human Focus UC。
 
-默认 `v5_standard + heavy`，以保持当前 V5 Full 默认行为。档位选择保存在 `localStorage`（`nai_positive_tier` / `nai_negative_tier`），下次打开自动恢复。
+默认 `standard + heavy`，以保持当前 V5 Full 默认行为。档位选择保存在 `localStorage`（`nai_positive_tier` / `nai_negative_tier`），下次打开自动恢复；旧 `v5_standard` 值兼容映射为 `standard`。
 
-- **映射关系**：`v5_standard` → compiler `qualityTags=true`；`off` → `qualityTags=false`。负面档位非 `off` → `heavyUc=true`，`off` → `heavyUc=false`。
-- **Preview 与实际发送共用同一档位状态与同一 compiled result**（`naiCompileGeneration`），不会分叉。raw prompt 永不改写。
-- **V5 Curated 提示**：当模型为 `nai-diffusion-5-curated` 且选择 `v5_standard` 时，因该 preset 为 `UNVERIFIED`（无 Web Network 证据），客户端不注入专属正面数组（也不伪造 Curated 专属 UC）；UI 会显示简短提示。其 effective 即用户 raw。
+- **映射关系**：`standard`/`light` → compiler `positiveTier`；`off` → `positiveTier=off`。负面档位 `light`/`heavy`/`furry_focus`/`human_focus` → compiler `negativeTier`（官方 UC 数组）；`off` → 空。
+- **Preview 与实际发送共用同一档位状态与同一 compiled result**（`naiCompileGeneration`），不会分叉。raw prompt 永不改写；Quality 追加到正面末尾、UC 追加到负面开头。请求同时带 `quality_preset` / `uc_preset`，并用 `prompt_presets_compiled` 告知 provider 不重复注入。
+- **V5 Curated 提示**：当模型为 `nai-diffusion-5-curated` 时，档位内容与 V5 Full 完全一致（统一官方档位事实）；**不声称已单独抓到 Curated 专属 payload**（V5_CURATED_PRESET 仍为 UNVERIFIED）。UI 会显示简短提示。
 
 ### Prompt Compiler
 
 纯函数，无 DOM 依赖，可独立测试。static/prompt-compiler.js 在 static/app.js 之前以 `<script type="module">` 加载，为 Effective Preview 与 Generate 提供唯一的 `window.PromptCompiler` 实现。**Preview 与实际发送共用同一份详细编译结果（`compileGenerationPrompts`），不会分叉。**
 
-- **模型家族（model family）**：`getModelPresetFamily(model)` 区分 `v5` 与 `v4_5_or_v4`，`getAutoPromptPreset(model)` 按家族返回客户端 auto 数组。
-  - **V5 Full（`nai-diffusion-5-full`）**：客户端注入 **Web-verified** Standard Quality（`very aesthetic, masterpiece, no text`）与 Heavy UC（完整 18 项，与官网真实 Network 捕获一致）。官网真实 Network 高于旧 V4.5 docs，`masterpiece` 不得因旧 docs 误标为 V4.5-only 而被删除。V5 的服务器 preset（`qualityPresetId="standard"` / `ucPresetId="heavy"`）仍由 provider 负责。
-  - **V5 Curated（`nai-diffusion-5-curated`）**：**`V5_CURATED_PRESET: UNVERIFIED`**。无 Web Network 级 Quality/UC 证据，客户端不自动注入、不猜测、不伪造 Curated 专属 preset；其 effective 即用户 raw。
-  - **V4.5/V4（`nai-diffusion-4-5-full` / `nai-diffusion-4-full`）**：继续使用旧质量/UC 字符串（`very aesthetic, masterpiece, no text`；heavy UC 18 项）。
+- **模型家族（model family）**：`getModelPresetFamily(model)` 区分 `v5` 与 `v4_5_or_v4`（保留供路由/兼容用）。`getAutoPromptPreset(model)` 返回**统一官方档位内容**：Standard Quality（`very aesthetic, masterpiece, no text`）与 Heavy UC（官方 17 项，**不含 nsfw**）。
+  - **官方档位事实（唯一事实源）**：Quality/UC 数组为用户 2026-08 提供的官方档位内容，统一应用于 V5 Full / V5 Curated / V4.5 / V4——**不伪造 V5 Curated 专属差异**，也不声称已单独抓到 Curated 专属 payload（V5_CURATED_PRESET 仍为 UNVERIFIED）。
+  - Standard Quality 精确为 `very aesthetic, masterpiece, no text`；Light Quality 精确为 `very aesthetic, amazing quality, no text`。
+  - UC 四档精确为官方数组：Light（含 `0::ai-generated::`）、Heavy（无 nsfw）、Furry Focus、Human Focus。未展开的 V5 server preset 由 provider 负责；普通 Generate 已展开文本，因此不再重复发送 ID。
 - **WEBUI PARITY（跨极性冲突 warning-only）**：默认行为目标为与官网 WebUI 对齐。客户端**只做跨极性 exact-token 冲突检测，不删除/抑制任何 token**——不再有「用户显式 > 自动 preset」的本地 suppress，因此不改变请求 payload。
-  - 用户 positive `nsfw` + auto negative `nsfw` → 两边都保留，仅记录 warning。
+  - 用户 positive `lowres` + auto negative `lowres` → 两边都保留，仅记录 warning。
   - 用户 negative `masterpiece` + auto positive `masterpiece` → 两边都保留，仅记录 warning。
   - 用户 positive `chromatic aberration` + auto UC `chromatic aberration` → 两边都保留，仅记录 warning。
   - 用户自己 positive/negative 同时写同一 token → 两边都保留，记录 `userCrossPolarityConflicts`。
   - 规范化只做 trim + 大小写无关的精确 token 比较；不做 fuzzy / embedding / LLM / 反义词推理。
   - 冲突检测结果在 Effective Preview 中仅作提示；用户如需调整，应自行编辑 Prompt/UC preset。
-- **raw 永不改写**：原始输入原样保留，只改变 effective 输出（auto 数组原样拼入，不抑制）；同一极性内去重保留既有行为。
+- **raw 永不改写**：原始输入原样保留，只改变 effective 输出（auto 数组原样拼入，不抑制）；同一极性内去重保留既有行为。顺序固定：Quality 追加到正面末尾、UC 追加到负面开头。
 - **详细编译结果**：`compileGenerationPrompts` / `compilePromptDetailed` / `compileNegativeDetailed` 提供 `rawPositive/rawNegative`、`userPositive/userNegative`、`autoPositive/autoNegative`、`suppressedAuto`（废弃字段，恒空，仅兼容旧调用方）、`crossPolarityWarnings`、`effectivePositive/effectiveNegative`、`userCrossPolarityConflicts`。`compilePrompt` / `compileNegative` 作为返回字符串的兼容 wrapper 保留。
 
 示例（Effective 来源与跨极性冲突 warning）：
 
 | 模型 | 输入 Positive | 输入 Negative | Effective Positive | Effective Negative | 说明 |
 |------|--------------|--------------|--------------------|--------------------|------|
-| V5 Full | `nahida` | `blurry` | `nahida, very aesthetic, masterpiece, no text` | `nsfw, …, blank page, blurry` | V5 Full 注入 Web-verified Quality/Heavy UC |
-| V5 Curated | `nahida` | `blurry` | `nahida` | `blurry` | V5 Curated UNVERIFIED，不注入 |
-| V4.5 | `nahida` | `blurry` | `nahida, very aesthetic, masterpiece, no text` | `nsfw, …, blank page, blurry` | V4.5 旧质量/UC |
-| V5 Full | `nahida, nsfw` | `blurry` | `nahida, nsfw, very aesthetic, masterpiece, no text` | `nsfw, lowres, …, blank page, blurry`（保留 nsfw） | 跨极性冲突仅 warning，两侧都保留 |
-| V5 Full | `nahida` | `masterpiece, blurry` | `nahida, very aesthetic, masterpiece, no text`（保留 masterpiece） | `nsfw, …, blank page, masterpiece, blurry` | 跨极性冲突仅 warning，两侧都保留 |
-| 任意 | `nahida, nsfw` | `nsfw, blurry` | 含 nsfw | 含 nsfw | 用户两侧同 token 都保留，报告冲突 |
+| V5 Full | `nahida` | `blurry` | `nahida, very aesthetic, masterpiece, no text` | `lowres, …, blank page, blurry` | 官方 Standard Quality / Heavy UC |
+| V5 Curated | `nahida` | `blurry` | `nahida, very aesthetic, masterpiece, no text` | `lowres, …, blank page, blurry` | 统一官方档位内容，不伪造 Curated 专属差异 |
+| V5 Full | `nahida` | `blurry`（Light 档） | `nahida, very aesthetic, amazing quality, no text` | `lowres, …, jpeg artifacts, 0::ai-generated::, blurry` | Light Quality / Light UC |
+| V5 Full | `nahida` | `blurry`（Furry Focus 档） | `nahida, very aesthetic, masterpiece, no text` | `{worst quality}, …, comic, blurry` | Furry Focus UC |
+| V5 Full | `nahida, lowres` | `blurry` | `nahida, lowres, very aesthetic, masterpiece, no text` | `lowres, artistic error, …, blank page, blurry`（保留 lowres） | 跨极性冲突仅 warning，两侧都保留 |
+| V5 Full | `nahida` | `masterpiece, blurry` | `nahida, very aesthetic, masterpiece, no text`（保留 masterpiece） | `lowres, …, blank page, masterpiece, blurry` | 跨极性冲突仅 warning，两侧都保留 |
+| 任意 | `nahida, lowres` | `lowres, blurry` | 含 lowres | 含 lowres | 用户两侧同 token 都保留，报告冲突 |
 
-> **OPEN QUESTION（UC off 的 API 关闭语义）**：当负面档位为 `off` 时，provider 不设置 `ucPresetId` 字段（删除该字段），保证 UI 的 off 绝不发送 heavy。**「缺少 `ucPresetId` 是否等于 NovelAI API 的 No Default UC」未经真实 API 验证（UNVERIFIED）**——不要把第三方/旧 docs 当作 authority，也不在本轮声称已 Web 验证。`light` 与 `heavy` 保持现有映射。
+> **OPEN QUESTION（Quality/UC off 的 API 关闭语义）**：当档位为 `off` 时，provider 不设置对应 preset ID，保证 UI 的 off 不发送该 preset。**「缺少 ID 是否等于 NovelAI API 的关闭语义」未经真实 API 验证（UNVERIFIED）**；本轮不运行真实 API。
 >
-> **OPEN QUESTION（server-side heavy preset）**：provider 仍发送 `ucPresetId="heavy"`（服务器 preset），其值未做真实 API 验证，本轮不做猜测性改动。**当前服务器端 heavy preset 保持现状**：V5 服务器 preset（`qualityPresetId="standard"` / `ucPresetId="heavy"`）不受本地 warning-only 改动影响。
+> **OPEN QUESTION（furry_focus / human_focus 的 API 接受性）**：`furry_focus` / `human_focus` 为**官方 UI preset 值**（用户提供的官方档位事实），本项目按该值原样透传为 `ucPresetId`；**本轮未对真实 NovelAI API 验证这两个 preset ID 是否被接受**——不要改成其他猜测值，也不要声称已实 API 验证。
+>
+> **OPEN QUESTION（server-side preset / 双注入）**：未提供 `prompt_presets_compiled` 的旧请求仍发送兼容的 `qualityPresetId="standard"` / `ucPresetId="heavy"`；普通 UI 请求已展开文本并带标记，provider 不发送对应 ID。该单一事实源方案与真实 Web payload 的最终服务端合并语义均未在本轮真实 API 验证。
 
 ### 关键文件
 
 | 文件 | 职责 |
 |------|------|
-| `static/prompt-compiler.js` | Prompt Compiler 纯函数（模型家族 preset、跨极性冲突 warning-only、详细编译、兼容 wrapper） |
-| `static/app.js` | UI 状态、正面/负面档位切换、Effective Preview（来源/冲突 warning 区）、naiGenerate 共用详细编译结果 |
+| `static/prompt-compiler.js` | Prompt Compiler 纯函数（官方 Quality/UC 档位数组、跨极性冲突 warning-only、详细编译、兼容 wrapper） |
+| `static/app.js` | UI 状态、正面/负面档位切换（standard/light、light/heavy/furry_focus/human_focus）、Effective Preview（来源/冲突 warning 区）、naiGenerate 共用详细编译结果 |
 | `static/index.html` | 生成面板 UI（4 模型 selector、正面/负面档位选择器、Effective Preview 折叠与来源区） |
-| `server/generation-request.mjs` | 请求规范化、V5/非V5 默认值分离、4 个合法普通模型 exact-ID |
-| `server/novelai-provider.mjs` | V5 payload 构建（buildV5Parameters 已固化） |
-| `tests/test_prompt_compiler.mjs` | Prompt Compiler + 模型路由 exact-ID 回归测试（20 项） |
+| `server/generation-request.mjs` | 请求规范化、V5/非V5 默认值分离、4 个合法普通模型 exact-ID、UC preset 五档校验（off/light/heavy/furry_focus/human_focus） |
+| `server/novelai-provider.mjs` | V5 payload 构建（buildV5Parameters 已固化；ucPresetId 按档位 ID 原样透传，不复制 tag 数组） |
+| `tests/test_prompt_compiler.mjs` | Prompt Compiler + 模型路由 exact-ID 回归测试（33 项，含官方 Quality/UC 档位精确断言） |
 | `debug/test_payload_regression.mjs` | Payload 回归测试（5 项） |
 
 ## macOS 启动方式
