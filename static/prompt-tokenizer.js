@@ -36,6 +36,7 @@ export function formatNumber(x) {
   const n = Number(x);
   if (!Number.isFinite(n)) return "";
   if (Math.abs(n - Math.round(n)) < 1e-9) return String(Math.round(n));
+  return String(Number(n.toPrecision(6)));
 }
 
 // Mirror Python parse_entry. Extends the legacy shape {raw, tag, weight, weighted} with
