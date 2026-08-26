@@ -2615,6 +2615,20 @@ class _DbTagMetadataResolver:
         return result
 
 
+def _auto_split_summary(proposal: dict) -> dict:
+    """从 proposal 提取前端易用摘要字段（不依赖 DB 的纯函数）。"""
+    return {
+        "base_count": sum(1 for e in proposal.get("base", []) if "tag" in e),
+        "characters": [
+            {"name": c.get("name", ""),
+             "prompt_count": len(c.get("prompt", [])),
+             "uc_count": len(c.get("uc", []))}
+            for c in proposal.get("characters", [])
+        ],
+        "unassigned_count": len(proposal.get("unassigned", [])),
+    }
+
+
 @app.post("/api/prompt/auto-split")
 def prompt_auto_split(body: AutoSplitRequest):
     """Auto-Split proposal：只返回归属建议，不修改 PromptDocument（APPLY_AUTO_SPLIT 由前端执行）。"""
@@ -2632,8 +2646,11 @@ def prompt_auto_split(body: AutoSplitRequest):
         return {
             "proposal": proposal,
             "summary": proposal.get("summary", ""),
+            "unassigned": proposal.get("unassigned", []),
             "structured": bool(proposal.get("structured")),
             "resplit": bool(proposal.get("resplit")),
+            "assistant_context": proposal.get("assistant_context", {}),
+            **_auto_split_summary(proposal),
         }
     finally:
         conn.close()

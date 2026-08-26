@@ -16,6 +16,7 @@ from prompt.semantics import (
     is_character_identity,
     is_subject_count,
     normalize_tag,
+    parse_subject_count,
     resolve_tag_metadata,
     section_for,
 )
@@ -74,7 +75,10 @@ def _structured_proposal(prompt: Mapping[str, Any]) -> dict[str, Any]:
         "base": base, "characters": chars, "global_uc": global_uc,
         "summary": "explicit structured prompt; ownership preserved",
         "unassigned": [], "structured": True, "resplit": False,
-        "assistant_context": {"participant_count": len(chars)},
+        "assistant_context": {
+            "participant_count": min(len(chars), 4),
+            "actual_participant_count": len(chars),
+        },
     }
 
 
@@ -128,18 +132,20 @@ def auto_split(prompt: Any, metadata_resolver: Any = None, manual_assignments: A
     entries = [_entry(e) for e in parsed.get("base", [])]
     identities = []
     current = None
+    gender_sum = 0
+    aggregate = 0
     count_only = False
-    participant_count = None
     for entry_index, item in enumerate(entries):
         tag = item.get("tag", "")
         metadata = resolve_tag_metadata(tag, metadata_resolver)
         norm = normalize_tag(tag)
-        if is_subject_count(tag):
+        info = parse_subject_count(tag)
+        if info is not None:
             count_only = True
-            import re
-            match = re.search(r"(?<!\d)([1-9]\d*)\s*(?:girls?|boys?|persons?|people|characters?)\b", norm)
-            if match:
-                participant_count = max(participant_count or 0, int(match.group(1)))
+            if info["kind"] == "gender":
+                gender_sum += info["count"]
+            else:
+                aggregate = max(aggregate, info["count"])
         target = assignments.get(entry_index, assignments.get(norm))
         if target is not None:
             _put(proposal, target, item)
@@ -151,14 +157,21 @@ def auto_split(prompt: Any, metadata_resolver: Any = None, manual_assignments: A
             proposal["characters"].append({"name": metadata.get("canonical") or tag, "prompt": [item], "uc": [], "position": None})
             identities.append(tag)
             continue
-        section = section_for(tag, metadata)
         relation = item.get("relation")
-        if relation or section in BASE_SECTIONS:
+        section = section_for(tag, metadata)
+        if relation in ("source", "target", "mutual") and current is not None:
+            # 归当前 Character，保留 relation 元数据
+            proposal["characters"][current]["prompt"].append(item)
+            continue
+        if relation is not None:
+            # 有 relation 但无当前 anchor -> Base，保留 relation 元数据
+            _put(proposal, "base", item)
+            continue
+        if section in BASE_SECTIONS:
             _put(proposal, "base", item)
         elif current is not None and section in LOCAL_SECTIONS:
             proposal["characters"][current]["prompt"].append(item)
-        elif current is not None and (section in LOCAL_SECTIONS or
-                                      (section is None and any(hint in norm for hint in _LOCAL_HINTS))):
+        elif current is not None and section is None and any(hint in norm for hint in _LOCAL_HINTS):
             proposal["characters"][current]["prompt"].append(item)
         else:
             _put(proposal, "base", item)
@@ -166,17 +179,29 @@ def auto_split(prompt: Any, metadata_resolver: Any = None, manual_assignments: A
     free_text = parsed.get("free_text")
     if free_text:
         proposal["base"].append({"text": free_text, "kind": "free_text"})
-    detected_count = participant_count or len(identities)
-    if count_only and len(identities) < 2:
+    # Req #1: final = max(gender 求和, aggregate 单独取值, identity 数)
+    if count_only or identities:
+        participant_count = max(gender_sum, aggregate, len(identities))
+    else:
+        participant_count = None
+    raw_count = participant_count
+    capped = min(raw_count, 4) if raw_count else None
+
+    if count_only and not identities:
         proposal["summary"] = AMBIGUOUS_SUMMARY
+    elif not identities:
+        proposal["summary"] = "no reliable character boundary; ambiguous entries remain in Base"
     elif count_only:
         proposal["summary"] = "detected multiple subjects; identity anchors provide character boundaries"
-    elif len(identities) > 1:
-        proposal["summary"] = f"assigned {len(identities)} character identities by deterministic anchors"
     else:
-        proposal["summary"] = "no reliable character boundary; ambiguous entries remain in Base"
+        proposal["summary"] = f"assigned {len(identities)} character identities by deterministic anchors"
+
     proposal["manual_assignments"] = dict(manual_assignments or {})
-    proposal["assistant_context"] = {"participant_count": min(detected_count, 4) if detected_count else None, "primary_scene_type": None, "stage": None, "position": None, "body_focus": None}
+    proposal["assistant_context"] = {
+        "participant_count": capped,
+        "actual_participant_count": raw_count,
+        "primary_scene_type": None, "stage": None, "position": None, "body_focus": None,
+    }
     return proposal
 
 

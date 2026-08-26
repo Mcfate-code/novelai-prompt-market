@@ -49,11 +49,11 @@ test("P0: weighted existing entry is updated rather than replaced", () => {
 });
 
 test("P0: weighted parenthesized character tag parses as one canonical entry", () => {
-  assert.deepEqual(parseTargetText("1.3::citlali (genshin impact)::", known), [{ tag: "citlali (genshin impact)", weight: 1.3, weighted: true }]);
+  assert.deepEqual(parseTargetText("1.3::citlali (genshin impact)::", known), [{ tag: "citlali (genshin impact)", weight: 1.3, weighted: true, relation: null, brackets: 0 }]);
 });
 
 test("unknown plain text is preserved when catalog knowledge is unavailable", () => {
-  assert.deepEqual(parseTargetText("a user's free prose", new Map()), [{ tag: "a user's free prose", weight: 1, weighted: false }]);
+  assert.deepEqual(parseTargetText("a user's free prose", new Map()), [{ tag: "a user's free prose", weight: 1, weighted: false, relation: null, brackets: 0 }]);
   const doc = reconcileTargetText(createEmpty(), "base", "a user's free prose", new Map());
   assert.equal(serializeTarget(doc, "base"), "a user's free prose");
 });

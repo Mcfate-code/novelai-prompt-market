@@ -298,17 +298,20 @@ function apply(event, action) {
 `prompt/auto_split.py` 的 `auto_split(prompt, metadata_resolver=None, manual_assignments=None)`
 只生成归属 proposal，不修改 `PromptDocument`，不调用 LLM，也不应绑定到 keypress。输入可以是 flat prompt 文本、
 `prompt/import_parser.py` 的结构化结果，或已有 schema v2 文档；后两者带有明确角色段时会直接保留，避免二次拆分。
-返回 `base`、`characters`、`global_uc`、`summary`、`unassigned`，以及可选的 `assistant_context`。
+返回 `base`、`characters`、`global_uc`、`summary`、`unassigned`，以及 `assistant_context`。
 
 归属顺序是明确结构 / 项目 separator → metadata-backed character identity → 确定性语义分区 → Base。
-角色身份应通过注入的 metadata resolver 提供（支持 canonical / alias 与 Danbooru character category 4，括号名称不会被拆坏）；
-人数标签如 `2girls` 只进入 Base，无法建立可靠边界时 `summary` 会明确报告
-`detected multiple subjects but no reliable character boundary`。`source#`、`target#`、`mutual#` 原样保留，
-不明确的 interaction 留在 Base。人工映射可使用 `base`、`global_uc`、`char:N`、`char:N:uc`，优先级最高。
+角色身份应通过注入的 metadata resolver 提供（支持 canonical / alias 与 Danbooru character category 4，括号名称不会被拆坏）。
+人数计算：gender-specific 标签（`1girl`/`2boys`…）求和、aggregate 标签（`3people`/`2persons`…）单独取值、identity 锚点数，
+三者取 max 作为参与人数；`assistant_context` 同时保留 `actual_participant_count`（原始值）与 `participant_count`（4+ 映为 4 档）。
+无法建立可靠边界时 `summary` 明确报告 `detected multiple subjects but no reliable character boundary`，
+人数标签仍只进入 Base。`source#`/`target#`/`mutual#` 关系：有当前 Character anchor 时归当前 Character（保留 relation 元数据），
+无 anchor 时留在 Base。人工映射可使用 `base`、`global_uc`、`char:N`、`char:N:uc`，优先级最高。
 
 接入：`POST /api/prompt/auto-split`（body `{ text | prompt, manual_assignments? }`）调用同一 service，
-对 proposal 的每个 tag 用 `classify_tag` 补 `section`，返回 `{ proposal, summary, structured, resplit }`，
-**不修改** PromptDocument。前端 Import 弹窗「自动整理角色」按钮请求该接口后 dispatch 单个
+对 proposal 的每个 tag 用 `classify_tag` 补 `section`，返回 `{ proposal, summary, unassigned, structured, resplit, assistant_context }`，
+并附前端易用字段 `base_count`、`characters:[{name,prompt_count,uc_count}]`、`unassigned_count`；不返回 HTML，
+**不修改** PromptDocument（Apply 由前端执行）。前端 Import 弹窗「自动整理角色」按钮请求该接口后 dispatch 单个
 `APPLY_AUTO_SPLIT`（`PromptBridge` 一次 proposal → `PromptDocument` 整体替换 → 单次 notify，不逐 tag dispatch），
 并复用现有 `undo` 回退；不在 keypress 上重拆，已有 structured metadata（`resplit=false`）直接恢复，不二次 split。
 
@@ -632,6 +635,18 @@ node --check server/server.mjs
 测试中的 taxonomy / 中文别名使用 `tests/fixtures/` 内的最小固定数据，不依赖 `.gitignore` 的本机 `data/`。
 
 当前回归基线（非付费）：Python 163 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node `npm test` 258 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
+
+### Prompt 语法 Codec（`static/prompt-tokenizer.js`）
+
+前端唯一规范的 NovelAI Prompt 语法编解码器，语义与 Python 参考实现 `prompt/import_parser.py`（`split_tags` / `parse_entry`）与 `prompt/novelai_export.py`（`format_entry` / `format_number`）一致。`static/prompt-document.js` 与 `static/prompt-compiler.js` 均通过它完成 token 拆分 / 解析 / 序列化。
+
+- `splitPromptTokens(text)`：按逗号拆分，`::…::` 权重包裹内的逗号不拆（成对切换 `inWeight`），trim 后丢弃空 token。
+- `parsePromptToken(token)`：解析为 `{ raw, tag, weight, weighted, relation, brackets, strength }`；支持负数权重 `-1::hat::`、关系前缀 `source#/target#/mutual#`、强调层级 `{{}}`/`[[]]`。
+- `serializePromptToken(entry)`：反向序列化（关系前缀 → 权重包裹 → 括号层级 → 原样 tag），与 `format_entry` 一致；`.8` 归一化为 `0.8`，`weight === 1` 不写包裹。
+- `tokenRangeAtCaret(text, caret)`：返回光标所在 token 的 `{ index, start, end, token, raw, parsed }`（逗号归左侧 token）。
+- `joinPromptTokens(tokens)`：以 `", "` 连接 token。
+
+测试：`tests/test_prompt_tokenizer.mjs`（拆分 / 解析 / 序列化 / 往返 / 光标范围 / 编译集成）。
 
 ### 本地工作流提示
 
