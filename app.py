@@ -61,7 +61,7 @@ DEFAULT_USER_SETTINGS = {
     "adolescent_mode": True,
     "cache_limit_mb": 1024,
     "proxy_enabled": True,
-    "proxy_url": "http://127.0.0.1:7890",
+    "proxy_url": "",
     "danbooru_login": "",
     "danbooru_api_key": "",
     "novelai_api_token": "",
@@ -1471,7 +1471,7 @@ class UserSettingsBody(BaseModel):
     adolescent_mode: bool = True
     cache_limit_mb: int = 1024
     proxy_enabled: bool = True
-    proxy_url: str = "http://127.0.0.1:7890"
+    proxy_url: str = ""
     danbooru_login: str = ""
     danbooru_api_key: str = ""
     novelai_api_token: str = ""

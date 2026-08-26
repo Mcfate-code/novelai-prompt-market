@@ -70,7 +70,7 @@ NovelAI 状态 -> [NEW] image.novelai.net/user/subscription 只读探测
 
 ### Step 3 - NovelAI 连接诊断
 
-新增只读账户探测与超时。初始使用旧域名 `api.novelai.net` 返回 400；依据公开 SDK 最新迁移说明改为 `image.novelai.net/user/subscription`。真实本机状态返回 `connected`，代理为 `127.0.0.1:7890`。
+新增只读账户探测与超时。初始使用旧域名 `api.novelai.net` 返回 400；依据公开 SDK 最新迁移说明改为 `image.novelai.net/user/subscription`。真实本机状态返回 `connected`，网络经本机代理连通（代理地址为本机个人配置，已脱敏）。
 
 ### Step 4 - 导航与错误提示
 
@@ -147,7 +147,7 @@ README updated: YES
 
 目标失败：Token 已保存但网络、代理或认证不可用。
 
-实际结果：PASS。状态为 `connected`，网络为 `http://127.0.0.1:7890`。
+实际结果：PASS。状态为 `connected`，网络经本机代理连通（代理地址为本机个人配置，已脱敏）。
 
 ### Check 4 - 例图端到端
 
