@@ -2427,6 +2427,8 @@ class RecommendRequest(TagsRequest):
     stage: str = ""
     position: str = ""
     body_focus: str = ""
+    additional_activities: list[str] = []
+    clothing_state: dict = {}
     active_target: str = ""
     active_section: str = ""
     last_added_tag: str = ""
@@ -2555,6 +2557,8 @@ def recommendations(body: RecommendRequest):
             stage=getattr(body, "stage", "") or "",
             position=getattr(body, "position", "") or "",
             body_focus=getattr(body, "body_focus", "") or "",
+            additional_activities=getattr(body, "additional_activities", []) or [],
+            clothing_state=getattr(body, "clothing_state", {}) or {},
             active_target=active_target,
             active_section=getattr(body, "active_section", "") or "",
             semantic_node=semantic_node,
@@ -2670,45 +2674,196 @@ def _enrich_proposal_sections(proposal: dict, conn) -> dict:
     return proposal
 
 
-# Scene Builder 候选：restricted_taxonomy_map 的 section_label -> 组 key（真实 canonical tag，不整面铺成人词库）。
-NSFW_BUILDER_SECTIONS = {
-    "scenes": ("基础性交", "多人成人场景", "女女性行为", "男男性行为"),
-    "positions": ("性交体位",),
-    "clothingStates": ("裸露与脱衣状态",),
-    "activities": ("抚摸与前戏", "口交与舔舐", "手淫", "非插入式刺激"),
-    "bodyFocus": ("胸部", "臀部、肛门与身体细节", "女性生殖器细节", "男性生殖器细节"),
-}
+# Scene Composer 语义候选配置（高层主场景 / 服装状态 / 附加活动 / 身体聚焦 / 体位来源）。
+# 所有 canonical tag 必须真实存在于 data/tags.sqlite（或 curated data/nsfw_taxonomy.json），
+# 运行时逐条校验，未命中即 drop（绝不发明 / 绝不输出未校验 tag）。
+SCENE_COMPOSER_CONFIG_PATH = BASE_DIR / "config" / "scene_composer.json"
+NSFW_TAXONOMY_PATH = BASE_DIR / "data" / "nsfw_taxonomy.json"
+
+# 青少年模式下返回的空候选组 key（保持 /api/nsfw-builder/options 响应形状稳定）。
+NSFW_BUILDER_GROUPS = ("participants", "scenes", "stages", "positions", "clothingStates", "activities", "bodyFocus")
+
+_scene_composer_config_cache: dict | None = None
+_nsfw_taxonomy_cache: dict | None = None
+
+
+def _scene_composer_config() -> dict:
+    """加载 config/scene_composer.json（模块级缓存；损坏 / 缺失返回空 dict）。"""
+    global _scene_composer_config_cache
+    if _scene_composer_config_cache is None:
+        try:
+            _scene_composer_config_cache = db.load_json(SCENE_COMPOSER_CONFIG_PATH) if SCENE_COMPOSER_CONFIG_PATH.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            _scene_composer_config_cache = {}
+    if not isinstance(_scene_composer_config_cache, dict):
+        _scene_composer_config_cache = {}
+    return _scene_composer_config_cache
+
+
+def _nsfw_taxonomy() -> dict:
+    """加载 data/nsfw_taxonomy.json（curated 成人词库，模块级缓存）。"""
+    global _nsfw_taxonomy_cache
+    if _nsfw_taxonomy_cache is None:
+        try:
+            _nsfw_taxonomy_cache = db.load_json(NSFW_TAXONOMY_PATH) if NSFW_TAXONOMY_PATH.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            _nsfw_taxonomy_cache = {}
+    if not isinstance(_nsfw_taxonomy_cache, dict):
+        _nsfw_taxonomy_cache = {}
+    return _nsfw_taxonomy_cache
+
+
+def _nsfw_taxonomy_categories() -> list:
+    cats = _nsfw_taxonomy().get("categories")
+    return cats if isinstance(cats, list) else []
+
+
+def _nsfw_taxonomy_tags() -> set[str]:
+    tags: set[str] = set()
+    for category in _nsfw_taxonomy_categories():
+        for tag in category.get("tags") or []:
+            tags.add(str(tag).strip().lower())
+    return tags
+
+
+def _nsfw_taxonomy_category_tags(category_id: str) -> list[str]:
+    for category in _nsfw_taxonomy_categories():
+        if category.get("id") == category_id:
+            return [str(t).strip() for t in (category.get("tags") or [])]
+    return []
+
+
+def _scene_tag_in_sqlite(conn, tag: str) -> bool:
+    """tag 是否命中本地 sqlite（tags 表 prompt_tag/danbooru_name、taxonomy_map、restricted_taxonomy_map）。"""
+    tag = (tag or "").strip()
+    if not tag or conn is None:
+        return False
+    try:
+        if conn.execute(
+            "SELECT 1 FROM tags WHERE lower(prompt_tag)=lower(?) OR lower(danbooru_name)=lower(?) LIMIT 1",
+            (tag, tag),
+        ).fetchone():
+            return True
+        if conn.execute("SELECT 1 FROM taxonomy_map WHERE lower(tag_name)=lower(?) LIMIT 1", (tag,)).fetchone():
+            return True
+        if conn.execute(
+            "SELECT 1 FROM restricted_taxonomy_map "
+            "WHERE lower(seed)=lower(?) OR lower(canonical_name)=lower(?) LIMIT 1",
+            (tag, tag),
+        ).fetchone():
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _scene_tag_exists(conn, tag: str) -> bool:
+    """候选 tag 是否存在于任一权威源（sqlite 三表 + curated nsfw_taxonomy.json）。"""
+    tag = (tag or "").strip()
+    if not tag:
+        return False
+    if _scene_tag_in_sqlite(conn, tag):
+        return True
+    return tag.lower() in _nsfw_taxonomy_tags()
 
 
 @app.get("/api/nsfw-builder/options")
 def nsfw_builder_options():
-    """Scene Builder 候选（scenes/positions/clothingStates/activities/bodyFocus）。
+    """Scene Composer 候选（participants/scenes/stages/positions/clothingStates/activities/bodyFocus）。
 
-    青少年模式下返回空候选（组件整体禁用）；成人模式下从受限分类派生真实 canonical tag，
-    供 SET_EXCLUSIVE_GROUP / SET_ASSISTANT_CONTEXT 使用。
+    青少年模式下全部返回空候选（组件整体禁用）。成人模式下从 config/scene_composer.json
+    取高层主场景 / 服装状态 / 附加活动 / 身体聚焦，体位取自 curated nsfw_positions；
+    每个 canonical tag 运行时逐条校验 sqlite，未命中即 drop（绝不发明 / 绝不输出未校验 tag）。
     """
     conn = _conn()
     try:
         if _load_user_settings()["adolescent_mode"]:
-            return {group: [] for group in NSFW_BUILDER_SECTIONS}
-        options: dict[str, list[dict]] = {}
-        for group, labels in NSFW_BUILDER_SECTIONS.items():
-            seen: set[str] = set()
+            return {group: [] for group in NSFW_BUILDER_GROUPS}
+
+        config = _scene_composer_config()
+
+        def _verified(items, *, require_tag=True):
+            """按 {key,label,tag,...} 归一；tag 未命中 sqlite 即 drop（绝不输出未校验 tag）。
+
+            require_tag=False 时（body_focus），tag 缺失直接省略字段而非置空串。
+            """
             out: list[dict] = []
-            for label in labels:
-                for row in conn.execute(
-                    "SELECT COALESCE(t.prompt_tag, m.seed, m.canonical_name) AS tag "
-                    "FROM restricted_taxonomy_map m LEFT JOIN tags t ON t.danbooru_name=m.canonical_name "
-                    "WHERE m.section_label=? AND m.status != 'anomalous' ORDER BY m.sort_order LIMIT 12",
-                    (label,),
-                ):
-                    tag = row["tag"]
-                    if not tag or tag in seen:
-                        continue
-                    seen.add(tag)
-                    out.append({"key": tag, "label": tag, "tag": tag})
-            options[group] = out
-        return options
+            seen: set[str] = set()
+            for raw in items or []:
+                if not isinstance(raw, dict):
+                    continue
+                key = str(raw.get("key") or "").strip()
+                label = str(raw.get("label") or raw.get("key") or "").strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                tag = str(raw.get("tag") or "").strip()
+                if tag and not _scene_tag_in_sqlite(conn, tag):
+                    print(f"[nsfw-builder] drop unverified tag {tag!r} (key={key!r})", flush=True)
+                    tag = ""
+                entry = {"key": key, "label": label}
+                if tag:
+                    entry["tag"] = tag
+                elif require_tag:
+                    entry["tag"] = ""
+                if raw.get("section"):
+                    entry["section"] = str(raw["section"]).strip()
+                if raw.get("minParticipants") is not None:
+                    entry["minParticipants"] = int(raw["minParticipants"])
+                out.append(entry)
+            return out
+
+        # 主场景：config primary_scenes -> {key,label,tag,minParticipants}（tag 未命中 sqlite 则 drop 为 ""）。
+        scenes = []
+        for raw in config.get("primary_scenes") or []:
+            if not isinstance(raw, dict):
+                continue
+            key = str(raw.get("key") or "").strip()
+            label = str(raw.get("label") or raw.get("key") or "").strip()
+            if not key:
+                continue
+            tag = str(raw.get("tag") or "").strip()
+            if tag and not _scene_tag_in_sqlite(conn, tag):
+                print(f"[nsfw-builder] drop unverified scene tag {tag!r} (key={key!r})", flush=True)
+                tag = ""
+            entry = {"key": key, "label": label, "tag": tag}
+            if raw.get("minParticipants") is not None:
+                entry["minParticipants"] = int(raw["minParticipants"])
+            if raw.get("description"):
+                entry["description"] = str(raw["description"]).strip()
+            scenes.append(entry)
+
+        positions = []
+        seen_positions: set[str] = set()
+        for tag in _nsfw_taxonomy_category_tags(config.get("positions_source") or "nsfw_positions"):
+            if not tag or tag in seen_positions:
+                continue
+            if not _scene_tag_in_sqlite(conn, tag):
+                print(f"[nsfw-builder] drop unverified position tag {tag!r}", flush=True)
+                continue
+            seen_positions.add(tag)
+            positions.append({"key": tag, "label": tag, "tag": tag, "minParticipants": 2})
+
+        return {
+            "participants": [
+                {"key": "1", "label": "1"},
+                {"key": "2", "label": "2"},
+                {"key": "3", "label": "3"},
+                {"key": "4+", "label": "4+"},
+            ],
+            "scenes": scenes,
+            "stages": [
+                {"key": "PREPARATION", "label": "准备"},
+                {"key": "FOREPLAY", "label": "前戏"},
+                {"key": "MAIN_ACT", "label": "主戏"},
+                {"key": "CLIMAX", "label": "高潮"},
+                {"key": "AFTERMATH", "label": "余韵"},
+            ],
+            "positions": positions,
+            "clothingStates": _verified(config.get("clothing_states")),
+            "activities": _verified(config.get("activities")),
+            "bodyFocus": _verified(config.get("body_focus"), require_tag=False),
+        }
     finally:
         conn.close()
 

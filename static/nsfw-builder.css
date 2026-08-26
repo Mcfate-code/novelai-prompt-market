@@ -150,3 +150,42 @@
   border-color: #5b7c99;
   color: #24527a;
 }
+
+/* ---- Scene Composer 新增：按角色服装子组 / 提示 / 推荐分组 ---- */
+
+.nb-char-clothing-group .nb-char-clothing {
+  margin-bottom: 8px;
+}
+.nb-char-clothing {
+  background: #f4f4f4;
+  border-color: #dcdcdc;
+}
+.nb-char-clothing .nb-legend {
+  color: #3a3a3a;
+}
+
+.nb-notice {
+  padding: 8px 10px;
+  border: 1px dashed #c9b28a;
+  border-radius: 6px;
+  background: #fbf6ea;
+  color: #8a6d3b;
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.nb-rec-group {
+  margin-bottom: 10px;
+}
+.nb-rec-group:last-child {
+  margin-bottom: 0;
+}
+.nb-rec-group-title {
+  font-weight: 600;
+  color: #5b7c99;
+  font-size: 12px;
+  margin: 6px 0 4px;
+}
+.nb-rec-group .nb-recs {
+  padding-left: 4px;
+}

@@ -6,7 +6,7 @@ FastAPI, PromptDocument, or the generation/audit write path.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from prompt.sections import classify_tag as classify_prompt_section
@@ -61,6 +61,8 @@ class RecommendationContext:
     stage: str = ""
     position: str = ""
     body_focus: str = ""
+    additional_activities: tuple[str, ...] = ()
+    clothing_state: Mapping[str, Any] = field(default_factory=dict)
     active_target: str = ""
     active_section: str = ""
     semantic_node: Any = None
@@ -95,12 +97,17 @@ class RecommendationService:
     def recommend(self, *, tags: Sequence[str] = (), target: str = "", node_id: str = "",
                   limit: int = 20, mode: str = "general", participant_count=None,
                   primary_scene_type: str = "", stage: str = "", position: str = "",
-                  body_focus: str = "", active_target: str = "", active_section: str = "",
+                  body_focus: str = "", additional_activities: Sequence[str] = (),
+                  clothing_state: Mapping[str, Any] | None = None,
+                  active_target: str = "", active_section: str = "",
                   semantic_node=None, last_added_tag: str = "") -> dict[str, Any]:
         normalized = tuple(dict.fromkeys(_norm(tag) for tag in tags if _norm(tag)))
         ctx = RecommendationContext(normalized, _norm(target), node_id, _norm(mode), participant_count,
                                     _norm(primary_scene_type), _norm(stage).upper(), _norm(position),
-                                    _norm(body_focus), _norm(active_target), _norm(active_section),
+                                    _norm(body_focus),
+                                    tuple(dict.fromkeys(_norm(t) for t in (additional_activities or []) if _norm(t))),
+                                    dict(clothing_state or {}),
+                                    _norm(active_target), _norm(active_section),
                                     semantic_node, _norm(last_added_tag))
         if not normalized or "uc" in ctx.target or ctx.active_target.endswith(":uc"):
             return {"groups": [], "recommendations": []}

@@ -1,0 +1,69 @@
+{
+  "primary_scenes": [
+    {
+      "key": "solo_intimate",
+      "label": "单人亲密",
+      "tag": "solo",
+      "minParticipants": 1,
+      "description": "单人情态 / 自慰向"
+    },
+    {
+      "key": "couple_intimate",
+      "label": "伴侣亲密",
+      "tag": "sex",
+      "minParticipants": 2,
+      "description": "伴侣性交 / 亲密"
+    },
+    {
+      "key": "multi_intimate",
+      "label": "多人互动",
+      "tag": "group sex",
+      "minParticipants": 3,
+      "description": "三人及以上群戏"
+    },
+    {
+      "key": "roleplay_situational",
+      "label": "情境 / 旁观",
+      "tag": "voyeurism",
+      "minParticipants": 2,
+      "description": "旁观 / 窥视视角的情境"
+    },
+    {
+      "key": "foreplay_only",
+      "label": "前戏向",
+      "tag": "touching",
+      "minParticipants": 2,
+      "description": "抚摸 / 前戏为主"
+    }
+  ],
+  "clothing_states": [
+    { "key": "clothed", "label": "穿衣", "tag": "clothed" },
+    { "key": "partially_clothed", "label": "半脱", "tag": "partially clothed" },
+    { "key": "nude", "label": "全裸", "tag": "nude" },
+    { "key": "lingerie", "label": "内衣", "tag": "lingerie" },
+    { "key": "see_through", "label": "透视", "tag": "see-through clothes" }
+  ],
+  "activities": [
+    { "key": "kissing", "label": "接吻", "tag": "kissing", "section": "action" },
+    { "key": "french_kiss", "label": "深吻", "tag": "french kiss", "section": "action" },
+    { "key": "groping", "label": "抚摸", "tag": "groping", "section": "action" },
+    { "key": "cunnilingus", "label": "舔阴", "tag": "cunnilingus", "section": "action" },
+    { "key": "fellatio", "label": "口交", "tag": "fellatio", "section": "action" },
+    { "key": "masturbation", "label": "手淫", "tag": "masturbation", "section": "action" },
+    { "key": "paizuri", "label": "乳交", "tag": "paizuri", "section": "action" },
+    { "key": "footjob", "label": "足交", "tag": "footjob", "section": "action" },
+    { "key": "fingering", "label": "指交", "tag": "fingering", "section": "action" },
+    { "key": "anal_sex", "label": "肛交", "tag": "anal sex", "section": "action" },
+    { "key": "vaginal_sex", "label": "性交", "tag": "vaginal sex", "section": "action" },
+    { "key": "sixty_nine", "label": "69", "tag": "69", "section": "action" },
+    { "key": "cuddling", "label": "依偎", "tag": "cuddling", "section": "action" }
+  ],
+  "body_focus": [
+    { "key": "face", "label": "面部" },
+    { "key": "breasts", "label": "胸部", "tag": "breasts" },
+    { "key": "butt", "label": "臀部", "tag": "ass" },
+    { "key": "pussy", "label": "阴部", "tag": "pussy" },
+    { "key": "penis", "label": "阴茎", "tag": "penis" }
+  ],
+  "positions_source": "nsfw_positions"
+}
