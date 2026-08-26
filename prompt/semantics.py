@@ -14,7 +14,10 @@ from typing import Any, Callable
 CHARACTER_CATEGORY = 4
 BASE_SECTIONS = frozenset({"scene", "composition", "style", "quality"})
 LOCAL_SECTIONS = frozenset({"character", "appearance", "clothing", "expression", "action"})
-SUBJECT_COUNT_RE = re.compile(r"^(?:\d+\s*)?(?:girls?|boys?|women?|men?|people|persons?)$", re.I)
+_GENDER_UNITS = ("girls", "boys", "women", "men", "others")
+_AGG_UNITS = ("people", "persons", "characters")
+SUBJECT_COUNT_RE = re.compile(
+    r"^(\d+)\s*(girls?|boys?|women?|men?|others?|people|persons?|characters?)$", re.I)
 
 
 def normalize_tag(value: Any) -> str:
@@ -63,6 +66,18 @@ def section_for(tag: str, metadata: Mapping[str, Any]) -> str | None:
 
 def is_subject_count(tag: str) -> bool:
     return bool(SUBJECT_COUNT_RE.fullmatch(normalize_tag(tag)))
+
+
+def parse_subject_count(tag: str) -> dict | None:
+    """返回 {'kind': 'gender'|'aggregate', 'count': int} 或 None。"""
+    m = SUBJECT_COUNT_RE.fullmatch(normalize_tag(tag))
+    if not m:
+        return None
+    num = int(m.group(1))
+    unit = m.group(2).lower()
+    # girls? 会同时捕获单数 "girl" 与复数 "girls"；对单数补 "s" 再比对，避免漏归 gender。
+    kind = "gender" if unit in _GENDER_UNITS or unit + "s" in _GENDER_UNITS else "aggregate"
+    return {"kind": kind, "count": num}
 
 
 def has_identity_alias(tag: str, metadata: Mapping[str, Any]) -> bool:

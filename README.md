@@ -298,17 +298,20 @@ function apply(event, action) {
 `prompt/auto_split.py` 的 `auto_split(prompt, metadata_resolver=None, manual_assignments=None)`
 只生成归属 proposal，不修改 `PromptDocument`，不调用 LLM，也不应绑定到 keypress。输入可以是 flat prompt 文本、
 `prompt/import_parser.py` 的结构化结果，或已有 schema v2 文档；后两者带有明确角色段时会直接保留，避免二次拆分。
-返回 `base`、`characters`、`global_uc`、`summary`、`unassigned`，以及可选的 `assistant_context`。
+返回 `base`、`characters`、`global_uc`、`summary`、`unassigned`，以及 `assistant_context`。
 
 归属顺序是明确结构 / 项目 separator → metadata-backed character identity → 确定性语义分区 → Base。
-角色身份应通过注入的 metadata resolver 提供（支持 canonical / alias 与 Danbooru character category 4，括号名称不会被拆坏）；
-人数标签如 `2girls` 只进入 Base，无法建立可靠边界时 `summary` 会明确报告
-`detected multiple subjects but no reliable character boundary`。`source#`、`target#`、`mutual#` 原样保留，
-不明确的 interaction 留在 Base。人工映射可使用 `base`、`global_uc`、`char:N`、`char:N:uc`，优先级最高。
+角色身份应通过注入的 metadata resolver 提供（支持 canonical / alias 与 Danbooru character category 4，括号名称不会被拆坏）。
+人数计算：gender-specific 标签（`1girl`/`2boys`…）求和、aggregate 标签（`3people`/`2persons`…）单独取值、identity 锚点数，
+三者取 max 作为参与人数；`assistant_context` 同时保留 `actual_participant_count`（原始值）与 `participant_count`（4+ 映为 4 档）。
+无法建立可靠边界时 `summary` 明确报告 `detected multiple subjects but no reliable character boundary`，
+人数标签仍只进入 Base。`source#`/`target#`/`mutual#` 关系：有当前 Character anchor 时归当前 Character（保留 relation 元数据），
+无 anchor 时留在 Base。人工映射可使用 `base`、`global_uc`、`char:N`、`char:N:uc`，优先级最高。
 
 接入：`POST /api/prompt/auto-split`（body `{ text | prompt, manual_assignments? }`）调用同一 service，
-对 proposal 的每个 tag 用 `classify_tag` 补 `section`，返回 `{ proposal, summary, structured, resplit }`，
-**不修改** PromptDocument。前端 Import 弹窗「自动整理角色」按钮请求该接口后 dispatch 单个
+对 proposal 的每个 tag 用 `classify_tag` 补 `section`，返回 `{ proposal, summary, unassigned, structured, resplit, assistant_context }`，
+并附前端易用字段 `base_count`、`characters:[{name,prompt_count,uc_count}]`、`unassigned_count`；不返回 HTML，
+**不修改** PromptDocument（Apply 由前端执行）。前端 Import 弹窗「自动整理角色」按钮请求该接口后 dispatch 单个
 `APPLY_AUTO_SPLIT`（`PromptBridge` 一次 proposal → `PromptDocument` 整体替换 → 单次 notify，不逐 tag dispatch），
 并复用现有 `undo` 回退；不在 keypress 上重拆，已有 structured metadata（`resplit=false`）直接恢复，不二次 split。
 
