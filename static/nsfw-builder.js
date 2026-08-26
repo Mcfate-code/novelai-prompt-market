@@ -648,7 +648,9 @@ export class NsfwBuilder {
     const node = event.target && typeof event.target.closest === "function" ? event.target.closest("[data-action]") : null;
     if (!node) return;
     const action = node.dataset.action;
-    if (action === "exclusive") {
+    if (action === "participants") {
+      this.selectParticipants(node.dataset.key);
+    } else if (action === "exclusive") {
       this.selectExclusive(node.dataset.group, node.dataset.key);
     } else if (action === "body-focus") {
       this.selectBodyFocus(node.dataset.key);

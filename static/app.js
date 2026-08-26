@@ -2060,7 +2060,7 @@ async function createBundle(name = "") {
   const value = (name || $("#bundle-name").value).trim(); if (!value) { toast("请填写标签模板名称"); return null; }
   const items = bundleItemsFromPrompt(); if (!items.length) { toast("当前 Prompt 为空"); return null; }
   const data = await api("/api/bundles", { method: "POST", body: JSON.stringify({ name: value, items }) }); $("#bundle-name").value = ""; toast("标签模板已保存");
-  if ($("#bundles-modal").style.display !== "none") await loadBundles(); return data.bundle || data;
+  closeBundlesModal(); return data.bundle || data;
 }
 async function addBundle(id) {
   let bundle = bundles.find((b) => String(b.id) === String(id)); if (!bundle?.items) { const data = await api(`/api/bundles/${encodeURIComponent(id)}`); bundle = data.bundle || data; }

@@ -90,10 +90,10 @@ export function buildRecommendPayload(doc, target, options = {}) {
     active_section: String(activeSection || ""),
     assistant_context: ctx,
     participant_count: ctx?.participant_count,
-    primary_scene_type: ctx?.primary_scene_type,
-    stage: ctx?.stage,
-    position: ctx?.position,
-    body_focus: ctx?.body_focus,
+    primary_scene_type: ctx?.primary_scene_type ?? "",
+    stage: ctx?.stage ?? "",
+    position: ctx?.position ?? "",
+    body_focus: ctx?.body_focus ?? "",
     limit: Number(limit) > 0 ? Number(limit) : REC_LIMIT,
   };
 }
