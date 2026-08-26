@@ -1,23 +1,146 @@
-# NovelAI 提示词超市 V2
+# NovelAI 提示词标签超市
 
-本项目是一个本地优先的 NovelAI Prompt 工作台，技术栈保持为 **FastAPI + SQLite + 原生 JavaScript**。V2 的目标是把原来的“搜索 Tag → 加入购物车”扩展为完整闭环：
+本地优先的 NovelAI Prompt 工作台：搜索标签 → 加入购物车 → 整理分区与权重 → 直接调用 NovelAI 官方 API 生图 → 图库管理与恢复，形成完整闭环。
 
-> 搜得到 → 选得快 → 自动整理 → 能复用 → 能从历史图片反向继续生成
+技术栈：**FastAPI + SQLite + 原生 JavaScript 前端 + Node.js 代理**。默认只监听 `127.0.0.1`，单机工具，无需认证 / TLS。NovelAI Persistent API Token 只由本地 Node 服务读取，不返回浏览器、不写入项目源码。
 
-默认只监听 `127.0.0.1`。NovelAI Persistent API Token 只由本地 Node 服务读取，不返回浏览器、不写入项目源码。
+> 闭环：搜得到 → 选得快 → 自动整理 → 能复用 → 能从历史图片反向继续生成
+
+## 功能特性
+
+### 标签搜索（V2）
+
+- 输入统一处理大小写、下划线、连字符、标点和空白。
+- 分层匹配，返回 `match_type`、`match_reason` 与相似度：
+  `exact` → `token_exact` → `token_unordered` → `prefix` → `substring` → `pinyin_exact` → `pinyin_partial` → `fuzzy`。
+- 词序无关匹配：输入 `range murata` 也能命中 `murata range`，字符巧合（如 `orange hat` 含子串 `range`）不会抢到前面。
+- **拼音搜索**：对每个标签的中文名 / 中文别名生成全拼（`lan yan`）与首字母（`ly`），输入 `lanyan` / `lan yan` / `ly` 可命中对应中文名的英文标签（如「蓝眼」→ `blue eyes`）。
+- 别名解析：`/api/resolve` 支持精确、token 词序无关、前缀与中文别名前缀解析。
+
+### 语义找词
+
+搜索框旁「语义找词」按钮：输入中文自然语言，后端代理到 Danbooru 语义检索服务，返回英文标签候选列表。
+
+### 自定义标签（user_tags）
+
+本地词库没有的标签（如 `original character`、`my_style`）可通过购物车「＋ 自定义标签」或设置页添加。自定义标签写入本地 `user_tags` 表，之后在搜索中作为 `via: "user_tags"` 直接命中；设置页可查看与删除。
+
+### 权重调节
+
+购物车条目权重支持快速档（弱 0.8 / 普通 1.0 / 强 1.2）、步进微调（±0.05）与**手动输入**。手动输入时面板不自动关闭，支持连续键入不失焦；导出时自动转换为 NovelAI 原生语法，如 `1.25::blue eyes::`。
+
+### 分区组织与记忆
+
+Prompt 使用固定 10 分区：`character / appearance / clothing / expression / action / composition / scene / style / quality / other`。
+
+- 分类完全本地确定性：用户分区覆盖 → Danbooru Artist / Character 分类 → 本地关键词规则 → `other`，不调用 AI。
+- **分区记忆**：用户把某标签移动到某分区后写入 `tag_section_override`，之后任何草稿加载（含换浏览器、清站点数据）都会自动归位到记住的分区。
+
+### 购物车与多角色
+
+- 购物车支持 Base Prompt、Global UC、多角色（每个角色独立 Prompt 与 UC）。
+- 「添加到：[Base / Scene ▼]」目标选择器：标签可写入 Base 或指定角色，角色增删排序时目标自动跟随/回退。
+- **TagBundle**：只保存 Tag、分区、权重与顺序的复用组合（如角色外观、画风、构图）。
+- **Preset**：保存生图参数与工作台设置。二者职责分离。
+
+### 推荐与冲突提示
+
+- 本地共现（`tag_cooccurrence`）、个人使用频率（`recent_tags.use_count`）提供轻量推荐。
+- 冲突规则（`tag_conflict`，如长发/短发、睁眼/闭眼）给出提示。
+- 推荐与冲突只用于提示，**不自动改写 Prompt**。
+
+### 提示词导入
+
+支持 `Base:`、`Character N:`、`Character N UC:`、`Global UC:` 多段文本解析，逐标签四态预览：
+
+- `exact`：直接命中；
+- `normalized`：规范化后命中；
+- `candidate`：仅提供候选，用户确认前不写入；
+- `custom`：已有自定义标签，或用户选择「保留原文」。
+
+### NovelAI 生图（官方 API）
+
+生图链路为官方 API-only（`https://image.novelai.net`），Node 不依赖网页 / Edge / CDP。面板提供：
+
+- 模型：`nai-diffusion-5-full`、`nai-diffusion-5-curated`、`nai-diffusion-4-5-full`、`nai-diffusion-4-full`（全链路 exact-ID，未知模型明确报错）。
+- 文生图 / 图生图（本地上传或历史图作为基础图，透传 Strength / Noise）。
+- 尺寸档位（Small / Normal / Large 纵向、方形、横向 + 自定义宽高）、批次图片数 1–6，每次请求固定生成一张、批次严格串行。
+- Seed 模式：Random / Fixed / Increment，每张结果保存实际使用的 Seed。
+- **正面 / 负面提示词档位**：正面 `off / standard / light`，负面 `off / light / heavy / furry_focus / human_focus`，默认 `standard + heavy`；档位内容为统一官方 Quality / UC 数组。
+- Multi-Character：Base 与各角色 Prompt / UC 分离，支持角色位置（Auto 居中或手动 X/Y 坐标）。
+- 透明背景、Advanced Settings（Sampler / Scheduler / Steps / CFG / CFG Rescale / Auto SMEA）。
+- **Effective Preview**：预览与实际发送共用同一份编译结果（含 Quality / UC 来源与跨极性冲突 warning-only 提示），raw prompt 永不改写。
+- 积分提示只展示可由官方规则确认的结论；是否扣费以 NovelAI 实际结算为准。任意一张失败即停止后续请求；取消只阻止未发送的请求。
+
+### 标签例图
+
+新生成的标签例图默认 Prompt 由服务端按 taxonomy 生成：普通标签 `{{标签}}, safe, masterpiece, best quality, very aesthetic, absurdres`，NSFW 标签将 `safe` 换为 `nsfw`。模板可在设置页自定义（支持 `{tag}` 与 `{rating}` 占位符，必须包含 `{tag}`）；例图使用固定 V4.5 Full / 832×832 / 28 steps，生成会消耗 Anlas，需明确确认。
+
+### 图库与闭环
+
+- 正式生成经 Prompt、API、参数与 Seed 校验后创建一次 `PromptSnapshot`；生成结果回写图库并关联 `snapshot_id`。
+- 图库支持目录树、网格密度调整、收藏、全选、「移入待清理」（软删除，进入项目 `待清理/图库/`）、zip 图包导入。
+- **元数据恢复**：图库图片可一键「恢复设置」（还原 Prompt / Negative / 各开关 / 参数 / Seed / 角色），或按分区恢复 Snapshot（全部 / 角色 / 画风 / 构图）。
+- **审阅模式**：双击图片进入沉浸式全屏审阅（`←`/`→` 翻页、Fit / 1:1 缩放、收藏/删除同步、`Esc` 退出恢复原布局）。
+
+### 翻译
+
+设置页填写百度翻译 APP ID / 密钥后可手动触发翻译（仅点击时请求，不会自动上传）；自定义标签支持中文名，自然语言补充可保留中文 Raw 并选择英文译文作为 Effective Prompt。
+
+### 数据维护
+
+- 设置页提供缓存统计与清理（标签缩略图缓存、例图缓存）。
+- 「更新标签库」从 Danbooru 增量同步标签（`/api/sync`、`/api/sync-hot`）。
+- 青少年模式：开启时隐藏 NSFW 目录与语义搜索结果。
+
+## 系统架构
+
+```text
+浏览器（static/ 原生 JS，无框架）
+   │
+   ├── FastAPI 后端（Python：app.py / db.py / search.py / importer/ / prompt/）
+   │      127.0.0.1:8123
+   │      标签数据、搜索、导入、图库索引、设置、翻译（SQLite：data/tags.sqlite）
+   │
+   └── Node 代理（server/：server.mjs / novelai-provider.mjs / generation-request.mjs …）
+          127.0.0.1:8787
+          静态面板服务 + Python 路由反向代理
+          NovelAI 官方 API 生图（Token 只在本层持有）
+          SSE 进度事件推送 / 生成资产保存（library/）/ 图库回写
+```
+
+**为什么有 Node 层**：NovelAI Persistent API Token 不能暴露给浏览器；官方生图 API 的 payload 构建（V5 `params_version=4`、V4 `params_version=3`）、严格串行批次、进度事件推送与资产落盘由 Node 层负责，Python 层负责标签与图库索引。前端统一从 8787 入口访问（Node 把标签 / 例图 / 图库 / 设置请求转发给 FastAPI）。
+
+### 目录结构（主要文件）
+
+| 路径 | 职责 |
+| --- | --- |
+| `app.py` | FastAPI 后端入口：全部标签 / 搜索 / 导入 / 图库 / 设置 API，并自动拉起 Node 服务 |
+| `db.py` | SQLite 数据底座（tags / user_tags / tag_section_override / tag_bundle / prompt_snapshot / gallery 等） |
+| `search.py` | 搜索排序、别名解析、拼音匹配、分类浏览 |
+| `importer/` | Danbooru 数据导入、中文别名、拼音回填、受限分类、目录构建 |
+| `prompt/` | 固定分区与本地分类器、导入解析、NovelAI 语法导出 |
+| `server/server.mjs` | Node 服务入口：静态面板、Python 路由代理、SSE、官方 API 生图路由 |
+| `server/novelai-provider.mjs` | NovelAI 官方 API payload 构建与响应解析 |
+| `server/generation-request.mjs` | 生图请求规范化与模型默认值 |
+| `server/api-batch.mjs` | 1–6 张严格串行批次控制器 |
+| `static/` | 前端（index.html / app.js / app.css / prompt-compiler.js） |
+| `data/` | 本地 SQLite 与种子数据（已 gitignore，首次启动自动生成） |
 
 ## 快速开始
 
-### 启动应用
+环境要求：**Python 3.10+**、**Node.js 22+**（生图依赖 Node 层；若本机没有，可用 `NODE_BIN` 指向可执行文件，或将 Node 放到 `$WORKBUDDY_HOME/binaries/node/` 下）。
+
+### 安装依赖并启动
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-Windows：
+Windows（PowerShell）：
 
 ```powershell
 python -m venv .venv
@@ -25,481 +148,147 @@ python -m venv .venv
 .venv\Scripts\python app.py
 ```
 
-启动 `app.py` 后会自动检测并拉起 NovelAI 本地服务 `127.0.0.1:8787`，无需再开第二个终端。统一从 <http://127.0.0.1:8787> 使用面板；该入口会把标签、例图、图库和设置请求转发给 FastAPI `8123`，NovelAI 官方 API 和进度事件由 Node 处理。生图只走官方 API，不需要 NovelAI 网页、Edge/CDP 或网页控件。退出 Python 应用时，本次自动启动的 Node 子服务也会一起退出；若 8787 已由用户手工启动，则会直接复用且不会关闭它。Node 子服务的 owner 记录在 `.workbuddy/runtime/novelai-service.pid`（`{parent_pid, node_pid}`），用于防止多个 `app.py` 实例互杀：某个实例因 8123 被占用而启动失败、即将退出时，不会误杀仍在健康对外服务的 node。
+### 访问
 
-本地启动默认开启 Python 自动重载和 Node 文件监听，修改服务端或 Node 源码后会自动重启对应进程，避免新前端调用旧接口。需要稳定运行时可设置 `TAGS_MARKET_RELOAD=0` 后再启动。
+- **统一面板入口：<http://127.0.0.1:8787>**（Node 服务，含前端与 API 代理，推荐）
+- FastAPI 直连：<http://127.0.0.1:8123>（标签 / 图库 / 设置 API）
 
-需要 Node.js 22+。Token 可通过环境变量 `NOVELAI_API_KEY` 提供，也可在应用设置中保存到本机用户配置 `~/.workbuddy/tags-market-settings.json`。自动启动失败时查看 `.workbuddy/runtime/novelai-service.log`。如需调试并关闭自动启动，可设置 `TAGS_MARKET_AUTOSTART_NAI=0`。
+启动 `app.py` 后会自动检测并拉起 Node 服务（127.0.0.1:8787），无需另开终端；退出 Python 应用时，本次自动启动的 Node 子服务也会一起退出。若 8787 已由用户手工启动，则会直接复用且不会关闭它。多实例防互杀：某个实例因端口被占而启动失败、即将退出时不会误杀仍在健康服务的 node。
 
-## V2 核心能力
+本地启动默认开启 Python 自动重载与 Node 文件监听；需要稳定运行时设置 `TAGS_MARKET_RELOAD=0` 再启动。自动启动失败时查看 `.workbuddy/runtime/novelai-service.log`；如需关闭自动启动，设置 `TAGS_MARKET_AUTOSTART_NAI=0`。
 
-### 搜索 V2
+### 单独启动 Node 层（可选）
 
-输入会统一处理大小写、下划线、连字符、标点和空格。匹配优先级为：
-
-1. `exact`
-2. `token_exact`
-3. `token_unordered`
-4. `prefix`
-5. `substring`
-6. `pinyin_exact`
-7. `pinyin_partial`
-8. `fuzzy`
-
-结果返回 `match_type`、`match_reason` 和相似度。SQL 先分层召回有限候选，再执行相似度计算，避免全表 Python 模糊匹配。真实词库中 `range murata` 可将 `murata range` 排在首位，`orange hat` 不会抢到前面；本机基准约 `0.11s`。
-
-支持**拼音模糊搜索**：对每个标签的中文名/中文别名生成拼音（全拼 `lan yan` + 首字母 `ly`），使输入 `lanyan` / `lan yan` / `ly` 能命中对应中文名的英文标签（如 蓝眼 → `blue eyes`）。拼音列由 `importer/backfill_pinyin.py` 回填（幂等，可重复运行）。
-
-### PromptState V2
-
-草稿使用 `schema_version: 2`，固定分区为：
-
-```text
-character / appearance / clothing / expression / action
-composition / scene / style / quality / other
+```bash
+./server/start-nai.sh          # 后台启动 Node 联动层（8787）
+./server/start-nai.sh --login # 首次登录 NovelAI（仅旧版需要，登录后关闭窗口）
 ```
 
-每个 Tag 内部保存 `tag`、`weight`、`section`、顺序和来源。权重统一存 float，导出时再转换成 NovelAI 原生语法，如 `1.25::blue eyes::`。
+脚本使用 `$HOME/.workbuddy` 作为默认本机目录（可用 `WORKBUDDY_HOME` 覆盖），Node 可用 `NODE_BIN` 指定。
 
-```json
-{
-  "schema_version": 2,
-  "sections": {},
-  "characters": [
-    {
-      "name": "Character 1",
-      "prompt_sections": {},
-      "uc_sections": {}
-    }
-  ],
-  "global_uc_sections": {},
-  "free_text": ""
-}
-```
+### macOS 常驻运行（可选）
 
-分类只使用 Danbooru category、本地 taxonomy/关键词规则和用户覆盖，不调用 AI。优先级为：用户覆盖 → Danbooru Artist/Character → 本地规则 → `other`。
+`bash install-launchagent.sh` 安装 LaunchAgent 使服务开机常驻，日志位于 `$HOME/Library/Logs/TagSupermarket/`；故障排查可用仓库根目录的 `标签超市-诊断.command`。关闭窗口 ≠ 停止服务。
 
-### 导入四态
+### 首次使用
 
-Prompt 导入预览将条目标记为：
+1. 打开面板 → 设置页：
+   - 填写 **NovelAI Persistent API Token**（生图与例图必需，只保存在本机，也可用环境变量 `NOVELAI_API_KEY`）。
+   - 可选：Danbooru 账号 / API Key（更新标签库与抓取例图）、百度翻译凭据、代理。
+2. 标签库首次启动自动种子化（`data/`）；「更新标签库」可从 Danbooru 增量同步更多标签。
 
-- `exact`：直接命中。
-- `normalized`：规范化后命中。
-- `candidate`：仅提供候选，用户确认前不写入 Prompt。
-- `custom`：已存在的本地自定义 Tag，或用户明确选择“保留原文”。
+## 配置
 
-除导入流程外，也可在购物车的「＋ 自定义标签」按钮直接新增本地自定义 Tag（同时写入 `user_tags` 词库并加入当前 Prompt）；设置页「自定义标签」区块可查看与删除已添加的本地自定义标签。本地自定义 Tag 在搜索时作为 `via: "user_tags"` 命中。
+项目不随仓库提交任何本机私密配置，全部通过环境变量或仓库外的用户设置文件提供。
 
-支持 `Base:`、`Character N:`、`Character N UC:`、`Global UC:` 多段输入；角色 UC 会进入对应 `char:n:uc`，不会混入角色正向 Prompt。
+### 用户设置文件
 
-### Bundle 与 Preset 分离
+- 路径：`$WORKBUDDY_HOME/tags-market-settings.json`（默认 `~/.workbuddy/tags-market-settings.json`，可用环境变量 `WORKBUDDY_HOME` 覆盖，与 `server/start-nai.sh` 一致）。
+- 保存内容：NovelAI Token、Danbooru 登录 / API Key、百度翻译凭据、代理、青少年模式、缓存上限、例图提示词模板等；凭据不回显，文件权限 0600。
 
-- `TagBundle`：只保存 Tag、分区、权重和顺序，适合复用角色外观、画风、构图等组合。
-- `Preset`：保存生图参数和生成工作台设置。
+### 环境变量
 
-二者职责分离，避免“想复用一组 Tag”时连尺寸、Seed 等参数一起覆盖。
+项目不会自动读取 `.env`；这些变量需要在启动进程前 export（或在启动脚本中设置），示例见仓库内 `.env.example`：
 
-### 推荐与冲突
+| 变量 | 说明 |
+| --- | --- |
+| `NAI_PROXY_URL` | 出网代理地址（留空 = 不用代理） |
+| `WORKBUDDY_HOME` | 覆盖本机 WorkBuddy 目录（默认 `~/.workbuddy`） |
+| `NODE_BIN` | 指定 Node.js 22+ 可执行文件 |
+| `EDGE_BIN` | 指定 Microsoft Edge（`start-nai.sh` 登录模式用） |
+| `NOVELAI_API_KEY` | NovelAI Persistent API Token |
+| `DANBOORU_API_KEY` | Danbooru API Key |
+| `BAIDU_TRANSLATE_APPID` / `BAIDU_TRANSLATE_SECRET` | 百度翻译凭据 |
+| `TAGS_MARKET_RELOAD` | 设为 `0` 关闭开发热重载 |
+| `TAGS_MARKET_AUTOSTART_NAI` | 设为 `0` 关闭 Node 服务自动启动 |
 
-- `tag_cooccurrence` 记录本地历史共现。
-- `recent_tags.use_count` 记录个人使用频率。
-- `tag_conflict` 提供轻量冲突提醒，例如长发/短发、睁眼/闭眼。
+### 项目级配置
 
-推荐与冲突只用于提示，不自动改写 Prompt。
+`config/app_settings.json`（端口 / 主机等，本机文件，已被 gitignore，不提交）与 `config/model_overlays.json`（模型能力语义，随仓库维护）。
 
-### Snapshot 与图库闭环
+## 使用指南
 
-正式生成通过 Prompt、API、参数和 Seed 校验后，恰好创建一次 `PromptSnapshot`。Snapshot 保存失败会阻止生成，旧 `snapshot_id` 不会被复用。
+1. **找标签**：顶部搜索框输入英文 / 中文 / 拼音（如 `蓝眼`、`lan yan`、`ly`）；或点击「语义找词」用中文自然语言描述；也可在「标签目录」按分类浏览。
+2. **加入购物车**：点击标签写入当前目标（Base / Scene 或指定角色）。分类由本地规则自动判定；在购物车「高级编辑」中可调整分区与权重（支持手动输入）。
+3. **整理与复用**：把常用标签组合保存为「标签模板」（Bundle），把生图参数保存为 Preset；「导入提示词」可把已有 NovelAI 提示词结构化拆入购物车。
+4. **生图**：切到「生图」工作台，选择模型 / 尺寸档位 / 批次数量 / Seed 模式，可展开角色设置做 Multi-Character，确认「实际发送内容」后点生成；进度实时推送，失败即停。
+5. **图库**：生成结果自动进入图库；双击进入审阅模式；「恢复设置」或按分区加载 Snapshot 可还原参数继续生成；「以此图进行图生图」可从历史图继续。
+6. **设置**：管理 Token / 凭据、代理、缓存、青少年模式、例图提示词模板与自定义标签。
 
-```text
-PromptState
-  → PromptSnapshot
-  → Node 串行生成（1-6 张）
-  → Node Asset
-  → Python Gallery（snapshot_id + source_asset_id）
-  → 全部 / 角色 / 画风 / 构图分区恢复
-```
+## API 摘要
 
-`source_asset_id` 在 Python 图库建立唯一索引，保证 Node 重试回写时幂等。Node 原图已保存但 Python 图库同步失败时，保留已经写入的 Node asset，并将该图片记录标记为 `gallery_sync: failed`、广播 `asset.sync` 告警；批次继续按“原图已安全保存”处理，避免把可恢复的图库索引故障误报为付费生成失败。
-
-## 主要 API
+### Python 后端（8123，也可经 8787 代理）
 
 | API | 用途 |
 | --- | --- |
-| `GET /api/search?q=` | 搜索 V2，返回匹配类型、原因和相似度 |
+| `GET /api/search?q=` | 搜索 V2（含拼音、词序无关，返回 match_type / reason / similarity） |
+| `GET /api/resolve?q=` | 别名 / 前缀解析为 canonical tag |
+| `POST /api/semantic-search` | 中文自然语言语义找词（代理 Danbooru 语义检索） |
+| `GET /api/taxonomy` / `GET /api/catalog` | 分类浏览树 / 目录树 |
+| `GET /api/zh` / `POST /api/zh-notes` | 中文名映射 / 自定义中文备注 |
+| `GET /api/thumbs` | 标签例图 URL（懒抓取 + 本地缓存） |
+| `GET/POST /api/settings` | 读取 / 保存用户设置（凭据不回显） |
+| `POST /api/translate` | 百度翻译（手动触发） |
 | `GET /api/prompt/sections` | 固定 Prompt 分区定义 |
 | `POST /api/prompt/classify` | 本地确定性分类 |
-| `POST /api/prompt/section-override` | 保存用户分区覆盖 |
-| `GET /api/prompt/section-overrides` | 返回全部用户分区覆盖（前端加载购物车时回填条目分区） |
-| `GET/POST /api/bundles` | Bundle 列表与创建 |
-| `GET/PUT/DELETE /api/bundles/{id}` | Bundle 读取、更新、删除 |
-| `POST /api/import/preview` | 导入四态预览 |
-| `POST /api/cooccurrence/record` | 记录本地共现 |
-| `POST /api/recommendations` | 本地推荐 |
-| `GET /api/conflicts` | 冲突规则 |
-| `POST/GET /api/snapshots` | 创建与列出 Snapshot |
-| `GET /api/snapshots/{id}` | 读取 Snapshot |
-| `POST /api/snapshots/{id}/restore` | 全部或指定分区恢复 |
-| `POST /api/gallery/item` | Node 图片回写 Python 图库 |
-| `POST /api/translate` | 用户显式点击后调用百度通用文本翻译 |
+| `POST /api/prompt/section-override` / `GET /api/prompt/section-overrides` | 用户分区覆盖（购物车分区记忆） |
+| `GET/POST/PUT/DELETE /api/bundles/{id}` | TagBundle 复用组合 |
+| `POST /api/import` / `POST /api/import/preview` | 提示词导入与四态预览 |
+| `GET /api/inbox` | 导入结果轮询 |
+| `GET/POST/DELETE /api/user-tags` | 自定义标签管理 |
+| `POST /api/export` | 按模型导出 NovelAI 原生语法（含权重） |
+| `GET/POST /api/favorites` / `GET/POST /api/recent` | 收藏 / 最近使用 |
+| `GET/POST/DELETE /api/presets` | 生图 Preset |
+| `POST /api/cooccurrence/record` / `POST /api/recommendations` / `GET /api/conflicts` | 推荐与冲突提示 |
+| `POST/GET /api/snapshots` / `POST /api/snapshots/{id}/restore` | PromptSnapshot 创建 / 分区恢复 |
+| `GET /api/gallery` / `POST /api/gallery/import` / `POST /api/gallery/item` | 图库列表 / zip 导入 / 图片回写 |
+| `POST /api/gallery/favorite` / `DELETE /api/gallery/{dir}` | 图库收藏 / 删除（移入待清理） |
+| `GET /api/novelai-examples` / `POST /api/novelai-examples/{tag}` | 标签例图查询 / 生成 |
+| `POST /api/cache/clear` / `POST /api/novelai-examples/clear` | 缓存清理 |
+| `GET /api/models` / `GET /api/overlay/{model_id}` | 模型列表 / 模型能力 |
+| `POST /api/sync` / `POST /api/sync-hot` | Danbooru 标签库更新 |
 
-### 百度翻译
+### Node 代理（8787）
 
-在设置页填写百度翻译 APP ID 和密钥后，凭据只保存在本机用户设置文件（权限为 0600），接口不会回显密钥。翻译文本会发送到百度翻译，只有点击按钮才会请求，不会自动上传。自定义标签支持手动填写中文名，也支持英文标签自动翻译；自然语言补充可保留中文 Raw，并在选择使用英文译文后将其作为 Effective Prompt。
-
-## 数据表
-
-V2 在原词库和收藏表之外新增：
-
-```text
-tag_section_override
-tag_bundle
-tag_bundle_item
-tag_cooccurrence
-tag_conflict
-prompt_snapshot
-generation
-```
-
-`gallery` 增加 `snapshot_id` 与 `source_asset_id`。SQLite 使用 `PRAGMA user_version=2`，迁移可重复执行。
-
-## NovelAI 生图规则
-
-- 生图主链使用 NovelAI 官方 API，正式模型为 `nai-diffusion-5-full` 和 `nai-diffusion-5-curated`。
-- 官方文档公开 `Small`、`Normal`、`Large` 三类尺寸：Small 最多 6 张，Normal/Large 最多 4 张；面板尺寸档位映射为官方 API 的 `width`/`height` 参数。
-- 每次官方请求固定生成一张，批次严格串行；Seed 支持 `Random`、`Fixed`、`Increment`，每张结果保存该图实际使用的 Seed。
-- 积分提示只展示可由官方规则确认的结论：连接到 Opus 后，文生图、Normal 尺寸、Steps 不高于 28 的本地串行队列会按单张请求显示为预计 `0 Image Anlas`；V5 仍可能受 Opus 使用额度限制。其他套餐、图生图、Small/Large/自定义尺寸或更高 Steps 不显示臆测数值，均以 NovelAI 实际扣费为准。
-- 任意一张失败即停止后续请求；取消只阻止未发送的请求，当前已发送请求允许完成。
-- Multi-Character 保持 Base Prompt、各角色 Prompt、各角色 UC 和 Global UC 分离，支持排序、Auto Position 和手动 X/Y 坐标。
-- Img2Img 支持本地上传或历史图作为基础图，并透传 Strength、Noise。上传的基础图先保存到本地 `library/assets/`，Recipe 只记录可恢复 URL、文件名和参数，不记录 base64。
-- 每张结果保存独立 Recipe。历史缩略图点击只切换预览，只有“恢复设置”或“以此图进行图生图”会改写编辑区。
-- 用户手工修改生图文本后，自动退化为平面 Prompt，避免旧结构暗中混入。
-- `references` 仅为 Vibe Transfer、Character Reference、Style Reference 预留；当前版本非空即拒绝，不显示 UI，也不发送 NovelAI 请求。
-- 生图运行链路为官方 API-only：Node 不等待或连接 Edge/CDP，不读取 NovelAI 网页状态，不通过网页控件同步设置，也没有网页兼容 fallback。
-- UC Preset、Transparent BG 和旧网页批量入口已从生图面板移除；官方 API 未验证的字段不会发送。
-- 官方 `/user/subscription` 只读探针仅验证 Token、代理和网络，不调用 `/ai/generate-image`，不会消耗 Anlas。
-- 新生成的标签例图默认 Prompt 由服务端按 taxonomy 生成：普通标签为 `{{目标标签}}, safe, masterpiece, best quality, very aesthetic, absurdres`，NSFW taxonomy 标签为 `{{目标标签}}, nsfw, masterpiece, best quality, very aesthetic, absurdres`。目标标签采用 NovelAI 双花括号强调，且不预设人物、场景或画风。该默认提示词可在设置页的「NovelAI 例图提示词模板」中自定义，模板支持 `{tag}`（目标标签，自动加双花括号强调）与 `{rating}`（`safe` / `nsfw`）两个占位符，保存时强制要求包含 `{tag}`。已缓存例图保持原样，避免无提示地额外消耗 Anlas；可在卡片上选择“重新生成”以明确覆盖旧图。
-
-### Character Prompt Editor
-
-生图面板的「角色设置 (Multi-Character)」是高级功能，默认折叠，点击标题展开；折叠态的标题右侧实时显示角色数量。
-
-- **职责划分**：Base / Scene Prompt 负责全局的场景、环境、构图与画风；Character Prompt 负责单个角色的身份、服装、动作。二者在 payload 中分属 `base_caption` 与 `char_captions`，不互相拼接。
-- **单一数据链**：UI `naiCharacters[]` → `naiCollectCharacters()`（产出 `{prompt, negative_prompt, position}`）→ 请求顶层 `characters[]` → 服务端 `normalizeGenerationRequest` / `normalizeCharacter` → V5 payload。角色负面提示进入 `v4_negative_prompt.caption.char_captions`，与 Global UC（`base_caption`）分离，绝不拼进全局 UC。位置使用真实的 `{x,y}` 字段：Auto = `null`（服务端以 `{0.5, 0.5}` 作为默认中心），手动 = X/Y，对应 NovelAI 的 `use_coords` 与每个 `char_caption.centers`。
-- **图库往返无损**：角色数量、每个角色的 prompt / negative / position / 顺序在恢复时全部还原，无第二套参数结构。
-- **下一步**：Tag 目标选择器（Base / Character N）——本轮未实现。
-
-### Metadata Restore（图库恢复）
-
-图库 → 富生成元数据 → `extractMetaFromGalleryItem()` → `applyGenerationConfig()` → 单一 GenerationConfig 是唯一恢复路径：
-
-- `rawPrompt` 还原到编辑框，`effectivePrompt` 由 Prompt Compiler 重新推导。
-- Negative / 各开关 / preset / advanced 参数 / seed / characters 一并恢复；不创建第二套参数，也不在图库恢复路径中散落 `.value = …` 的 DOM 赋值。
-- 带角色的恢复会自动展开「角色设置」分区并显示还原的角色。
-
-当前暴露的 V5 Full 与 V5 Curated 在现有 UI 功能上能力相同，因此暂不需要独立 capability gating。未来若引入能力不同模型，应直接以 `config/model_overlays.json` 的 `supports` 为事实来源，不在前端维护重复 capability 表。
-
-### 图库审阅（Review Mode）
-
-图库提供独立的沉浸式审阅工作区（Lightroom 式全屏暗色 workspace）：
-
-- **进入**：双击任意图片卡片，从该图片开始审阅；或点击「审阅模式」从当前选中的图片开始（未选中时从第一张）。
-- **操作**：`←` / `→` 或左右箭头按钮翻页；`Esc`、左上「返回图库」或右上「×」退出并恢复图库三栏布局，当前滚动位置与卡片保持不变。
-- **缩放**：默认 Fit（完整 contain、不裁切、充分利用视口）；底部 `1:1` 显示图片原始像素尺寸并可滚动查看，`F` / `f` 切回 Fit、`1` 切到 1:1，双击图片也可切换。
-- **整理**：右上收藏 / 删除与图库卡片状态实时同步；删除沿用原有确认、删除后翻到下一/上一张、删空退出的逻辑。
-- 审阅为独立全屏暗色工作区，不销毁页面 DOM，退出后普通布局原样恢复。
-
-### Tag Target Selector
-
-标签超市新增一个始终可见的小型目标选择器「添加到：[Base / Scene ▼]」，用于决定点击标签写入哪里：
-
-- **Base / Scene**：写入主 Prompt（`#nai-prompt`），与历史行为完全一致。
-- **Character 1..N**：写入对应 `naiCharacters[N].prompt`（角色正向 Prompt），不触碰 Base、其他角色、角色 Negative 或 Global Negative。
-
-规则与边界：
-
-- 默认目标为 Base / Scene；不操作选择器时，标签点击行为与本版之前完全相同。
-- 角色增删 / 排序时选择器同步：删除目标角色回退到 Base；删除更早角色时索引自动前移；上移 / 下移时目标跟随被移动角色，不会写错对象。
-- 标签复用既有规范化与去重（购物车 `addEntry` 的结构化去重 + 真实 Prompt 文本的逗号去重），同一目标重复点击不产生重复。
-- 该选择器只是前端编辑态，不进入 GenerationConfig / metadata / recipe / NovelAI payload / `characterPrompts[]`；图库恢复只还原 Prompt 文本，不还原此前选中的目标（恢复后默认 Base）。
-- 未引入第二份 Tag / Prompt 状态；标签超市只读取并修改现有 Base Prompt 与 `naiCharacters[]` 两套真实文本来源。
-- 本阶段 Target Selector 只针对正向 Tag；Character Negative / Global Negative 仍由手工编辑，暂不支持 Tag 直接写入。
-
-当前状态为 `PARTIAL`：已完成 API-only 改造、尺寸规则、失败详情持久化和非付费测试；真实 Token 下的单张/多张付费 Gate、401/429 实网映射仍未执行。
-
-## 数据与目录
-
-| 路径 | 说明 |
+| API | 用途 |
 | --- | --- |
-| `data/tags.sqlite` | 标签、别名、分类、收藏、V2 状态和图库索引 |
-| `data/taxonomy_seed.json` | 人工浏览 taxonomy |
-| `data/navigation.json` | UI 导航结构 |
-| `data/zh_aliases.json` | 中文别名 |
-| `config/model_overlays.json` | V5 / V4.5 / V4 模型语义 |
-| `config/app_settings.json` | 端口、代理和数据源设置 |
-| `prompt/sections.py` | 固定分区与本地分类器 |
-| `server/generation-request.mjs` | GenerationRequest 规范化和单图 Recipe |
-| `server/novelai-provider.mjs` | V5 txt2img、Multi-Character、Img2Img 官方 API payload |
-| `server/api-batch.mjs` | 1-6 张严格串行批次 |
-| `server/server.mjs` | 8787 API、SSE、基础图/结果资产保存和图库同步 |
-| `static/prompt-compiler.js` | Prompt Compiler 纯函数（模型家族 preset、跨极性冲突 warning-only、Effective 详细编译） |
-| `tests/test_v2_backend.py` | V2 schema、搜索、Bundle、导入、Snapshot、图库测试 |
-| `tests/test_prompt_compiler.mjs` | Prompt Compiler + 模型路由 exact-ID P0 回归测试 |
+| `GET /` | 静态面板 |
+| `GET /events` | SSE 事件流（进度 / 资产 / 图库同步） |
+| `GET /api/status` | Node 服务状态（mode: api-only） |
+| `GET /api/novelai/status` | 官方 API 探针（只读验证 Token / 代理 / 网络，不消耗 Anlas） |
+| `POST /api/novelai/generate` | 发起串行生图批次（1–6 张） |
+| `GET /api/novelai/generate/{batchId}` / `POST .../cancel` | 批次状态 / 取消 |
+| `POST /api/novelai/tag-example` | 标签例图单图生成（固定 V4.5 Full / 832×832 / 28 steps） |
+| `POST /api/novelai/img2img-source` | 图生图基础图上传 |
+| `GET /api/batches` / `GET /api/assets` / `GET /api/jobs` | 诊断用批次 / 资产 / 任务列表 |
 
-图库目录删除不会永久删除文件，而是先移动到项目 `待清理/图库/`，再移除活动索引。
+## 开发相关
 
-## 测试
+### 运行测试
 
 ```bash
-python -m unittest discover -s tests -v
-env -u NODE_OPTIONS node --test server/*.test.mjs tests/test_prompt_compiler.mjs
-env -u NODE_OPTIONS node --check static/app.js
-git diff --check
+# Python（后端）
+python -m unittest discover -s tests
+
+# Node（服务端 + Prompt Compiler）
+node --test server/*.test.mjs tests/test_prompt_compiler.mjs
+node --test tests/test_app_helpers.mjs
+
+# 前端 / 服务端语法检查
+node --check static/app.js
+node --check server/server.mjs
 ```
 
-当前非付费回归基线：
+当前回归基线（非付费）：Python 120 项、Node 服务端与 Prompt Compiler 74 项、app.js 纯函数 24 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置与防互杀守卫。
 
-- Python：`93/93` 通过。
-- Node（server）：`31/31` 通过，覆盖 GenerationRequest、UC preset 四档透传、V5 payload、严格串行、取消、Recipe、图库同步、Img2Img 基础图持久化路由和 Payload 回归。
-- Prompt Compiler：覆盖统一官方 Quality/UC 档位内容（Standard/Light Quality 与 light/heavy/furry_focus/human_focus UC 精确数组，heavy 不含 nsfw）、跨极性冲突 warning-only（WEBUI PARITY，不删除 token）、用户同侧冲突报告、unknown model / unknown tier 明确报错、legacy wrapper。
-- `static/app.js`、`server/server.mjs`、`server/api-batch.mjs`、`static/prompt-compiler.js` 语法通过。
-- 桌面与移动端布局数据以最近一次浏览器验收结果为准。
+### 本地工作流提示
 
-## 预留接口与明确边界
+- 开发期默认热重载（Python + Node 文件监听），稳定运行设 `TAGS_MARKET_RELOAD=0`。
+- `importer/backfill_pinyin.py` 可幂等回填拼音列（首次导入或词库更新后）。
+- 删除图库目录是软删除：先移入 `待清理/图库/`，再移除活动索引。
 
-当前仅为 References 保留统一数组字段：
+## 许可证与免责声明
 
-```json
-{
-  "references": []
-}
-```
-
-非空 `references` 会在 GenerationRequest 规范化阶段直接拒绝。当前不显示 Vibe Transfer、Character Reference 或 Style Reference UI，也不会把这些数据发送到 NovelAI。
-
-当前明确不实现：
-
-- Provider 框架或多供应商路由
-- 并发生成、Scene Queue
-- Canvas、Inpaint、图片 Hash 管理
-- LLM 自动优化 Prompt
-- 向量数据库或 embedding 搜索
-- 节点编辑器
-- Prompt Git
-- 自动质量评分
-- React/Vue/Electron 重构
-
-保持本地、确定性、可解释的 FastAPI + SQLite + 原生 JavaScript 架构。
-
-## NovelAI V5 API Compatibility
-
-本项目生图链路与 NovelAI 官网 V5 Full txt2img 保持 payload 级等价。以下说明关键设计决策。
-
-1. **params_version=4**：V5 Full（`nai-diffusion-5-*`）使用 `params_version: 4`，V4 系列使用 `params_version: 3`。该字段由 `buildV5Parameters` 根据模型名自动设置。
-
-2. **Effective Prompt 生成**：对于结构化模型，`buildPayload` 将 `prompt` 设为 `null`，实际提示词通过 `v4_prompt.caption.base_caption` 传递。用户输入的原始 prompt 即为 effective prompt。
-
-3. **Quality/UC 档位的请求方式**：普通生成显式发送 `quality_preset`（`off` / `standard` / `light`）与 `uc_preset`（`off` / `light` / `heavy` / `furry_focus` / `human_focus`）。provider 将其映射到对应的 `qualityPresetId` / `ucPresetId`；缺省请求兼容为 `standard` / `heavy`。
-
-4. **编译文本与 server preset 的单一事实源**：浏览器仍将官方 Quality/UC 数组展开到 effective prompt，供 Preview 与 metadata 展示；普通生成额外发送 `prompt_presets_compiled: true`，provider 因此不再重复发送对应 server preset ID。例图专用链路不带该标记，继续由 `uc_preset: "light"` 发送 `ucPresetId: "light"`。
-
-5. **v4_prompt / v4_negative_prompt 在 V5 中仍会发送**：尽管命名为 `v4_*`，这两个结构化 prompt 对象在 V5 模型中仍然使用，是 NovelAI API 的标准格式。
-
-6. **sampler 与 noise_schedule 是两个独立参数**：`sampler`（如 `k_euler_ancestral`）控制采样算法，`noise_schedule`（如 `karras`）控制噪声调度策略。两者独立设置，不能互换。
-
-7. **WebUI Baseline Test 的用途**：`buildWebUiBaselineRequest()` 返回一个锁死官网全部参数的 request 对象，用于集成测试。它经过与生产代码相同的 `buildV5Parameters` 路径，确保 `v4_prompt`、`qualityPresetId`、`ucPresetId`、`prefer_brownian`、`straight_alpha` 等字段全部正确发送。可配合 `debug/run_web_baseline.mjs` 进行真实 API 验证。
-
-8. **调试 payload 文件位置**：所有调试产物位于 `debug/` 目录（已加入 `.gitignore`）：
-   - `api_actual_payload.json` — 修复前当前代码实际发送的 payload
-   - `api_actual_test.png` — 修复前生成的图片
-   - `web_baseline_payload.json` — 官网基准 payload（完整字段）
-   - `web_baseline_test_api_payload.json` — 修复后实际发送的 payload
-   - `web_baseline_test_api.png` — 修复后生成的图片
-   - `payload_diff.json` — 字段差异比较结果
-
-9. **Model selector 的 exact IDs**：V5 Full 最终 model ID 为 `nai-diffusion-5-full`，V5 Curated 为 `nai-diffusion-5-curated`（两者 params_version=4，使用 `v4_prompt`/`v4_negative_prompt`）。本地生成 selector 暴露当前后端合法的 4 个普通 txt2img 模型：
-   - `nai-diffusion-5-full`（NAI Diffusion V5 Full）
-   - `nai-diffusion-5-curated`（NAI Diffusion V5 Curated）
-   - `nai-diffusion-4-5-full`（NAI Diffusion V4.5 Full）
-   - `nai-diffusion-4-full`（NAI Diffusion V4 Full）
-
-   UI value、`GenerationConfig.model`、`normalizeGenerationRequest`、provider 最终 `payload.model` 全链路保持 exact ID；未知 model 明确报错，不静默 fallback。metadata 恢复不会把未知模型悄悄换成另一个模型。
-
-10. **WEBUI PARITY（跨极性冲突 warning-only）**：见下文「Prompt Compiler」。默认行为目标为与官网 WebUI 对齐：客户端**只做跨极性冲突检测（warning-only），不删除/抑制任何 token**，因此不改变请求 payload。跨极性冲突 token 与用户同侧冲突可在 Effective Preview 查看，仅作提示。用户如需调整，应自行编辑 Prompt/UC preset。**本地不声称当前官网登录 WebUI/Network 无法访问的 V5 Curated preset 已验证（V5_CURATED_PRESET: UNVERIFIED）。**
-
-11. **本轮明确未加入**：`*-inpainting` 不进普通 txt2img selector；V3 / Furry / Curated inpainting 因当前 provider/能力未充分验证，不加入本轮。**Quality/UC 档位内容为用户提供的官方档位事实（2026-08 同步），统一应用于所有模型家族**；V5 Curated 不伪造专属差异，也不声称已单独抓到 Curated 专属 payload（V5_CURATED_PRESET 仍为 UNVERIFIED）。
-
-## NovelAI V5 Generation Pipeline
-
-本节描述从用户输入到 NovelAI API 调用的完整数据流，确保普通用户只写 `nahida` 也能默认接近官网质量。
-
-### 架构流程图
-
-```text
-UI (index.html)
-  │
-  ├─ 正面提示词档位 (#nai-positive-tier: off | standard | light, 默认 standard)
-  ├─ 负面提示词档位 (#nai-negative-tier: off | light | heavy | furry_focus | human_focus, 默认 heavy)
-  ├─ Transparent Background Toggle (□ 透明背景, 默认 OFF)
-  │
-  ▼
-Prompt Compiler (static/prompt-compiler.js, 纯函数)
-  │
-  ├─ getModelPresetFamily(model) → 'v5' | 'v4_5_or_v4'
-  ├─ getAutoPromptPreset(model) → 统一官方档位内容（Standard Quality / Heavy UC，所有模型家族一致）
-  ├─ compileGenerationPrompts(rawPos, rawNeg, model, { positiveTier, negativeTier })
-  │    → positiveTier: off | standard | light；negativeTier: off | light | heavy | furry_focus | human_focus
-  │    → 跨极性冲突检测（warning-only，不删除任何 token）—— WEBUI PARITY
-  │    → raw 永不改写；只改变 effective 输出（auto 数组原样拼入，不抑制）
-  │    → 返回 { userPositive, userNegative, autoPositive, autoNegative,
-  │            suppressedAuto, crossPolarityWarnings, effectivePositive, effectiveNegative,
-  │            userCrossPolarityConflicts }
-  │    （Preview 与实际发送共用此结果）
-  │
-  ▼
-naiGenerate() → POST /api/novelai/generate
-  │
-  ├─ prompt = effectivePositive
-  ├─ negative_prompt = effectiveNegative
-   ├─ quality_preset = 正面档位（off / standard / light）
-   ├─ uc_preset = 负面档位（off / light / heavy / furry_focus / human_focus）
-   ├─ prompt_presets_compiled = true（已展开的 Preview/Generate 文本，避免 provider 重复注入）
-  │
-  ▼
-Backend normalizeGenerationRequest()
-  │
-  ├─ 按模型选择默认值：V5 → steps=23, guidance=7; 非V5 → steps=28, guidance=5
-  ├─ noise_schedule 透传
-   ├─ quality_preset 校验并透传（off/standard/light，未知报错，缺省 standard）
-   ├─ uc_preset 校验并透传（off/light/heavy/furry_focus/human_focus，未知报错，缺省 heavy）
-  │
-  ▼
-NovelAIProvider.buildPayload()
-  │
-  ├─ buildV5Parameters() — V5 专用字段（已固化，不改）
-  │    ├─ params_version=4, prefer_brownian=true, straight_alpha=true
-   │    ├─ qualityPresetId=standard/light（off 或已编译文本时不设置），ucPresetId="heavy"（负面档位为 off 或已编译文本时不设置；
-  │    │    light / furry_focus / human_focus 按官方 UI preset ID 原样透传）
-  │    ├─ v4_prompt.caption.base_caption = effectivePrompt
-  │    ├─ v4_negative_prompt.caption.base_caption = effectiveNegative
-  │    └─ autoSmea=false, dynamic_thresholding=false, cfg_rescale=0
-  │
-  ▼
-NovelAI API (https://image.novelai.net/ai/generate-image)
-  │
-  ▼
-Gallery + Metadata (SQLite: gallery + generation 表)
-```
-> 注：图库例图专用链路 `/api/novelai/tag-example` 显式传 `uc_preset:"light"`，provider 将 `ucPresetId` 设为 `light`（该链路已固定，不随普通档位选择器改变）。`light` 与 `off` 的官方展开语义未在本轮真实 API 验证（见 OPEN QUESTION）。
-
-### 生成档位（正面 / 负面提示词）
-
-生图面板提供两个直接选择器，替代旧的「生成预设 / 自动质量标签 / 推荐负面提示词」三套入口。档位内容为用户提供的**官方档位事实**（2026-08 同步），统一应用于所有模型家族：
-
-- **正面提示词档位**（`#nai-positive-tier`）
-  - `关闭`（`off`）：不注入客户端 auto 正面标签。
-  - `Standard`（`standard`）：官方 Standard Quality —— `very aesthetic, masterpiece, no text`。
-  - `Light`（`light`）：官方 Light Quality —— `very aesthetic, amazing quality, no text`。
-- **负面提示词档位**（`#nai-negative-tier`）
-  - `关闭`（`off`）：不注入客户端 auto 负面，且请求层发送 `uc_preset=off`（不发送 heavy）。
-  - `Light`（`light`）：官方 Light UC（含 `0::ai-generated::`）。
-  - `Heavy`（`heavy`）：官方 Heavy UC（17 项，**明确不含 nsfw**）。
-  - `Furry Focus`（`furry_focus`）：官方 Furry Focus UC。
-  - `Human Focus`（`human_focus`）：官方 Human Focus UC。
-
-默认 `standard + heavy`，以保持当前 V5 Full 默认行为。档位选择保存在 `localStorage`（`nai_positive_tier` / `nai_negative_tier`），下次打开自动恢复；旧 `v5_standard` 值兼容映射为 `standard`。
-
-- **映射关系**：`standard`/`light` → compiler `positiveTier`；`off` → `positiveTier=off`。负面档位 `light`/`heavy`/`furry_focus`/`human_focus` → compiler `negativeTier`（官方 UC 数组）；`off` → 空。
-- **Preview 与实际发送共用同一档位状态与同一 compiled result**（`naiCompileGeneration`），不会分叉。raw prompt 永不改写；Quality 追加到正面末尾、UC 追加到负面开头。请求同时带 `quality_preset` / `uc_preset`，并用 `prompt_presets_compiled` 告知 provider 不重复注入。
-- **V5 Curated 提示**：当模型为 `nai-diffusion-5-curated` 时，档位内容与 V5 Full 完全一致（统一官方档位事实）；**不声称已单独抓到 Curated 专属 payload**（V5_CURATED_PRESET 仍为 UNVERIFIED）。UI 会显示简短提示。
-
-### Prompt Compiler
-
-纯函数，无 DOM 依赖，可独立测试。static/prompt-compiler.js 在 static/app.js 之前以 `<script type="module">` 加载，为 Effective Preview 与 Generate 提供唯一的 `window.PromptCompiler` 实现。**Preview 与实际发送共用同一份详细编译结果（`compileGenerationPrompts`），不会分叉。**
-
-- **模型家族（model family）**：`getModelPresetFamily(model)` 区分 `v5` 与 `v4_5_or_v4`（保留供路由/兼容用）。`getAutoPromptPreset(model)` 返回**统一官方档位内容**：Standard Quality（`very aesthetic, masterpiece, no text`）与 Heavy UC（官方 17 项，**不含 nsfw**）。
-  - **官方档位事实（唯一事实源）**：Quality/UC 数组为用户 2026-08 提供的官方档位内容，统一应用于 V5 Full / V5 Curated / V4.5 / V4——**不伪造 V5 Curated 专属差异**，也不声称已单独抓到 Curated 专属 payload（V5_CURATED_PRESET 仍为 UNVERIFIED）。
-  - Standard Quality 精确为 `very aesthetic, masterpiece, no text`；Light Quality 精确为 `very aesthetic, amazing quality, no text`。
-  - UC 四档精确为官方数组：Light（含 `0::ai-generated::`）、Heavy（无 nsfw）、Furry Focus、Human Focus。未展开的 V5 server preset 由 provider 负责；普通 Generate 已展开文本，因此不再重复发送 ID。
-- **WEBUI PARITY（跨极性冲突 warning-only）**：默认行为目标为与官网 WebUI 对齐。客户端**只做跨极性 exact-token 冲突检测，不删除/抑制任何 token**——不再有「用户显式 > 自动 preset」的本地 suppress，因此不改变请求 payload。
-  - 用户 positive `lowres` + auto negative `lowres` → 两边都保留，仅记录 warning。
-  - 用户 negative `masterpiece` + auto positive `masterpiece` → 两边都保留，仅记录 warning。
-  - 用户 positive `chromatic aberration` + auto UC `chromatic aberration` → 两边都保留，仅记录 warning。
-  - 用户自己 positive/negative 同时写同一 token → 两边都保留，记录 `userCrossPolarityConflicts`。
-  - 规范化只做 trim + 大小写无关的精确 token 比较；不做 fuzzy / embedding / LLM / 反义词推理。
-  - 冲突检测结果在 Effective Preview 中仅作提示；用户如需调整，应自行编辑 Prompt/UC preset。
-- **raw 永不改写**：原始输入原样保留，只改变 effective 输出（auto 数组原样拼入，不抑制）；同一极性内去重保留既有行为。顺序固定：Quality 追加到正面末尾、UC 追加到负面开头。
-- **详细编译结果**：`compileGenerationPrompts` / `compilePromptDetailed` / `compileNegativeDetailed` 提供 `rawPositive/rawNegative`、`userPositive/userNegative`、`autoPositive/autoNegative`、`suppressedAuto`（废弃字段，恒空，仅兼容旧调用方）、`crossPolarityWarnings`、`effectivePositive/effectiveNegative`、`userCrossPolarityConflicts`。`compilePrompt` / `compileNegative` 作为返回字符串的兼容 wrapper 保留。
-
-示例（Effective 来源与跨极性冲突 warning）：
-
-| 模型 | 输入 Positive | 输入 Negative | Effective Positive | Effective Negative | 说明 |
-|------|--------------|--------------|--------------------|--------------------|------|
-| V5 Full | `nahida` | `blurry` | `nahida, very aesthetic, masterpiece, no text` | `lowres, …, blank page, blurry` | 官方 Standard Quality / Heavy UC |
-| V5 Curated | `nahida` | `blurry` | `nahida, very aesthetic, masterpiece, no text` | `lowres, …, blank page, blurry` | 统一官方档位内容，不伪造 Curated 专属差异 |
-| V5 Full | `nahida` | `blurry`（Light 档） | `nahida, very aesthetic, amazing quality, no text` | `lowres, …, jpeg artifacts, 0::ai-generated::, blurry` | Light Quality / Light UC |
-| V5 Full | `nahida` | `blurry`（Furry Focus 档） | `nahida, very aesthetic, masterpiece, no text` | `{worst quality}, …, comic, blurry` | Furry Focus UC |
-| V5 Full | `nahida, lowres` | `blurry` | `nahida, lowres, very aesthetic, masterpiece, no text` | `lowres, artistic error, …, blank page, blurry`（保留 lowres） | 跨极性冲突仅 warning，两侧都保留 |
-| V5 Full | `nahida` | `masterpiece, blurry` | `nahida, very aesthetic, masterpiece, no text`（保留 masterpiece） | `lowres, …, blank page, masterpiece, blurry` | 跨极性冲突仅 warning，两侧都保留 |
-| 任意 | `nahida, lowres` | `lowres, blurry` | 含 lowres | 含 lowres | 用户两侧同 token 都保留，报告冲突 |
-
-> **OPEN QUESTION（Quality/UC off 的 API 关闭语义）**：当档位为 `off` 时，provider 不设置对应 preset ID，保证 UI 的 off 不发送该 preset。**「缺少 ID 是否等于 NovelAI API 的关闭语义」未经真实 API 验证（UNVERIFIED）**；本轮不运行真实 API。
->
-> **OPEN QUESTION（furry_focus / human_focus 的 API 接受性）**：`furry_focus` / `human_focus` 为**官方 UI preset 值**（用户提供的官方档位事实），本项目按该值原样透传为 `ucPresetId`；**本轮未对真实 NovelAI API 验证这两个 preset ID 是否被接受**——不要改成其他猜测值，也不要声称已实 API 验证。
->
-> **OPEN QUESTION（server-side preset / 双注入）**：未提供 `prompt_presets_compiled` 的旧请求仍发送兼容的 `qualityPresetId="standard"` / `ucPresetId="heavy"`；普通 UI 请求已展开文本并带标记，provider 不发送对应 ID。该单一事实源方案与真实 Web payload 的最终服务端合并语义均未在本轮真实 API 验证。
-
-### 关键文件
-
-| 文件 | 职责 |
-|------|------|
-| `static/prompt-compiler.js` | Prompt Compiler 纯函数（官方 Quality/UC 档位数组、跨极性冲突 warning-only、详细编译、兼容 wrapper） |
-| `static/app.js` | UI 状态、正面/负面档位切换（standard/light、light/heavy/furry_focus/human_focus）、Effective Preview（来源/冲突 warning 区）、naiGenerate 共用详细编译结果 |
-| `static/index.html` | 生成面板 UI（4 模型 selector、正面/负面档位选择器、Effective Preview 折叠与来源区） |
-| `server/generation-request.mjs` | 请求规范化、V5/非V5 默认值分离、4 个合法普通模型 exact-ID、UC preset 五档校验（off/light/heavy/furry_focus/human_focus） |
-| `server/novelai-provider.mjs` | V5 payload 构建（buildV5Parameters 已固化；ucPresetId 按档位 ID 原样透传，不复制 tag 数组） |
-| `tests/test_prompt_compiler.mjs` | Prompt Compiler + 模型路由 exact-ID 回归测试（33 项，含官方 Quality/UC 档位精确断言） |
-| `debug/test_payload_regression.mjs` | Payload 回归测试（5 项） |
-
-## macOS 启动方式
-
-日常入口 = Dock 中的「标签超市」Web App；后台服务由 launchd（LaunchAgent）管理；旧的手工启动方式已被诊断工具替代。
-
-旧版：`.command → Terminal → nohup → sleep → Browser`
-新版：`launchd → 后台服务常驻`；`Dock Web App → 日常 UI`；`诊断脚本 → 仅故障处理`
-
-```mermaid
-flowchart LR
-    A["macOS Login"] --> B["LaunchAgent"]
-    B --> C["Python Server<br/>127.0.0.1:8123"]
-    D["Dock<br/>标签超市"] --> E["Safari Web App"]
-    E --> C
-    C --> F["Tag / Generate / Gallery"]
-    B --> G["~/Library/Logs/TagSupermarket"]
-    H["Diagnostic Launcher"] -.-> B
-    H -.-> G
-```
-
-### 首次安装
-
-运行 `bash install-launchagent.sh`（会安装 LaunchAgent 并启动服务）。
-
-### 日常使用
-
-点击 Dock 中的「标签超市」Web App（ONE-TIME USER ACTION：Safari 打开 http://127.0.0.1:8123 → 添加到程序坞）；关闭窗口≠停止服务。
-
-### 查看日志
-
-`~/Library/Logs/TagSupermarket/`（stdout.log / stderr.log）
-
-### 重新加载服务
-
-`launchctl unload ~/Library/LaunchAgents/com.tagsupermarket.server.plist && launchctl load ~/Library/LaunchAgents/com.tagsupermarket.server.plist`（或 diagnostic.command 的 r）
-
-### 卸载 LaunchAgent
-
-`launchctl unload ~/Library/LaunchAgents/com.tagsupermarket.server.plist`；删除该 plist 即可；不要删除项目数据/图库/数据库
-
-### iCloud 注意事项
-
-项目位于 iCloud Drive，若开机后 LaunchAgent 启动过早而文件尚未可用，检查日志并按需重新加载；这是已知限制，不是 bug。
+- 仓库当前**未包含 LICENSE 文件**；在作者明确许可证之前，请仅将本仓库用于个人学习与参考。
+- 本项目与 NovelAI 官方无关联，`NovelAI` 及相关商标归其所有者所有；生图 / 例图会消耗 NovelAI 账户 Anlas，所有付费请求均需用户明确确认。
+- 项目完全本地运行，标签数据来自 Danbooru（含语义检索代理服务），请遵守相应平台的使用条款。
