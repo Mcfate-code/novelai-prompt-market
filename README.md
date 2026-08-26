@@ -379,6 +379,14 @@ function apply(event, action) {
 - 「更新标签库」从 Danbooru 增量同步标签（`/api/sync`、`/api/sync-hot`）。
 - 青少年模式：开启时隐藏 NSFW 目录与语义搜索结果。
 
+## Recommendation Target Isolation
+
+- `recommendationContextTags(document, target)`（`static/prompt-document.js`）是正向推荐上下文的唯一来源：`base` → 仅 Base positive；`char:N` → Base + Character N；`global_uc` / `char:N:uc` → 无正向推荐（返回 `[]`）。
+- `selectedTagKeysForTarget(document, target)` 让推荐去重变为 target-local：Character 1 的已选标签不会过滤 Character 2 的推荐。
+- Visual Composer 不再持有第二份 workspace/target 状态：始终跟随 `PromptBridge.getActiveTarget()`；`_workspaceOverride` 与 `selectWorkspace` 已移除。
+- Inspector 的「已选」按当前语义节点分区（section）局部显示（未选中节点时返回全部）。
+- Tag Assistant 目录按 active target 感知（base vs character 根，不混合）；UC 目标不参与正向推荐。
+
 ## 系统架构
 
 ```text

@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addCharacter, addTag, createEmpty } from "../static/prompt-document.js";
+import { addCharacter, addTag, createEmpty, getTargetEntries, recommendationContextTags } from "../static/prompt-document.js";
 import {
   VisualBuilder,
   WEIGHT_STEP,
@@ -25,6 +25,7 @@ import {
   chipLabel,
   dispatchAction,
   groupEntriesBySection,
+  inspectorSelectedEntries,
   normalizeSemanticNode,
   semanticCards,
   trimWeight,
@@ -402,4 +403,68 @@ test("V2 hard regressions: active Character 2 Visual add only dispatches to char
   assert.equal(builder.addTag("blue eyes", "appearance"), true);
   assert.equal(dispatched[0].payload.target, "char:1");
   assert.equal(builder.view.workspace, "char:1");
+});
+
+// ---- 推荐目标隔离：Visual 永远跟随 PromptBridge ----
+
+test("Visual 永远跟随 PromptBridge：无 _workspaceOverride / selectWorkspace", async () => {
+  const builder = new VisualBuilder({ bridge: makeBridge() });
+  assert.equal(typeof builder.selectWorkspace, "undefined");
+  assert.equal(builder._workspaceOverride, undefined);
+  for (const target of ["base", "char:0", "char:1", "global_uc"]) {
+    const bridge = { getActiveTarget: () => target };
+    const b = new VisualBuilder({ bridge });
+    await b.refresh();
+    assert.equal(b.view.workspace, workspaceForTarget(target));
+  }
+});
+
+test("Visual Inspector Selected section-local：选中 appearance 节点只显示 appearance 已选", () => {
+  let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
+  doc = addTag(doc, "char:0", "1girl", "character");
+  doc = addTag(doc, "char:0", "long hair", "appearance");
+  doc = addTag(doc, "char:0", "white shirt", "clothing");
+  const entries = getTargetEntries(doc, "char:0");
+  assert.deepEqual(inspectorSelectedEntries(entries, { section: "appearance" }).map((e) => e.tag), ["long hair"]);
+  assert.equal(inspectorSelectedEntries(entries, null).length, 3);
+});
+
+test("Visual selectNode 推荐上下文使用 recommendationContextTags（char:1 不含 char:0）", async () => {
+  const captured = [];
+  let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
+  doc = addTag(doc, "char:0", "1girl", "character");
+  doc = addCharacter(doc, { name: "Second" });
+  doc = addTag(doc, "char:1", "solo", "character");
+  const bridge = { getActiveTarget: () => "char:1", getDocument: () => doc, subscribe: () => () => {}, dispatch: () => {} };
+  const builder = new VisualBuilder({
+    bridge,
+    fetchImpl: async (url, opts) => {
+      if (String(url).includes("/api/catalog/semantic?node_id=")) return { ok: true, status: 200, json: async () => ({ node: { id: "char_hair", label: "Hair", section: "appearance", seed_tags: [], children: [] } }) };
+      const body = JSON.parse(opts.body);
+      captured.push(body);
+      return { ok: true, status: 200, json: async () => ({ recommendations: [] }) };
+    },
+  });
+  builder.view.tree = TREE;
+  await builder.selectNode("char_hair");
+  assert.equal(captured.length, 1);
+  assert.deepEqual(captured[0].tags, recommendationContextTags(doc, "char:1"));
+  assert.ok(!captured[0].tags.includes("1girl"));
+  assert.equal(captured[0].active_target, "char:1");
+  assert.equal(captured[0].active_section, "appearance");
+});
+
+test("Visual 权重按钮只 dispatch SET_WEIGHT（不持有副本）", () => {
+  const dispatched = [];
+  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const builder = new VisualBuilder({ bridge });
+  builder.handleClick({ target: { closest: () => ({ dataset: { action: "weight-inc", target: "char:0", entryId: "id-2", weight: "1" } }) } });
+  assert.equal(dispatched[0].type, "SET_WEIGHT");
+  assert.equal(dispatched[0].payload.target, "char:0");
+  assert.equal(dispatched[0].payload.entryId, "id-2");
+  assert.ok(Math.abs(dispatched[0].payload.weight - 1.05) < 1e-9);
+
+  builder.handleClick({ target: { closest: () => ({ dataset: { action: "weight-dec", target: "char:0", entryId: "id-2", weight: "1" } }) } });
+  assert.equal(dispatched[1].type, "SET_WEIGHT");
+  assert.ok(Math.abs(dispatched[1].payload.weight - 0.95) < 1e-9);
 });

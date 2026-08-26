@@ -280,6 +280,7 @@ function applyExclusiveGroup(document, payload = {}) {
   return doc;
 }
 
+<<<<<<< HEAD
 // 生成视图的 Effective Free Text：勾选英文译文且译文非空时用译文，否则用中文原文。
 function effectiveFreeText(document) {
   const doc = normalize(document);
@@ -306,3 +307,6 @@ function buildGenerationPromptState(document) {
 }
 
 export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup, effectiveFreeText, buildGenerationPromptState };
+=======
+export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
+>>>>>>> fix/recommendation-target-isolation
