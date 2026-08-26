@@ -385,6 +385,32 @@ function currentCartTargetKeys(target) { return new Set((getSlot(target) || []).
 function naiStructuredBaseLine(display) {
   return window.NaiStructured.structuredBaseLine(display);
 }
+
+// P0 结构化边界：把图库/旧快照里保存的 rawPrompt / rawNegative / characterPrompts 统一拆分为
+// 干净的 { basePrompt, globalUc, characters }，供 naiRestoreItem / applyGenerationConfig / 剪贴板
+// 失败回退共用（唯一拆分逻辑，绝不把 Base:/Character N:/Global UC: 混合串写回 #nai-prompt）。
+//   - 结构化 legacy rawPrompt（含 Base:/Character N:/Global UC:/Free text: 行）：
+//     用 parseStructuredRawPrompt 一次性拆解；角色优先用保存的 characterPrompts（保留 position），
+//     缺失时退回从 display 行解析（position 置 null）。
+//   - 否则视为干净 Base + Global UC + characterPrompts；纯 flat 单角色按普通文本处理。
+// 返回值约定：
+//   - basePrompt / globalUc 为 null 表示「调用方不要覆盖对应输入框」（仅当入参为 null/undefined）；
+//   - characters 为 null 表示「调用方不要改动角色」（仅当无结构化且无 characterPrompts 时）。
+function naiResolveRestoredPrompt(rawPrompt, rawNegative, savedCharacters) {
+  const charactersSrc = Array.isArray(savedCharacters) ? savedCharacters : [];
+  const parsed = window.NaiStructured.parseStructuredRawPrompt(rawPrompt, rawNegative);
+  if (parsed) {
+    const characters = charactersSrc.length
+      ? charactersSrc.map((character) => ({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: character.position ? { ...character.position } : null }))
+      : parsed.characters.map((character) => ({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: null }));
+    return { basePrompt: parsed.basePrompt, globalUc: parsed.globalUc, characters };
+  }
+  return {
+    basePrompt: rawPrompt != null ? rawPrompt : null,
+    globalUc: rawNegative != null ? rawNegative : null,
+    characters: charactersSrc.length ? charactersSrc.map((character) => ({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: character.position ? { ...character.position } : null })) : null,
+  };
+}
 // naiCharacters 是 state.prompt.characters 的 view adapter（单一权威来源 = PromptDocument）。
 // 仅在权威状态变化后（dispatch / restore / 进入生图视图）单向同步；不引入第二份权威状态。
 function syncNaiCharactersFromState() {
@@ -3093,7 +3119,7 @@ async function showGalleryPreview(dirName, fileName) {
       const meta = extractMetaFromGalleryItem(it);
       const text = meta.effectivePrompt || meta.rawPrompt || it.prompt || "";
       try { await navigator.clipboard.writeText(text); toast("Prompt 已复制"); }
-      catch { $("#nai-prompt").value = text; toast("已填入 Prompt 框"); }
+      catch { const restored = naiResolveRestoredPrompt(meta.rawPrompt, meta.rawNegative, meta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); updateNaiPromptMeta(); naiUpdateEffectivePreview(); commitPromptChange(); toast("已填入 Prompt 框"); }
     });
     $("#gallery-recipe-img2img").addEventListener("click", async () => { await showView("generate"); await naiUseImageSource(imgPath, it.file_name || "图库图片"); toast("已设为图生图基础图"); });
     body.querySelectorAll("[data-restore-sections]").forEach((b) => b.addEventListener("click", () => restoreSnapshot(it.snapshot_id, b.dataset.restoreSections)));
@@ -3886,7 +3912,7 @@ function renderViewer() {
     const itemMeta = extractMetaFromGalleryItem(it);
     if (b.dataset.metaAction === "restore") { applyGenerationConfig(itemMeta); }
     else if (b.dataset.metaAction === "seed" && itemMeta.seed != null) { $("#nai-seed").value = String(itemMeta.seed); $("#nai-seed-mode").value = "fixed"; toast(`Seed ${itemMeta.seed} 已填入`); }
-    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { $("#nai-prompt").value = t; toast("已填入 Prompt 框"); }); }
+    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt, itemMeta.rawNegative, itemMeta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); updateNaiPromptMeta(); naiUpdateEffectivePreview(); commitPromptChange(); toast("已填入 Prompt 框"); }); }
   }));
   $("#nai-pin").textContent = it.favorite ? "♥ Pin" : "♡ Pin";
   $("#nai-pin").classList.toggle("on", !!it.favorite);
@@ -3952,13 +3978,50 @@ async function naiPin() {
   } catch (e) { toast("收藏失败：" + e.message); }
 }
 
+// P0 状态同步：把恢复出的干净 Base / Global UC / 角色文本 reconcile 进权威 PromptDocument（state.prompt），
+// 复用 RECONCILE_TEXT 同一条 reconcileTargetText 路径，再由调用方 syncNaiCharactersFromState 单向镜像回
+// naiCharacters，避免恢复后的生图视图与购物车 / PromptBridge 静默分叉（不引入第二份权威状态）。
+// 该函数只 reconcile 权威状态；persist / render / notify 由调用方在表单完全就绪后统一 commitPromptChange()。
+function naiSyncRestoredPromptToState(basePrompt, globalUc, characters) {
+  if (!promptDocument || !state.prompt) return;
+  pushHistory();
+  // 角色数对齐，确保 reconcile 到 char:N / char:N:uc 时目标角色存在（PromptDocument 恒 ≥1 角色）。
+  while (state.prompt.characters.length < characters.length) {
+    state.prompt = promptDocument.addCharacter(state.prompt, {});
+  }
+  while (state.prompt.characters.length > Math.max(1, characters.length)) {
+    state.prompt = promptDocument.removeCharacter(state.prompt, state.prompt.characters.length - 1);
+  }
+  const known = new Map(knownCatalogTags);
+  state.prompt = promptDocument.reconcileTargetText(state.prompt, "base", basePrompt, known);
+  state.prompt = promptDocument.reconcileTargetText(state.prompt, "global_uc", globalUc, known);
+  characters.forEach((character, index) => {
+    state.prompt.characters[index].position = character.position ? { ...character.position } : null;
+    state.prompt = promptDocument.reconcileTargetText(state.prompt, `char:${index}`, character.prompt, known);
+    state.prompt = promptDocument.reconcileTargetText(state.prompt, `char:${index}:uc`, character.negative_prompt, known);
+  });
+}
+
+// P0 结构化边界：把恢复出的干净 Base / Global UC / 角色分发到生成表单并同步权威状态。
+// 供 naiRestoreItem 与剪贴板失败回退共用（唯一恢复入口，绝不整串写回 #nai-prompt）。
+// basePrompt / globalUc 为 null 时不覆盖对应输入框。
+function naiApplyRestoredPrompt(basePrompt, globalUc, characters) {
+  naiSyncRestoredPromptToState(basePrompt ?? "", globalUc ?? "", characters || []);
+  syncNaiCharactersFromState();
+  if (basePrompt != null) $("#nai-prompt").value = basePrompt;
+  if (globalUc != null) $("#nai-neg").value = globalUc;
+  naiRenderCharacters();
+}
+
 // 只有明确点击恢复按钮时才写入编辑表单；点击历史缩略图只切换预览。
 async function naiRestoreItem(it) {
   if (!it) { toast("没有可恢复的图片"); return; }
   const recipe = naiRecipeFromItem(it);
   const p = recipe.settings || recipe;
-  $("#nai-prompt").value = recipe.prompt || it.prompt || "";
-  $("#nai-neg").value = recipe.negative_prompt ?? it.negative_prompt ?? "";
+  // P0 结构化边界：与 applyGenerationConfig 共用 naiResolveRestoredPrompt 拆分，
+  // 绝不把 legacy 结构化串（Base:/Character N:/Global UC:）整段写回 #nai-prompt。
+  const restored = naiResolveRestoredPrompt(recipe.prompt || it.prompt || "", recipe.negative_prompt ?? it.negative_prompt ?? "", recipe.characters);
+  naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters);
   naiSetSelectValue("#nai-model", p.model, "nai-diffusion-5-full");
   $("#nai-width").value = p.width ?? 832;
   $("#nai-height").value = p.height ?? 1216;
@@ -3974,12 +4037,6 @@ async function naiRestoreItem(it) {
   if ($("#nai-scheduler")) $("#nai-scheduler").value = p.scheduler || "karras";
   if ($("#nai-cfg-rescale")) $("#nai-cfg-rescale").value = p.cfg_rescale ?? 0;
   if ($("#nai-auto-smea")) $("#nai-auto-smea").value = String(p.auto_smea ?? false);
-  naiCharacters = Array.isArray(recipe.characters) ? recipe.characters.map((character) => ({
-    prompt: character.prompt || "",
-    negative_prompt: character.negative_prompt || "",
-    position: character.position ? { ...character.position } : null,
-  })) : [];
-  naiRenderCharacters();
   naiSetMode(recipe.mode || "txt2img");
   if (recipe.mode === "img2img") {
     $("#nai-strength").value = recipe.img2img?.strength ?? 0.7;
@@ -4001,6 +4058,8 @@ async function naiRestoreItem(it) {
   updateNaiPromptMeta();
   naiUpdateEffectivePreview();
   naiRenderCost();
+  // P0：恢复完成后统一 commit，持久化 / 刷新购物车 / notify，避免权威状态与生图视图分叉。
+  commitPromptChange();
   toast("已恢复此图的完整生成设置");
 }
 
@@ -4021,22 +4080,12 @@ function applyGenerationConfig(cfg) {
   // 2) 否则视为新版保存的干净 Base + Global UC + characterPrompts。
   // 3) 纯 flat 单角色 rawPrompt 仍按普通文本支持。
   const savedCharacters = Array.isArray(cfg.characterPrompts) ? cfg.characterPrompts : [];
-  const parsedStructured = window.NaiStructured.parseStructuredRawPrompt(cfg.rawPrompt, cfg.rawNegative);
-  let restoredCharacters = null;
-  if (parsedStructured) {
-    const characters = savedCharacters.length
-      ? savedCharacters.map((c) => ({ prompt: c.prompt || "", negative_prompt: c.negative_prompt || "", position: c.position ? { ...c.position } : null }))
-      : parsedStructured.characters.map((c) => ({ prompt: c.prompt || "", negative_prompt: c.negative_prompt || "", position: null }));
-    $("#nai-prompt").value = parsedStructured.basePrompt;
-    $("#nai-neg").value = parsedStructured.globalUc;
-    restoredCharacters = characters;
-  } else {
-    if (cfg.rawPrompt != null) $("#nai-prompt").value = cfg.rawPrompt;
-    if (cfg.rawNegative != null) $("#nai-neg").value = cfg.rawNegative;
-    if (savedCharacters.length) {
-      restoredCharacters = savedCharacters.map((c) => ({ prompt: c.prompt || "", negative_prompt: c.negative_prompt || "", position: c.position ? { ...c.position } : null }));
-    }
-  }
+  // P0 结构化边界：与 naiRestoreItem 共用 naiResolveRestoredPrompt 拆分，
+  // 绝不把 Base:/Character N:/Global UC: 混合串整段写回 #nai-prompt。
+  const restored = naiResolveRestoredPrompt(cfg.rawPrompt, cfg.rawNegative, savedCharacters);
+  if (restored.basePrompt != null) $("#nai-prompt").value = restored.basePrompt;
+  if (restored.globalUc != null) $("#nai-neg").value = restored.globalUc;
+  const restoredCharacters = restored.characters;
   // Model
   naiSetSelectValue("#nai-model", cfg.model, "nai-diffusion-5-full");
   // Resolution

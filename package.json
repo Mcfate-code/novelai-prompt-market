@@ -7,7 +7,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "test": "node --experimental-sqlite --test server/*.test.mjs"
+    "test": "node --experimental-sqlite --test server/*.test.mjs tests/*.mjs"
   },
   "dependencies": {
     "jszip": "^3.10.1",

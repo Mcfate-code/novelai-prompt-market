@@ -32,6 +32,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import * as NaiStructured from "../static/nai-structured.js";
+import * as promptDocument from "../static/prompt-document.js";
 // app.js 的 naiStructuredBaseLine 已收敛为对 window.NaiStructured 的薄委托
 // （实现收敛在 static/nai-structured.js 纯模块）。
 // Node 无浏览器 window，这里用真实模块补上同一实现，让被提取的委托函数可运行。
@@ -478,4 +479,97 @@ test("import append actually changing free_text invalidates use_free_text_en; re
   const untouched = simulateImportFreeText({ current: "一只猫", incoming: "", mode: "append", useFreeTextEn: true });
   assert.equal(untouched.free_text, "一只猫");
   assert.equal(untouched.use_free_text_en, true);
+});
+
+// ---- 7. P0 恢复路径：naiRestoreItem / #nai-reuse 复用 naiResolveRestoredPrompt 干净拆分 + 状态同步 ----
+
+const naiResolveRestoredPrompt = loadFunction("naiResolveRestoredPrompt");
+
+// naiSyncRestoredPromptToState 引用 4 个文件级自由变量；用 factory 绑定真实 promptDocument + 可控 state/stub。
+function loadNaiSyncRestoredPromptToState(docModule, state, knownTags, pushHistory) {
+  const src = extractFunction("naiSyncRestoredPromptToState");
+  const factory = new Function("promptDocument", "state", "knownCatalogTags", "pushHistory",
+    `${src}; return naiSyncRestoredPromptToState;`);
+  return factory(docModule, state, knownTags, pushHistory);
+}
+
+test("naiResolveRestoredPrompt splits legacy structured gallery item into clean base/uc/characters", () => {
+  const rawPrompt = "Base: bedroom, night\nCharacter 1: citlali\nCharacter 1 UC: lowres\nCharacter 2: nahida, green hair\nGlobal UC: bad anatomy";
+  const restored = naiResolveRestoredPrompt(rawPrompt, "bad anatomy", []);
+  assert.ok(restored, "legacy structured rawPrompt resolves");
+  assert.equal(restored.basePrompt, "bedroom, night");
+  assert.ok(!/Base:|Character\s+\d+:|Global UC:/.test(restored.basePrompt), `base must be clean (got: ${restored.basePrompt})`);
+  assert.equal(restored.globalUc, "bad anatomy");
+  assert.equal(restored.characters.length, 2);
+  assert.equal(restored.characters[0].prompt, "citlali");
+  assert.equal(restored.characters[0].negative_prompt, "lowres");
+  assert.equal(restored.characters[0].position, null, "no saved position -> null");
+  assert.equal(restored.characters[1].prompt, "nahida, green hair");
+});
+
+test("naiResolveRestoredPrompt prefers saved characterPrompts position over display parse", () => {
+  const rawPrompt = "Base: bedroom, night\nCharacter 1: citlali\nGlobal UC: bad anatomy";
+  const saved = [{ prompt: "citlali", negative_prompt: "lowres", position: { x: 0.3, y: 0.7 } }];
+  const restored = naiResolveRestoredPrompt(rawPrompt, "bad anatomy", saved);
+  assert.equal(restored.characters[0].prompt, "citlali");
+  assert.deepEqual(restored.characters[0].position, { x: 0.3, y: 0.7 }, "saved position preserved");
+});
+
+test("naiResolveRestoredPrompt handles flat and null inputs without clobbering", () => {
+  const flat = naiResolveRestoredPrompt("1girl, blue eyes", "bad anatomy", [{ prompt: "citlali", negative_prompt: "lowres", position: null }]);
+  assert.equal(flat.basePrompt, "1girl, blue eyes");
+  assert.equal(flat.globalUc, "bad anatomy");
+  assert.equal(flat.characters[0].prompt, "citlali");
+  const empty = naiResolveRestoredPrompt(null, null, []);
+  assert.equal(empty.basePrompt, null, "null rawPrompt -> do not overwrite base");
+  assert.equal(empty.globalUc, null, "null rawNegative -> do not overwrite UC");
+  assert.equal(empty.characters, null, "no characters -> leave characters unchanged");
+});
+
+test("P0 naiSyncRestoredPromptToState reconciles restored prompt into PromptDocument authority", () => {
+  const doc = promptDocument.createEmpty();
+  const state = { prompt: doc, history: [] };
+  let pushed = 0;
+  const sync = loadNaiSyncRestoredPromptToState(promptDocument, state, new Map([["citlali", "citlali"], ["nahida", "nahida"]]), () => { pushed += 1; });
+  sync("bedroom, night", "bad anatomy", [
+    { prompt: "citlali", negative_prompt: "lowres", position: null },
+    { prompt: "nahida, green hair", negative_prompt: "", position: { x: 0.3, y: 0.4 } },
+  ]);
+  assert.equal(pushed, 1, "sync pushes history once");
+  assert.equal(state.prompt.characters.length, 2, "character count aligns with restored characters");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "base"), "bedroom, night");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "global_uc"), "bad anatomy");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "char:0"), "citlali");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "char:0:uc"), "lowres");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "char:1"), "nahida, green hair");
+  assert.deepEqual(state.prompt.characters[1].position, { x: 0.3, y: 0.4 }, "restored position preserved in authority");
+});
+
+test("P0 naiSyncRestoredPromptToState trims extra characters and keeps PromptDocument invariant", () => {
+  let doc = promptDocument.createEmpty();
+  // 预置 3 个角色
+  doc = promptDocument.addCharacter(doc, {});
+  doc = promptDocument.addCharacter(doc, {});
+  const state = { prompt: doc, history: [] };
+  const sync = loadNaiSyncRestoredPromptToState(promptDocument, state, new Map(), () => {});
+  // 恢复无角色：PromptDocument 恒 ≥1 角色（空角色），base/global_uc 仍被 reconcile
+  sync("1girl, solo", "blurry", []);
+  assert.equal(state.prompt.characters.length, 1, "PromptDocument keeps >=1 character invariant");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "base"), "1girl, solo");
+  assert.equal(promptDocument.serializeTarget(state.prompt, "global_uc"), "blurry");
+});
+
+// 源码契约：naiRestoreItem 与两个剪贴板失败回退都走同一干净恢复逻辑，不允许结构化串 bypass 进 #nai-prompt。
+test("P0 naiRestoreItem and clipboard fallbacks share clean restore (no structured bypass into #nai-prompt)", () => {
+  assert.match(APP_JS, /function naiResolveRestoredPrompt\(/);
+  assert.match(APP_JS, /function naiSyncRestoredPromptToState\(/);
+  assert.match(APP_JS, /function naiApplyRestoredPrompt\(/);
+  // naiRestoreItem 经 naiResolveRestoredPrompt + naiApplyRestoredPrompt，不再直接赋值 recipe.prompt
+  assert.match(APP_JS, /naiResolveRestoredPrompt\(recipe\.prompt \|\| it\.prompt \|\| "", recipe\.negative_prompt \?\? it\.negative_prompt \?\? "", recipe\.characters\)/);
+  assert.doesNotMatch(APP_JS, /\$\("#nai-prompt"\)\.value = recipe\.prompt/);
+  // 三个恢复入口（naiRestoreItem + 两处剪贴板失败回退）统一走 naiApplyRestoredPrompt 分发
+  assert.equal((APP_JS.match(/naiApplyRestoredPrompt\(restored\.basePrompt, restored\.globalUc, restored\.characters\)/g) || []).length, 3, "restore + 2 clipboard fallbacks all use shared restore");
+  // 剪贴板失败回退不再把 t/text 直接塞进 #nai-prompt（renderViewer 用 t，图库 recipe 用 text）
+  assert.doesNotMatch(APP_JS, /\$\("#nai-prompt"\)\.value = t;/);
+  assert.doesNotMatch(APP_JS, /\$\("#nai-prompt"\)\.value = text; toast\("已填入 Prompt 框"\)/);
 });
