@@ -148,20 +148,20 @@ PromptBridge 与 Tag Assistant 同源（`getDocument()` / `getActiveTarget()` / 
 
 组件导出纯函数（`chipLabel` / `adjustWeight` / `workspaceForTarget` / `workspaceTabs` / `buildWorkspaceChips` / `semanticCards` / `normalizeSemanticNode` / `buildRemoveTagAction` / `buildSetWeightAction` / `buildMoveSectionAction` / `buildAddCharacterAction` / `buildRemoveCharacterAction` / `buildRenameCharacterAction` / `dispatchAction` 等）供测试与集成方复用。
 
-### NSFW Scene Builder（Phase 2，独立前端组件，待 Integrator wiring）
+### NSFW Scene Builder（Scene Composer，产品化）
 
-`static/nsfw-builder.js` + `static/nsfw-builder.css` 提供挂载到 `#nsfw-builder-root` 的原生 JS 组件（无框架 / 零依赖），为成人内容场景搭建提供独立的 UI 数据模型。已由 Workbench 接入：`app.js` 在 `mountWorkbenchComponents()` 中挂载，`adolescentMode` 从 `/api/settings` 注入，候选从 `GET /api/nsfw-builder/options` 派生（受限分类的真实 canonical tag，不整面铺成人词库）。组件遵守后端 adolescent / NSFW 内容策略，不绕过：
+`static/nsfw-builder.js` + `static/nsfw-builder.css` 提供挂载到 `#nsfw-builder-root` 的原生 JS 组件（无框架 / 零依赖），产品化为成人内容场景的「Scene Composer」：高层语义小集合而非成人词库整面墙。`app.js` 在 `mountWorkbenchComponents()` 中挂载，`adolescentMode` 从 `/api/settings` 注入，候选从 `GET /api/nsfw-builder/options` 派生（后端按 `config/scene_composer.json` + `data/nsfw_taxonomy.json` 逐条校验 `data/tags.sqlite` 后下发，未命中即 drop，绝不发明 tag）。组件遵守后端 adolescent / NSFW 内容策略，不绕过：
 
-- **启用条件**：只有成人模式（`adolescent_mode=false`）才启用；青少年模式下组件整体禁用 / 隐藏（渲染为禁用空态，且不 dispatch 任何 action）。`adolescentMode` 必须由集成方从 `/api/settings` 注入（也支持 `settings.adolescent_mode`）。
-- **UI 数据模型**：participants 1/2/3/4+；primary scene 单选；stage（`PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，语义标识而非 canonical tag）单选；position 单选；每角色 clothing state；additional activities 多选；body focus；recommendations 区域。现有 Characters 直接复用（不维护 `nsfwCharacters[]`）。
-- **不凭记忆造 canonical tags**：场景 / 体位 / 服装状态 / 附加活动 / 身体聚焦的真实候选一律由集成方通过 `options` 注入，或由推荐 API 返回；组件只内置 stage 语义标识与 participant 计数档（二者均非 canonical tag）。
-- **strict exclusive groups**：`participant_count` / `primary_scene_type` / `stage` / `position` / `clothing_state:char:N`。新选择 dispatch **一个** `SET_EXCLUSIVE_GROUP` action（payload 明确 `group / key / newTag / target / characterIndex / members`），Integrator 原子删除明确属于同组的旧 entries、加入新 tag、更新 context、只通知一次。组件不自行拆分 REMOVE_TAG + ADD_TAG。普通 conflict（非严格互斥）仍保持 warning-only。
-- **上下文不泄漏为 tags**：所有上下文 metadata（participant_count / scene / stage / position / body_focus / additional_activities / clothing_state）通过 `SET_ASSISTANT_CONTEXT`（payload `{ context }`，对齐 Recommendation V2）交给 Integrator，**不直接编译成 Prompt tags**；只有需要真实 canonical tag 的选择（带 tag 的活动新增、推荐点击）才 `ADD_TAG`。
-- **Additional activities** 为 multi-select：toggle 只更新 context（`SET_ASSISTANT_CONTEXT`），不互相删除、不触发 primary replacement；带 canonical tag 的活动新增时额外 `ADD_TAG` 到 active target。
-- **位置候选过滤**：根据 participant / scene 过滤（选项支持 `minParticipants` / `requiresScenes`）；3+ 参与者仅允许简单 interaction assignment，不做自由关系图。不显示整面成人词库。
-- **Clothing A→B 隔离**：只影响该 Character 的 `clothing_state` strict group（payload 携带 `characterIndex` 与 `target`），不触碰其他角色、不触碰服装 identity。
-- **推荐**：可由注入 `recommend(payload)` 函数或默认 `POST /api/recommendations` 获取；点击推荐只 `ADD_TAG` 到当前 active target，**不自动改变 stage**（无自动阶段推进）。
-- **健壮性 / 无障碍**：无 PromptBridge / 无文档 / 接口错误均有可见空态或错误态；事件委托（root 单监听器）、radiogroup 方向键、原生按钮焦点、`aria-checked` / `aria-pressed` / aria-labels。
+- **唯一权威状态**：`PromptDocument.assistant_context` 是唯一场景上下文；组件无 `this.selections` / 无业务副本，每次刷新从 `bridge.getDocument().assistant_context` 水合（`currentContext()` / `_hydrateContext()` 是唯一水合路径）。
+- **高层主场景**：主场景为 ≤6 个高层语义项（单人亲密 / 伴侣亲密 / 多人互动 / 情境 / 前戏向，带已校验 canonical tag），取代旧的 restricted-taxonomy 整面候选；`minParticipants` 用于人数兼容。
+- **UI 分区（渲染顺序）**：人数 → 主场景 → 阶段（`PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，语义标识而非 canonical tag）→ 角色（**每个角色一条服装子组，全部同时可见**）→ 体位 → 附加活动 → 身体聚焦 → 推荐（分组展示）。
+- **人数增减策略**：`selectParticipants` 增多时 dispatch 单个 `SET_EXCLUSIVE_GROUP(participant_count)` + `SCENE_PROPOSAL{kind:"sync_participants"}`；减少时检查尾部角色：尾部全空则允许并附 `autoRemovableEmptyIndices`；任一尾部角色含内容则**不改 participant_count**，显示 `Character N 仍有内容，请手动移除` 提示并 dispatch `SCENE_PROPOSAL{kind:"remove_characters_blocked"}`——**不猜测性别、不静默删除**。
+- **strict exclusive groups**：`participant_count` / `primary_scene_type` / `stage` / `position` / `clothing_state:char:N`。新选择 dispatch **一个** `SET_EXCLUSIVE_GROUP` action，Integrator 原子删除同组旧 entries、加新 tag、更新 context、只通知一次。作用域：scene/position/stage/participant_count → `target:"base"`；clothing_state → `target:char:N`（Character Assignment）。
+- **上下文不泄漏为 tags**：所有上下文 metadata 通过 `SET_ASSISTANT_CONTEXT`（对齐 Recommendation V2）交给 Integrator，不直接编译成 Prompt tags；只有带 canonical tag 的选择（活动新增、推荐点击）才 `ADD_TAG`。
+- **附加活动对称 + 溯源**：新增 = context + `ADD_TAG{source:"scene_activity", bundle_name:"scene-builder"}`；取消 = context + 仅移除带该溯源标记的 `REMOVE_TAG`——不删用户自有同名 tag。
+- **位置过滤**：按 `minParticipants` / `requiresScenes` 过滤；participant_count 为 1 或未选时隐藏并提示「选择多人以启用体位」。
+- **推荐分组**：`POST /api/recommendations` 返回 `{groups:[{group,recommendations}]}` 时按返回顺序分组渲染（group 字符串作标题）；否则回退平铺 `recommendations`。点击推荐只 `ADD_TAG` 到 active target，不自动改 stage / 不触发 strict group。
+- **青少年门控**：`adolescent_mode=true` 时 `isDisabled()`，所有 select/toggle/recommend 返回 false、零 dispatch，渲染仅禁用空态。
 
 #### NSFW Scene Builder 集成契约
 
@@ -173,15 +173,14 @@ const builder = createNsfwBuilder({
   apiBase: "",                              // 后端前缀（默认同源）
   fetchImpl: undefined,                     // 自定义 fetch（测试注入）
   adolescentMode: settings.adolescent_mode, // 必须注入后端 /api/settings，true=禁用
-  mode: "nsfw",                             // Recommendation V2 mode
-  // 真实候选（canonical tag 可选，缺 tag 只更新 context 不 ADD_TAG）：
+  mode: "adult",                            // Recommendation V2 mode（app.js 传 "adult"）
+  // 真实候选（canonical tag 已由后端逐条校验 sqlite；缺 tag 只更新 context 不 ADD_TAG）：
   participants: [{ key: "1", label: "1" }, { key: "2", label: "2" }, { key: "3", label: "3" }, { key: "4+", label: "4+" }],
-  scenes: [{ key: "indoor", label: "室内", tag: "bedroom" }],            // 示例，需集成方注入真实候选
-  stages: undefined,                          // 缺省用内置语义标识（PREPARATION…AFTERMATH）
-  positions: [{ key: "x", label: "X", tag: "...", minParticipants: 2, requiresScenes: ["indoor"] }],
-  clothingStates: [{ key: "clothed", label: "穿衣", tag: "..." }],
-  activities: [{ key: "a", label: "A", tag: "..." }],
-  bodyFocus: [{ key: "face", label: "面部" }],
+  scenes: [{ key: "solo_intimate", label: "单人亲密", tag: "solo", minParticipants: 1 }],
+  positions: [{ key: "missionary", label: "missionary", tag: "missionary", minParticipants: 2 }],
+  clothingStates: [{ key: "nude", label: "全裸", tag: "nude" }],
+  activities: [{ key: "kissing", label: "接吻", tag: "kissing", section: "action" }],
+  bodyFocus: [{ key: "breasts", label: "胸部", tag: "breasts" }],
   recommend: async (payload) => [...],        // 可选注入推荐来源
 });
 builder.mount();                 // 卸载：builder.destroy()
@@ -191,11 +190,13 @@ PromptBridge 与 Tag Assistant / Visual Builder 同源（`getDocument()` / `getA
 
 | Action | payload | 触发 |
 | --- | --- | --- |
-| `SET_EXCLUSIVE_GROUP` | `{ group, key, newTag, target, characterIndex, members }` | strict 互斥组新选择（Integrator 原子删除同组旧 entries + 加入 newTag + 更新 context + 只通知一次；`newTag` 为空表示只设 group 不 ADD_TAG；clothing 组 `characterIndex` 为作用域角色） |
-| `SET_ASSISTANT_CONTEXT` | `{ context }` | body_focus / activities / 全量 context 快照（上下文 metadata 不编译为 tags） |
-| `ADD_TAG` | `{ tag, target, section? }` | 带 canonical tag 的活动新增、推荐点击（target 恒为当前 active target） |
+| `SET_EXCLUSIVE_GROUP` | `{ group, key, newTag, target, characterIndex, members }` | strict 互斥组新选择（Integrator 原子处理；`newTag` 为空只设 group 不 ADD_TAG；clothing 组 `target:char:N` + `characterIndex`） |
+| `SET_ASSISTANT_CONTEXT` | `{ context }` | body_focus / activities / 全量 context 快照（metadata 不编译为 tags） |
+| `ADD_TAG` | `{ tag, target, section?, source?, bundle_name? }` | 带 tag 的活动新增（带 `source:"scene_activity"` / `bundle_name:"scene-builder"`）、推荐点击 |
+| `REMOVE_TAG` | `{ target, entryId }` | 活动取消（仅移除带 scene_activity / scene-builder 溯源标记的自身条目） |
+| `SCENE_PROPOSAL` | `{ kind, count?, autoRemovableEmptyIndices?, blockedIndices? }` | 参与者增减高层提议，`kind:"sync_participants"` / `"remove_characters_blocked"`（Integrator 决定角色槽增删 / 基础主体数同步 / 手动移除提示；组件本身不直接增删角色） |
 
-组件导出纯函数（`buildContext` / `buildRecommendPayload` / `buildSetExclusiveGroupAction` / `buildSetAssistantContextAction` / `buildAddTagAction` / `exclusiveMembers` / `filterPositions` / `normalizeOption(s)` / `normalizeRecommendation(s)` / `participantNumber` / `radioMoveIndex` / `isSelected` / `optionVisibleForCount` / `positiveTagsFromDocument` / `dispatchAction` 等）供测试与集成方复用。
+组件导出纯函数（`buildContext` / `buildRecommendPayload` / `buildSetExclusiveGroupAction` / `buildSetAssistantContextAction` / `buildAddTagAction` / `exclusiveMembers` / `filterPositions` / `normalizeOption(s)` / `normalizeRecommendation(s)` / `participantNumber` / `radioMoveIndex` / `isSelected` / `optionVisibleForCount` / `positiveTagsFromDocument` / `dispatchAction` / `esc` 等）供测试与集成方复用。最终 Workbench 第三模式挂载与 `SCENE_PROPOSAL` 处理由 Integrator 完成。
 
 ### Prompt Input / Autocomplete 键盘契约（Phase 2，独立模块，已接入）
 
