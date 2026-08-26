@@ -1607,9 +1607,11 @@ function workspaceDoSync(key, text) {
   (getSlot(key) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
   const desired = new Map(String(text || "").split(",").map((token) => recognizedTagToken(token, known)).filter(Boolean).map((item) => [item.key, item]));
   const recognizedText = [...desired.values()].map((item) => item.weight === 1 ? item.tag : `${item.weight}::${item.tag}::`).join(", ");
-  const next = promptDocument.reconcileTargetText(state.prompt, key, key === "base" ? recognizedText : text, known);
-  const tagsChanged = promptDocument.serializeTarget(next, key) !== promptDocument.serializeTarget(state.prompt, key);
-  if (tagsChanged) state.prompt = next;
+  const prevText = promptDocument.serializeTarget(state.prompt, key);
+  // 单一写路径：只经 PromptBridge.dispatch(RECONCILE_TEXT) 写入 PromptDocument —— dispatch 内
+  // 完成 reconcile + commitPromptChange → notifyPromptSubscribers，Visual/Tag Assistant/NSFW 订阅者随通知刷新。
+  window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target: key, text: key === "base" ? recognizedText : text } });
+  const tagsChanged = promptDocument.serializeTarget(state.prompt, key) !== prevText;
   if (key === "base") {
     const ft = workspaceFreeTextFromText(text, known);
     if (ft !== state.prompt.free_text) {
