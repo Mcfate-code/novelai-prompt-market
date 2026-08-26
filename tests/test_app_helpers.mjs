@@ -77,6 +77,8 @@ const extractRecognizedTagIdentities = loadFunctionBound("extractRecognizedTagId
 const applyRecognizedTagDiff = loadFunctionBound("applyRecognizedTagDiff", ["recognizedTagToken"])(recognizedTagToken);
 const promptTokenRange = loadFunction("promptTokenRange");
 const replacePromptToken = loadFunctionBound("replacePromptToken", ["promptTokenRange"])(promptTokenRange);
+const replacePromptTokenWithCaret = loadFunctionBound("replacePromptTokenWithCaret", ["promptTokenRange"])(promptTokenRange);
+const workspaceTabToTarget = loadFunction("workspaceTabToTarget");
 // ---- P3 修复纯函数（无自由变量） ----
 const naiStructuredBaseLine = loadFunction("naiStructuredBaseLine");
 const naiAutocompleteSkipSearch = loadFunction("naiAutocompleteSkipSearch");
@@ -204,6 +206,43 @@ test("accepting a suggestion leaves caret inside the completed tag so re-search 
   const query = promptTokenRange(value, caret).query;
   assert.equal(query, "blue eyes");
   assert.equal(naiAutocompleteSkipSearch("blue eyes", query), true, "接受后立即重开被抑制");
+});
+
+// ---- BUG 1 回归：replacePromptTokenWithCaret 可靠返回 value + caret（不落到 tag 内部）----
+
+test("replacePromptTokenWithCaret returns value and caret at end of inserted tag (BUG 1)", () => {
+  // 输入 `1girl, blue e|`，候选 `blue eyes`，替换后为 `1girl, blue eyes`，caret 在 tag 末尾而非内部
+  const { value, caret } = replacePromptTokenWithCaret("1girl, blue e", 13, "blue eyes");
+  assert.equal(value, "1girl, blue eyes");
+  assert.equal(caret, value.length, "caret 落在插入 tag 末尾，即整串末尾");
+  assert.equal(value.slice(caret - "blue eyes".length, caret), "blue eyes", "caret 正处 tag 末尾");
+  // caret 落在完整 tag 内 -> 触发抑制，弹窗不重开
+  const query = promptTokenRange(value, caret).query;
+  assert.equal(query, "blue eyes");
+  assert.equal(naiAutocompleteSkipSearch("blue eyes", query), true);
+});
+
+test("replacePromptTokenWithCaret keeps caret at end even when caret was inside the token", () => {
+  // caret 在 token 中部：left 空白保留，替换后 caret 仍在 tag 末尾
+  const { value, caret } = replacePromptTokenWithCaret("1girl, bl", 9, "blue eyes");
+  assert.equal(value, "1girl, blue eyes");
+  assert.equal(caret, value.length);
+});
+
+test("replacePromptTokenWithCaret preserves leading whitespace and following text", () => {
+  // token 前有空白、tag 后有后续 token 时，leading whitespace 与后续文本均保留
+  const { value, caret } = replacePromptTokenWithCaret("1girl,  blue e , masterpiece", 13, "blue eyes");
+  assert.equal(value, "1girl,  blue eyes , masterpiece");
+  assert.equal(value.slice(caret - "blue eyes".length, caret), "blue eyes", "caret 仍在 tag 末尾，非 tag 内部");
+});
+
+// ---- BUG 2 回归：高级工作区 Tab 切换同步 state.target（pure helper workspaceTabToTarget）----
+
+test("workspaceTabToTarget maps workspace tab to state.target (BUG 2)", () => {
+  assert.equal(workspaceTabToTarget("base"), "base", "Base tab -> base");
+  assert.equal(workspaceTabToTarget("0"), "char:0", "Character 1 -> char:0");
+  assert.equal(workspaceTabToTarget("1"), "char:1", "Character 2 -> char:1");
+  assert.equal(workspaceTabToTarget(2), "char:2", "数字下标也映射为 char:N");
 });
 
 // ---- 与 app.js addTagToTarget 的 base 分支逐行一致的纯逻辑模拟（DOM 部分跳过） ----

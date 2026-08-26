@@ -461,6 +461,15 @@ function replacePromptToken(text, caret, replacement) {
   const right = text.slice(caret, range.end).match(/\s*$/)?.[0] || "";
   return text.slice(0, range.start) + left + replacement + right + text.slice(range.end);
 }
+// 替换 token 并同时可靠返回新的 value 与 caret（caret 落在插入 tag 末尾，绝不落到 tag 内部）。
+// 与 replacePromptToken 共用同一套 left/right/range 语义，生产代码与测试共用此纯函数。
+function replacePromptTokenWithCaret(text, caret, replacement) {
+  const range = promptTokenRange(text, caret);
+  const left = text.slice(range.start, caret).match(/^\s*/)?.[0] || "";
+  const right = text.slice(caret, range.end).match(/\s*$/)?.[0] || "";
+  const value = text.slice(0, range.start) + left + replacement + right + text.slice(range.end);
+  return { value, caret: range.start + left.length + replacement.length };
+}
 let naiAutocompleteState = { input: null, target: "base", range: null, results: [], selected: 0, request: 0 };
 let naiAutocompleteSuppress = null; // 一次性抑制：接受建议后若光标仍停在刚插入的完整 tag 内，抑制搜索，避免弹窗立即重开
 // 接受建议后判断：query 是否等于刚接受的 tag（等于则跳过搜索，不重开弹窗）。
@@ -506,8 +515,8 @@ function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
   const item = results[index]; if (!input || !item) return;
   knownCatalogTags.set(String(item.tag).toLocaleLowerCase(), item.tag);
   const caret = input.selectionStart;
-  input.value = replacePromptToken(input.value, caret, item.tag);
-  const nextCaret = input.value.indexOf(item.tag, Math.max(0, caret - 1)) + item.tag.length;
+  const { value, caret: nextCaret } = replacePromptTokenWithCaret(input.value, caret, item.tag);
+  input.value = value;
   input.setSelectionRange(nextCaret, nextCaret);
   closeNaiAutocomplete();
   naiAutocompleteSuppress = item.tag; // 抑制合成 input 触发的搜索，避免弹窗立即重开
@@ -1307,6 +1316,12 @@ function targetLabel(target) {
 function workspaceTargetKey() {
   return activeWorkspaceTarget === "base" ? "base" : `char:${activeWorkspaceTarget}`;
 }
+// 高级工作区 Tab 值（"base" 或角色数字下标字符串）-> state.target 目标字符串。
+// 纯函数：Tab 切换必须同步 state.target，否则 addTagToTarget 读取的隐藏 #nai-tag-target
+// 仍是旧目标，会把标签加错目标。
+function workspaceTabToTarget(tabValue) {
+  return String(tabValue) === "base" ? "base" : `char:${Number(tabValue)}`;
+}
 function workspaceTargetName() {
   if (activeWorkspaceTarget === "base") return "Base";
   const ch = state.prompt.characters[activeWorkspaceTarget];
@@ -1414,6 +1429,8 @@ function renderWorkspace() {
   // Tab 切换
   el.querySelectorAll("[data-ws-tab]").forEach((b) => b.addEventListener("click", () => {
     activeWorkspaceTarget = b.dataset.wsTab === "base" ? "base" : Number(b.dataset.wsTab);
+    state.target = workspaceTabToTarget(b.dataset.wsTab);
+    syncNaiTagTargetFromState();
     workspaceSectionFilter = "";
     renderWorkspace();
   }));
