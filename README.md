@@ -333,10 +333,23 @@ function apply(event, action) {
 
 生图视图为三栏桌面布局，高信息密度、Prompt 优先，参照 NovelAI 官方信息架构：
 
-- **左：Prompt Editor** — Prompt / Undesired 作为同一输入区 tabs 切换（「⇱」可分离并排）；Base / Character tabs 与多角色编辑；角色位置（Auto 居中 / 手动 X/Y）；「实际发送内容」Effective Preview 折叠展开。`#prompt-mode-switch` 提供 Text / Visual 视图切换，`#tag-assistant-root` 与 `#visual-prompt-root` 由 Workbench V3 自动挂载；两种视图只通过正式 `window.PromptBridge` 读写同一份 PromptDocument。
+- **左：Prompt Editor** — 单一 `#nai-editor` 编辑器，Prompt / UC 作为 Text 模式下的 pane tabs 切换；Base / Character tabs 与多角色设置（角色名 / 位置 / 排序 / 移除，不含 textarea）；Base 下的「自然语言补充」独立折叠区；「实际发送内容」Effective Preview 折叠展开。`#prompt-mode-switch` 提供 Text / Visual / Scene 切换，`#tag-assistant-root` / `#visual-prompt-root` / `#nsfw-builder-root` 由 Workbench V3 自动挂载；各视图只通过正式 `window.PromptBridge` 读写同一份 PromptDocument。
 - **中：Image Viewer** — 中心画布，Fit / 缩放 / 点击 100% 查看、Pin 收藏、「恢复设置」、「以此图图生图」。
 - **右：Generation Settings** — 基础参数常显：Model / 尺寸档位 / 批次 / Seed（Random / Fixed / Increment）/ 文生图·图生图（Strength / Noise）/ 透明背景 / 正负提示词档位；Advanced Settings（Sampler / Scheduler / Steps / CFG / CFG Rescale / Auto SMEA）折叠；Generate / Cancel 与积分预估常驻底部。History 位于同栏底部，点击标题可折叠隐藏。
 - 移动端单列堆叠：Prompt → Generation Settings / History → Viewer，无横向溢出。
+
+#### Workbench Architecture（单一权威收敛）
+
+生图工作台的 Prompt 编辑完全收敛到 `PromptDocument`（`static/prompt-document.js`），编辑器只做读写投影，不引入第二份权威状态：
+
+- **单一编辑器**：全局只保留一个 `<textarea id="nai-editor">`；Base / Character N 通过 GLOBAL TARGET tabs 切换，Prompt / UC 通过 pane tabs 切换，解析为 `base` / `global_uc` / `char:N` / `char:N:uc` 目标（`resolveWorkbenchEditorTarget`）。不再有 Base/GlobalUC/CharPrompt/CharUC 各自独立 textarea。
+- **Text → Document**：编辑输入只经 `PromptBridge.dispatch({type:"RECONCILE_TEXT"})` 写入，handler 调 `reconcileTargetText(document, target, text)`，逐键不压历史。
+- **Document → Text**：`renderWorkbenchEditorFromDocument()` 由 `serializeTarget(target)` 回流编辑器；编辑器聚焦时 GUARD 跳过，避免打字被重写。PromptBridge 订阅者在任意 PromptDocument 变更时触发回流。
+- **生成读 PromptDocument**：`naiGenerate` / `naiUpdateEffectivePreview` 一律经 `buildGenerationPromptState(document)` 取 `{basePrompt, globalUc, characters}`，与 Effective Preview 共用同一编译函数，保证 Preview == payload；绝不读 textarea。
+- **恢复读 PromptDocument**：图库/历史/剪贴板/快照恢复统一走 `restorePromptDocumentFromGeneration()`（restore → PromptDocument → notify → UI），绝不写 DOM。
+- **TagBundle = 当前目标 only**：`bundleItemsFromPrompt` 捕获 `getTargetEntries(document, target)`，`addBundle` 经 `reconcileTargetText` 只应用到当前目标，不 flatten 全部角色。
+- **Undo = 一次编辑会话**：`#nai-editor` focus 保存一次 pre-edit 快照，blur / 目标切换 / 模式切换时若内容变化恰好压入一个 history 项；`undo()` 弹栈后 `commitPromptChange` + `renderWorkbenchEditorFromDocument({force:true})`。
+- **Autocomplete caret 契约**：`tokenRangeAtCaret`（`static/prompt-tokenizer.js`）是 caret-range 唯一权威，尊重 `weight::tag::` 包裹；`acceptNaiAutocomplete` 据此替换，`blue ey|, long hair` → Tab → `blue eyes, |long hair`。
 
 ### 标签例图
 

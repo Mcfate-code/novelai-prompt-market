@@ -1,6 +1,5 @@
 "use strict";
-import { splitPromptTokens, joinPromptTokens, serializePromptToken } from "./prompt-tokenizer.js";
-import { rerankResults } from "./gallery-rerank.js";
+import { splitPromptTokens, joinPromptTokens, tokenRangeAtCaret } from "./prompt-tokenizer.js";
 
 // ===== 状态 =====
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
@@ -40,7 +39,8 @@ function dispatchPromptAction(action = {}) {
   if (!target) return state.prompt;
   if (action.type === "ADD_TAG" && !String(payload.tag || "").trim()) return state.prompt;
    if (!["ADD_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP"].includes(action.type)) return state.prompt;
-  pushHistory();
+  // RECONCILE_TEXT 不逐键 pushHistory：一次编辑会话只压一个快照（见 #nai-editor focus/blur 事务）。
+  if (action.type !== "RECONCILE_TEXT") pushHistory();
   const remapTarget = (target, type, from, to) => {
     const m = String(target).match(/^char:(\d+)(:uc)?$/); if (!m) return target;
     const n = Number(m[1]); const suffix = m[2] || "";
@@ -78,7 +78,10 @@ function dispatchPromptAction(action = {}) {
   }
   if (action.type === "REMOVE_CHARACTER") state.target = remapTarget(state.target, "remove", Number(payload.index));
   if (action.type === "MOVE_CHARACTER") state.target = remapTarget(state.target, "move", Number(payload.fromIndex), Number(payload.toIndex));
-  commitPromptChange({ refresh: true });
+  // RECONCILE_TEXT 走轻量提交：不重建购物车 DOM、不触发推荐/冲突网络请求（编辑器 UI 由
+  // PromptBridge 订阅者 renderWorkbenchEditorFromDocument 更新，且聚焦时跳过）。
+  if (action.type === "RECONCILE_TEXT") commitPromptChange({ render: false, refresh: false });
+  else commitPromptChange({ refresh: true });
   if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT"].includes(action.type)) {
     rebuildTargetSelect();
     if (typeof naiRenderCharacters === "function") {
@@ -113,6 +116,35 @@ let activeWorkspaceTarget = "base"; // 高级购物车当前 Tab：'base' | 角�
 let workspaceSectionFilter = "";    // '' = 全部分区，或 SECTION_IDS 之一
 let workspaceShowEmpty = false;     // 显示空分区（默认关）
 let activeNaiTarget = "base";       // 生图视图角色 Tab：'base' | 角色索引（number）
+// Workbench 单一编辑器视图模型：mode ∈ text|visual|scene；pane ∈ prompt|uc；charIndex = null(base) | number。
+let workbenchMode = "text";
+let workbenchPane = "prompt";
+let workbenchCharIndex = null;       // null = Base；number = 角色下标
+let editTransactionSnapshot = null;  // 一次编辑会话（focus→blur）只压一个 undo 快照
+
+// 纯函数：把 workbench 视图解析为 PromptDocument 目标槽位。
+// 仅 text 模式有目标；base 的 uc 槽位 = global_uc；角色 = char:N / char:N:uc。
+function resolveWorkbenchEditorTarget(view = {}) {
+  if (view.mode !== "text") return null;
+  if (view.charIndex == null) return view.pane === "uc" ? "global_uc" : "base";
+  return "char:" + view.charIndex + (view.pane === "uc" ? ":uc" : "");
+}
+function currentWorkbenchView() {
+  return { mode: workbenchMode, pane: workbenchPane, charIndex: workbenchCharIndex };
+}
+// 编辑事务：聚焦时保存一次 pre-edit 快照；blur/目标切换/模式切换时若内容已变，压入一次 history。
+function beginEditTransaction() {
+  if (editTransactionSnapshot == null) editTransactionSnapshot = snapshot();
+}
+function endEditTransaction() {
+  if (editTransactionSnapshot == null) return;
+  const pre = editTransactionSnapshot;
+  editTransactionSnapshot = null;
+  if (snapshot() !== pre) {
+    state.history.push(pre);
+    if (state.history.length > 50) state.history.shift();
+  }
+}
 
 // ===== 工具 =====
 const $ = (sel) => document.querySelector(sel);
@@ -196,7 +228,6 @@ const refreshPromptServices = debounce(() => { loadRecommendations(); loadConfli
 function commitPromptChange({ render = true, refresh = true } = {}) {
   persistDraft();
   if (render) renderCart();
-  reconcileGenerationFromCart();
   if (refresh) refreshPromptServices();
   notifyPromptSubscribers();
 }
@@ -285,6 +316,7 @@ async function saveUserSettings() {
     }
     userSettings = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
     window.WorkbenchComponents?.nsfwBuilder?.setAdolescentMode(!!userSettings.adolescent_mode);
+    window.WorkbenchMode?.set(workbenchMode);
     naiSyncResolutionFromInputs();
     closeSettings();
     await loadNaiApiStatus();
@@ -377,25 +409,11 @@ function recognizedTagToken(token, knownTags) {
   const key = candidate.toLocaleLowerCase();
   return knownTags.has(key) && (weighted || /^[^{}\[\]<>]+$/.test(candidate)) ? { key, tag: knownTags.get(key), weighted, weight: weighted ? Number(weighted[0].split("::", 1)[0]) : 1 } : null;
 }
+// NOTE：extractRecognizedTagIdentities 仍被 tests/test_app_helpers.mjs 源码提取导入，
+// 故保留（不删除）。生产代码仅 recognizedTagToken 被高级工作区复用。
 function extractRecognizedTagIdentities(text, knownTags = knownCatalogTags) {
   return splitPromptTokens(text).map((token) => recognizedTagToken(token, knownTags)).filter(Boolean).map((x) => x.key);
 }
-function applyRecognizedTagDiff(text, desiredKeys, knownTags = knownCatalogTags) {
-  const desired = new Set(desiredKeys || []);
-  const tokens = splitPromptTokens(text);
-  const kept = [];
-  const seen = new Set();
-  tokens.forEach((token) => {
-    const recognized = recognizedTagToken(token, knownTags);
-    if (!recognized) { kept.push(token); return; }
-    if (desired.has(recognized.key) && !seen.has(recognized.key)) { kept.push(token); seen.add(recognized.key); }
-  });
-  const missing = [...desired].filter((key) => !seen.has(key)).map((key) => knownTags.get(key)).filter(Boolean);
-  let result = kept.join(", ");
-  missing.forEach((tag) => { result = result.trim() ? `${result.trimEnd()}, ${tag}` : tag; });
-  return result;
-}
-function currentCartTargetKeys(target) { return new Set((getSlot(target) || []).map((entry) => String(entry.tag).toLocaleLowerCase())); }
 // 结构化解析 helper 收敛在 static/nai-structured.js（纯模块，供测试复用），
 // 仅用于图库/旧快照里遗留的结构化 rawPrompt 的迁移解析，绝不参与正常编辑/生成同步。
 function naiStructuredBaseLine(display) {
@@ -436,65 +454,39 @@ function syncNaiCharactersFromState() {
     position: character.position || null,
   }));
 }
-function buildGenerationCharacters(document = state.prompt) {
-  if (!document || !promptDocument) return [];
-  return (document.characters || []).map((character, index) => ({
-    prompt: promptDocument.serializeTarget(document, `char:${index}`),
-    negative_prompt: promptDocument.serializeTarget(document, `char:${index}:uc`),
-    position: character.position ? { ...character.position } : null,
-  }));
+
+// ===== Workbench 单一编辑器：PromptDocument -> Text 渲染 =====
+// PromptDocument 是唯一权威：#nai-editor 的值永远由 serializeTarget(target) 派生，绝不反向写 DOM。
+// GUARD：编辑器聚焦时跳过（除非 force），避免打字时被重写、光标跳动。
+function renderWorkbenchFreeText() {
+  const collapse = $("#nai-free-text-collapse");
+  const raw = $("#nai-free-text");
+  const en = $("#nai-free-text-en");
+  const useEn = $("#nai-free-text-use-en");
+  const isBase = resolveWorkbenchEditorTarget(currentWorkbenchView()) === "base";
+  if (collapse) collapse.hidden = !isBase;
+  if (!isBase) return;
+  const focusEl = document.activeElement;
+  if (raw && focusEl !== raw) raw.value = state.prompt.free_text || "";
+  if (en && focusEl !== en) en.value = state.prompt.free_text_en || "";
+  if (useEn) useEn.checked = !!state.prompt.use_free_text_en;
 }
-// P0 结构化边界：#nai-prompt 只存 Base，#nai-neg 只存 Global UC，角色只存 naiCharacters[]。
-// 目标文本一律读对应权威槽位；不存在结构化 display 混合串，也不存在 display 相等判定门。
-function generationTargetText(target) {
-  if (target === "base") return $("#nai-prompt")?.value || "";
-  if (target === "global_uc") return $("#nai-neg")?.value || "";
-  const m = String(target).match(/^char:(\d+)(:uc)?$/);
-  if (m) return naiCharacters[Number(m[1])]?.[m[2] ? "negative_prompt" : "prompt"] || "";
-  return $("#nai-prompt")?.value || "";
-}
-function setGenerationTargetText(target, text) {
-  if (target === "base") {
-    if ($("#nai-prompt")) $("#nai-prompt").value = text;
-  } else if (target === "global_uc") {
-    if ($("#nai-neg")) $("#nai-neg").value = text;
-  } else {
-    const m = String(target).match(/^char:(\d+)(:uc)?$/), c = m && naiCharacters[Number(m[1])];
-    if (c) {
-      c[m[2] ? "negative_prompt" : "prompt"] = text;
-      naiRenderCharacters();
-    }
+function renderWorkbenchEditorFromDocument(opts = {}) {
+  const editor = $("#nai-editor");
+  if (!editor) return;
+  const target = resolveWorkbenchEditorTarget(currentWorkbenchView());
+  if (!target) {
+    editor.hidden = true;
+    $(".nai-prompt-meta")?.toggleAttribute("hidden", true);
+    return;
   }
-}
-function reconcileGenerationFromCart() {
-  if (reconciliationBusy || typeof naiCharacters === "undefined" || !$("#nai-prompt")) return;
-  reconciliationBusy = true;
-  try {
-    ["base", "global_uc", ...state.prompt.characters.flatMap((_, i) => [`char:${i}`, `char:${i}:uc`])].forEach((target) => {
-      const known = new Map(knownCatalogTags);
-      (getSlot(target) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
-      const desired = new Set([...currentCartTargetKeys(target)].filter((key) => known.has(key)));
-      const next = applyRecognizedTagDiff(generationTargetText(target), desired, known);
-      if (next !== generationTargetText(target)) setGenerationTargetText(target, next);
-    });
-  } finally { reconciliationBusy = false; }
+  editor.hidden = false;
+  $(".nai-prompt-meta")?.toggleAttribute("hidden", false);
+  if (!opts.force && document.activeElement === editor) return;
+  editor.value = window.PromptBridge.serializeTarget(target);
   updateNaiPromptMeta();
-  if (typeof naiUpdateEffectivePreview === "function") naiUpdateEffectivePreview();
+  renderWorkbenchFreeText();
 }
-function reconcileCartFromGeneration(target, text) {
-  if (reconciliationBusy) return;
-  const known = new Map(knownCatalogTags);
-  (getSlot(target) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
-  const next = promptDocument.reconcileTargetText(state.prompt, target, text, known);
-  if (promptDocument.serializeTarget(next, target) === promptDocument.serializeTarget(state.prompt, target)) return;
-  const sections = getSectionMap(target); if (!sections) return;
-  reconciliationBusy = true;
-  try {
-    state.prompt = next;
-    commitPromptChange({ render: true, refresh: false });
-  } finally { reconciliationBusy = false; }
-}
-const reconcileGenerationInput = debounce((target, text) => reconcileCartFromGeneration(target, text), 200);
 
 function promptTokenRange(text, caret) {
   const value = String(text || "");
@@ -511,7 +503,8 @@ function replacePromptToken(text, caret, replacement) {
   return text.slice(0, range.start) + left + replacement + right + text.slice(range.end);
 }
 // 替换 token 并同时可靠返回新的 value 与 caret（caret 落在插入 tag 末尾，绝不落到 tag 内部）。
-// 与 replacePromptToken 共用同一套 left/right/range 语义，生产代码与测试共用此纯函数。
+// 生产代码已改用 prompt-tokenizer 的 tokenRangeAtCaret；此三函数保留仅供
+// tests/test_app_helpers.mjs 源码提取回归（逗号切分语义）。
 function replacePromptTokenWithCaret(text, caret, replacement) {
   const range = promptTokenRange(text, caret);
   const left = text.slice(range.start, caret).match(/^\s*/)?.[0] || "";
@@ -527,14 +520,16 @@ function naiAutocompleteSkipSearch(acceptedTag, query) {
   return !!acceptedTag && String(query ?? "").trim().toLocaleLowerCase() === String(acceptedTag).toLocaleLowerCase();
 }
 const naiAutocompleteSearch = debounce(async (input) => {
-  const range = promptTokenRange(input.value, input.selectionStart);
+  const caret = input.selectionStart;
+  const range = tokenRangeAtCaret(input.value, caret); // caret-range 唯一权威
+  const query = input.value.slice(range.start, caret).trim();
   const acceptedTag = naiAutocompleteSuppress;
   naiAutocompleteSuppress = null;
-  if (naiAutocompleteSkipSearch(acceptedTag, range.query)) return;
-  if (range.query.length < 2 || /[{}\[\]()<>]/.test(range.query)) { closeNaiAutocomplete(); return; }
+  if (naiAutocompleteSkipSearch(acceptedTag, query)) return;
+  if (query.length < 2 || /[{}\[\]()<>]/.test(query)) { closeNaiAutocomplete(); return; }
   const request = ++naiAutocompleteState.request;
   try {
-    const data = await api(`/api/search?q=${encodeURIComponent(range.query)}`);
+    const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
     if (request !== naiAutocompleteState.request || document.activeElement !== input) return;
     const reranked = naiRerankResults(data.results || [], naiAutocompleteState.target);
     naiAutocompleteState = { ...naiAutocompleteState, input, range, results: reranked.slice(0, 8), selected: 0 };
@@ -570,7 +565,12 @@ function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
   const item = results[index]; if (!input || !item) return;
   knownCatalogTags.set(String(item.tag).toLocaleLowerCase(), item.tag);
   const caret = input.selectionStart;
-  const { value, caret: nextCaret } = replacePromptTokenWithCaret(input.value, caret, item.tag);
+  // caret-range 唯一权威：tokenRangeAtCaret 尊重 weight::tag:: 包裹，避免拆进加权 token 内部。
+  const range = tokenRangeAtCaret(input.value, caret);
+  const left = input.value.slice(range.start, caret).match(/^\s*/)?.[0] || "";
+  const right = input.value.slice(caret, range.end).match(/\s*$/)?.[0] || "";
+  const value = input.value.slice(0, range.start) + left + item.tag + right + input.value.slice(range.end);
+  const nextCaret = range.start + left.length + item.tag.length;
   // Tab / 鼠标接受：追加分隔符 `, `（若光标后已有分隔符则不再追加）。
   const delimiter = (typeof window !== "undefined" && window.NaiInputKeys)
     ? window.NaiInputKeys.delimiterToAppend(value.slice(nextCaret))
@@ -689,26 +689,9 @@ function rebuildNaiTagTarget() {
 async function addTagToTarget(tag) {
   const sel = document.getElementById("nai-tag-target");
   window.PromptBridge.setActiveTarget(sel?.value || "base");
-  const m = state.target.match(/^char:(\d+)$/);
-  if (m && !naiCharacters[Number(m[1])]) state.target = "base";
   const label = targetLabel(state.target);
+  // PromptDocument 是唯一权威：加标签只走 addEntry -> dispatch ADD_TAG，不再写任何 textarea。
   const added = await addEntry(tag);
-  if (state.target === "base") {
-    const promptEl = $("#nai-prompt");
-    // P0: #nai-prompt 只存 Base，直接插入 tag，不再重建结构化 display 混合串。
-    promptEl.value = insertTagIntoString(promptEl.value, tag);
-    updateNaiPromptMeta();
-    if (typeof naiUpdateEffectivePreview === "function") naiUpdateEffectivePreview();
-  } else {
-    const cm = state.target.match(/^char:(\d+)$/);
-    if (cm) {
-      const character = naiCharacters[Number(cm[1])];
-      if (character) {
-        character.prompt = insertTagIntoString(character.prompt, tag);
-        naiRenderCharacters();
-      }
-    }
-  }
   if (added) toast(`已加入「${tag}」→ ${label}`);
 }
 
@@ -761,16 +744,34 @@ async function mountWorkbenchComponents() {
   window.WorkbenchComponents = { assistant, builder, nsfwBuilder };
   const switcher = $("#prompt-mode-switch");
   const setMode = (mode) => {
-    const visual = mode === "visual";
-    switcher?.querySelectorAll("[data-prompt-mode]").forEach((button) => button.classList.toggle("active", button.dataset.promptMode === mode));
-    $("#tag-assistant-root").hidden = visual;
-    $("#visual-prompt-root").hidden = !visual;
-    $("#nai-prompt").hidden = visual;
-    $("#nai-neg").hidden = visual;
-    $(".nai-prompt-meta")?.toggleAttribute("hidden", visual);
+    if (mode === "scene" && userSettings.adolescent_mode) mode = "text"; // 青少年模式隐藏 Scene
+    endEditTransaction(); // 模式切换结束上一次编辑会话
+    workbenchMode = mode;
+    switcher?.querySelectorAll("[data-prompt-mode]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.promptMode === mode);
+      if (button.dataset.promptMode === "scene") button.hidden = !!userSettings.adolescent_mode;
+    });
+    const isText = mode === "text";
+    const isVisual = mode === "visual";
+    const isScene = mode === "scene";
+    // Text：单一编辑器 + Prompt/UC 标签 + 角色标签 + Tag Assistant（可折叠）；不复制到 Visual/Scene
+    $("#nai-editor").hidden = !isText;
+    $(".nai-prompt-meta")?.toggleAttribute("hidden", !isText);
+    $("#nai-free-text-collapse")?.toggleAttribute("hidden", !isText);
+    document.querySelector(".nai-tabs")?.toggleAttribute("hidden", !isText);
+    $("#nai-character-tabs")?.toggleAttribute("hidden", !isText);
+    $("#nai-character-list")?.toggleAttribute("hidden", !isText);
+    $("#tag-assistant-root").hidden = !isText;
+    // Visual / Scene 独占
+    $("#visual-prompt-root").hidden = !isVisual;
+    $("#nsfw-builder-root").hidden = !isScene;
+    if (isText) renderWorkbenchEditorFromDocument({ force: true });
   };
   switcher?.addEventListener("click", (event) => { const button = event.target.closest("[data-prompt-mode]"); if (button) setMode(button.dataset.promptMode); });
   setMode("text");
+  window.WorkbenchMode = { set: setMode };
+  // PromptDocument 变化 → 单一编辑器回流：编辑器聚焦时由 GUARD 跳过，避免打字被重写。
+  window.PromptBridge.subscribe(() => renderWorkbenchEditorFromDocument());
 }
 
 async function loadPromptSections() {
@@ -1641,9 +1642,11 @@ function workspaceDoSync(key, text) {
   (getSlot(key) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
   const desired = new Map(String(text || "").split(",").map((token) => recognizedTagToken(token, known)).filter(Boolean).map((item) => [item.key, item]));
   const recognizedText = [...desired.values()].map((item) => item.weight === 1 ? item.tag : `${item.weight}::${item.tag}::`).join(", ");
-  const next = promptDocument.reconcileTargetText(state.prompt, key, key === "base" ? recognizedText : text, known);
-  const tagsChanged = promptDocument.serializeTarget(next, key) !== promptDocument.serializeTarget(state.prompt, key);
-  if (tagsChanged) state.prompt = next;
+  const prevText = promptDocument.serializeTarget(state.prompt, key);
+  // 单一写路径：只经 PromptBridge.dispatch(RECONCILE_TEXT) 写入 PromptDocument —— dispatch 内
+  // 完成 reconcile + commitPromptChange → notifyPromptSubscribers，Visual/Tag Assistant/NSFW 订阅者随通知刷新。
+  window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target: key, text: key === "base" ? recognizedText : text } });
+  const tagsChanged = promptDocument.serializeTarget(state.prompt, key) !== prevText;
   if (key === "base") {
     const ft = workspaceFreeTextFromText(text, known);
     if (ft !== state.prompt.free_text) {
@@ -1654,7 +1657,8 @@ function workspaceDoSync(key, text) {
   if (!tagsChanged && key !== "base") return;
   persistDraft();
   syncLegacyProjection();
-  reconcileGenerationFromCart();
+  // PromptDocument 权威：生图编辑器由订阅者 renderWorkbenchEditorFromDocument 回流，无需旧 sync 链。
+  renderWorkbenchEditorFromDocument();
   workspaceRefreshChips();
   refreshPromptServices();
 }
@@ -1905,12 +1909,6 @@ function removeEntryById(slot, id) {
   const found = findEntry(slot, id); if (!found) return;
   pushHistory(); state.prompt = promptDocument.removeTag(state.prompt, slot, id); commitPromptChange();
 }
-function removeTagEverywhere(tag) {
-  pushHistory();
-  const maps = [state.prompt.sections, state.prompt.global_uc_sections, ...state.prompt.characters.flatMap((ch) => [ch.prompt_sections, ch.uc_sections])];
-  maps.forEach((map) => SECTION_IDS.forEach((id) => { map[id] = map[id].filter((e) => e.tag !== tag); }));
-  commitPromptChange();
-}
 function setEntryWeight(slot, id, value) {
   const found = findEntry(slot, id); if (!found) return;
   pushHistory(); found.entry.weight = Number(Number(value).toFixed(2)); commitPromptChange();
@@ -2000,7 +1998,7 @@ function clearAll() {
 function undo() {
   const last = state.history.pop(); if (last == null) return;
   const saved = JSON.parse(last); state.prompt = migratePromptState(saved.prompt || saved); if (saved.model) state.model = saved.model;
-  rebuildTargetSelect(); commitPromptChange();
+  rebuildTargetSelect(); commitPromptChange(); renderWorkbenchEditorFromDocument({ force: true });
 }
 function exportPayload() {
   syncLegacyProjection();
@@ -2054,12 +2052,26 @@ async function loadConflicts() {
   if (tags.length < 2) { panel.hidden = true; return; }
   try {
     const data = await api(`/api/conflicts?tags=${encodeURIComponent(tags.join(","))}`); promptConflicts = data.conflicts || []; panel.hidden = !promptConflicts.length;
-    panel.innerHTML = promptConflicts.map((c, i) => `<div class="conflict-row"><span>${esc(c.tag_a)} 与 ${esc(c.tag_b)} 可能冲突</span><button data-keep="${i}">保留</button><button data-remove="${esc(c.tag_a)}">删 A</button><button data-remove="${esc(c.tag_b)}">删 B</button></div>`).join("");
+    // Warning-only：冲突面板只提示，绝不跨目标自动删除同名 tag；删除只由用户在购物车中按具体条目执行。
+    panel.innerHTML = promptConflicts.map((c, i) => `<div class="conflict-row"><span>${esc(c.tag_a)} 与 ${esc(c.tag_b)} 可能冲突</span><button data-keep="${i}">知道了</button></div>`).join("");
     panel.querySelectorAll("[data-keep]").forEach((b) => b.addEventListener("click", () => b.closest(".conflict-row").remove()));
-    panel.querySelectorAll("[data-remove]").forEach((b) => b.addEventListener("click", () => removeTagEverywhere(b.dataset.remove)));
   } catch { panel.hidden = true; }
 }
-function bundleItemsFromPrompt() { return positivePromptEntries().map((e, i) => ({ tag: e.tag, weight: e.weight, section: e.section, sort_order: i })); }
+// 当前「活动目标」：生图视图取 workbench 编辑器目标，其余视图取购物车 state.target。
+// TagBundle 与生成/恢复共用此判定，保证只在当前目标内读写。
+function currentActivePromptTarget() {
+  if (state.view === "generate") {
+    const workbench = resolveWorkbenchEditorTarget(currentWorkbenchView());
+    if (workbench) return workbench;
+  }
+  return resolveMutationTarget(state.target) || "base";
+}
+function bundleItemsFromPrompt() {
+  const target = currentActivePromptTarget();
+  if (!target || !promptDocument) return [];
+  // 只捕获当前目标的分区条目（含 section），绝不 flatten 全部角色。
+  return promptDocument.getTargetEntries(state.prompt, target).map((e, i) => ({ tag: e.tag, weight: e.weight, section: e.section, sort_order: i }));
+}
 async function openBundlesModal() { $("#bundles-modal").style.display = "flex"; await loadBundles(); }
 function closeBundlesModal() { $("#bundles-modal").style.display = "none"; }
 async function loadBundles() {
@@ -2081,8 +2093,18 @@ async function createBundle(name = "") {
 }
 async function addBundle(id) {
   let bundle = bundles.find((b) => String(b.id) === String(id)); if (!bundle?.items) { const data = await api(`/api/bundles/${encodeURIComponent(id)}`); bundle = data.bundle || data; }
-  if (!bundle) return; pushHistory();
-  (bundle.items || []).forEach((item, i) => { const section = SECTION_IDS.includes(item.section) ? item.section : "other"; if (!state.prompt.sections[section].some((e) => e.tag === item.tag)) state.prompt.sections[section].push(normalizeEntry(item, section, { source: "bundle", bundle_id: bundle.id, bundle_name: bundle.name, sort_order: i })); });
+  if (!bundle) return;
+  const target = currentActivePromptTarget();
+  if (!target || !promptDocument) { toast("当前目标不可用"); return; }
+  pushHistory();
+  const currentText = promptDocument.serializeTarget(state.prompt, target);
+  const existing = new Set(splitPromptTokens(currentText).map((t) => t.toLocaleLowerCase()));
+  const additions = (bundle.items || []).map((item) => String(item.tag || "").trim()).filter((tag) => tag && !existing.has(tag.toLocaleLowerCase()));
+  if (additions.length) {
+    const merged = [currentText, ...additions].filter((part) => part && part.trim()).join(", ");
+    // 仅 reconcile 当前目标：base / char:N 互不影响，无绝对角色下标。
+    state.prompt = promptDocument.reconcileTargetText(state.prompt, target, merged, new Map(knownCatalogTags));
+  }
   commitPromptChange(); closeBundlesModal(); toast(`已添加标签模板「${bundle.name}」`);
 }
 async function deleteBundle(id) { if (!confirm("确定删除该标签模板？")) return; await api(`/api/bundles/${encodeURIComponent(id)}`, { method: "DELETE" }); await loadBundles(); toast("标签模板已删除"); }
@@ -2128,9 +2150,9 @@ async function restoreSnapshot(id, sections = "") {
       incoming.characters.forEach((ch, i) => { if (!state.prompt.characters[i]) state.prompt.characters[i] = { name: ch.name, prompt_sections: emptySections(), uc_sections: emptySections() }; state.prompt.characters[i].prompt_sections[id] = ch.prompt_sections[id]; state.prompt.characters[i].uc_sections[id] = ch.uc_sections[id]; });
     });
   }
-  // P0: 恢复后让 view adapter 镜像权威状态，保证后续生图视图不残留旧角色。
+  // 恢复后让 view adapter 镜像权威状态，保证后续生图视图不残留旧角色；UI 由 render 回流。
   syncNaiCharactersFromState();
-  commitPromptChange(); closeSnapshotModal(); await showView("browse"); toast("Prompt 已恢复");
+  commitPromptChange(); renderWorkbenchEditorFromDocument({ force: true }); closeSnapshotModal(); await showView("browse"); toast("Prompt 已恢复");
 }
 
 // ===== Prompt 导入 =====
@@ -2735,7 +2757,7 @@ bind("#prompt-history-btn", "click", openSnapshotModal);
 bind("#bundles-close", "click", closeBundlesModal); bind("#bundle-create", "click", () => createBundle());
 bind("#snapshot-close", "click", closeSnapshotModal); bind("#save-snapshot-btn", "click", () => saveSnapshot());
 bind("#save-bundle-btn", "click", () => openBundlesModal());
-bind("#send-generate-btn", "click", async () => { const text = promptPreviewText(); if (!text) { toast("当前 Prompt 为空"); return; } await showView("generate"); await naiFillFromCart(); });
+bind("#send-generate-btn", "click", async () => { const text = promptPreviewText(); if (!text) { toast("当前 Prompt 为空"); return; } await switchToGenerateView(); });
 // More 菜单（头部 More ▾ 与高级工作区 More… 共用同一个菜单）
 function toggleCartMore(force) {
   const menu = $("#cart-more-menu");
@@ -2754,8 +2776,7 @@ $("#ws-continue")?.addEventListener("click", async () => {
   workspaceFlushSync();
   const text = promptPreviewText();
   if (!text) { toast("当前 Prompt 为空"); return; }
-  await showView("generate");
-  await naiFillFromCart();
+  await switchToGenerateView();
 });
 $("#bundles-modal").addEventListener("click", (e) => { if (e.target.id === "bundles-modal") closeBundlesModal(); });
 $("#snapshot-modal").addEventListener("click", (e) => { if (e.target.id === "snapshot-modal") closeSnapshotModal(); });
@@ -3261,7 +3282,7 @@ async function showGalleryPreview(dirName, fileName) {
       setGenerationParent(it);
       await showView("generate");
       applyGenerationConfig(meta);
-      $("#nai-prompt").focus();
+      $("#nai-editor")?.focus();
     });
     $("#gallery-fav-btn").addEventListener("click", () => {
       toggleGalleryFav(dir, it.file_name, !it.favorite);
@@ -3280,7 +3301,7 @@ async function showGalleryPreview(dirName, fileName) {
       const meta = extractMetaFromGalleryItem(it);
       const text = meta.effectivePrompt || meta.rawPrompt || it.prompt || "";
       try { await navigator.clipboard.writeText(text); toast("Prompt 已复制"); }
-      catch { const restored = naiResolveRestoredPrompt(meta.rawPrompt, meta.rawNegative, meta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); updateNaiPromptMeta(); naiUpdateEffectivePreview(); commitPromptChange(); toast("已填入 Prompt 框"); }
+      catch { const restored = naiResolveRestoredPrompt(meta.rawPrompt, meta.rawNegative, meta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); toast("已填入 Prompt 框"); }
     });
     $("#gallery-recipe-img2img").addEventListener("click", async () => { await showView("generate"); await naiUseImageSource(imgPath, it.file_name || "图库图片"); toast("已设为图生图基础图"); });
     body.querySelectorAll("[data-restore-sections]").forEach((b) => b.addEventListener("click", () => {
@@ -3400,7 +3421,6 @@ let naiZoom = 1;               // 1 = Fit，其他为缩放倍数
 let naiApiBatchId = null;
 let naiApiConfigured = false;
 let naiSubscriptionTier = "unknown";
-let naiNegSplit = false;
 let naiGenerationMode = "txt2img";
 let naiImg2ImgSource = null;
 let naiCharacters = [];
@@ -3597,41 +3617,45 @@ function naiRenderCharacters() {
     return;
   }
   const index = activeNaiTarget;
-  const character = naiCharacters[index];
+  const character = state.prompt?.characters?.[index];
   if (!character) { list.innerHTML = `<div class="empty">暂无独立角色</div>`; return; }
   const manual = !!character.position;
-  list.innerHTML = `<article class="nai-character" data-character-index="${index}">
-    <div class="nai-character-head"><strong>角色 ${index + 1}</strong><div>
-      <button type="button" data-character-move="up" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
-      <button type="button" data-character-move="down" title="下移" ${index === naiCharacters.length - 1 ? "disabled" : ""}>↓</button>
-      <button type="button" data-character-remove title="移除角色">×</button>
-    </div></div>
-    <label><span>Prompt</span><textarea data-character-field="prompt" placeholder="角色独立提示词">${esc(character.prompt || "")}</textarea></label>
-    <label><span>UC</span><textarea data-character-field="negative_prompt" placeholder="角色独立负面提示词">${esc(character.negative_prompt || "")}</textarea></label>
-    <label class="nai-character-position"><input type="checkbox" data-character-manual ${manual ? "checked" : ""} /><span>手动位置</span></label>
-    <div class="nai-coordinate-row" ${manual ? "" : "hidden"}>
-      <label><span>X</span><input type="number" min="0" max="1" step="0.05" data-character-field="x" value="${character.position?.x ?? 0.5}" /></label>
-      <label><span>Y</span><input type="number" min="0" max="1" step="0.05" data-character-field="y" value="${character.position?.y ?? 0.5}" /></label>
+  // 角色设置：可折叠，仅 角色名 / Position / X·Y / 上移·下移 / 移除；绝不内嵌 textarea
+  // （该角色 Prompt / UC 一律在顶部单一 #nai-editor 编辑）。
+  list.innerHTML = `<details class="nai-character" data-character-index="${index}" open>
+    <summary class="nai-character-head">
+      <input type="text" class="nai-character-name" data-character-name value="${esc(character.name || `Character ${index + 1}`)}" placeholder="角色名" aria-label="角色名" />
+      <span class="nai-character-head-actions">
+        <button type="button" data-character-move="up" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" data-character-move="down" title="下移" ${index === naiCharacters.length - 1 ? "disabled" : ""}>↓</button>
+        <button type="button" data-character-remove title="移除角色">×</button>
+      </span>
+    </summary>
+    <div class="nai-character-body">
+      <label class="nai-character-position"><input type="checkbox" data-character-manual ${manual ? "checked" : ""} /><span>手动位置</span></label>
+      <div class="nai-coordinate-row" ${manual ? "" : "hidden"}>
+        <label><span>X</span><input type="number" min="0" max="1" step="0.05" data-character-field="x" value="${character.position?.x ?? 0.5}" /></label>
+        <label><span>Y</span><input type="number" min="0" max="1" step="0.05" data-character-field="y" value="${character.position?.y ?? 0.5}" /></label>
+      </div>
+      <p class="nai-character-hint">在顶部单一编辑器编辑该角色 Prompt / UC。</p>
     </div>
-  </article>`;
-  list.querySelectorAll('textarea[data-character-field="prompt"]').forEach((input) => {
-    bindNaiAutocomplete(input, `char:${index}`);
-    input.addEventListener("input", (event) => { if (!reconciliationBusy) window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target: `char:${index}`, text: event.target.value } }); });
-  });
-  list.querySelectorAll('textarea[data-character-field="negative_prompt"]').forEach((input) => {
-    bindNaiAutocomplete(input, `char:${index}:uc`);
-    input.addEventListener("input", (event) => { if (!reconciliationBusy) window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target: `char:${index}:uc`, text: event.target.value } }); });
-  });
+  </details>`;
 }
 
 function naiAddCharacter(character = {}) {
   window.PromptBridge.dispatch({ type: "ADD_CHARACTER", payload: character });
   activeNaiTarget = (state.prompt?.characters?.length || 1) - 1;
+  workbenchCharIndex = activeNaiTarget;
   window.PromptBridge.setActiveTarget(`char:${activeNaiTarget}`);
+  naiRenderCharacters();
+  renderWorkbenchEditorFromDocument({ force: true });
 }
 
 function naiCollectCharacters() {
-  return buildGenerationCharacters(state.prompt).filter((character) => character.prompt);
+  // NAI v4 multi-prompt shape：{ prompt, negative_prompt, position }，来自 PromptDocument 权威。
+  return promptDocument.buildGenerationPromptState(state.prompt).characters
+    .map((character) => ({ prompt: character.prompt, negative_prompt: character.uc, position: character.position ? { ...character.position } : null }))
+    .filter((character) => character.prompt);
 }
 
 function naiCollectParameters() {
@@ -3671,9 +3695,11 @@ function naiCompileGeneration(rawPrompt, rawNegative) {
 }
 
 function naiUpdateEffectivePreview() {
-  const rawPrompt = $("#nai-prompt").value;
-  const rawNeg = $("#nai-neg").value;
-  // P0: #nai-prompt 只存 Base，#nai-neg 只存 Global UC，直接编译，无结构化 display 解析门。
+  // 生成视图只读 PromptDocument 权威：Base/UC 一律来自 buildGenerationPromptState，
+  // 绝不读 #nai-prompt / #nai-neg textarea。
+  const generation = promptDocument.buildGenerationPromptState(state.prompt);
+  const rawPrompt = generation.basePrompt;
+  const rawNeg = generation.globalUc;
   const { result, params } = naiCompileGeneration(rawPrompt, rawNeg);
   const preset = NAI_RESOLUTION_PRESETS[params.resolution_category];
   const resolutionStr = preset ? `${preset.width}×${preset.height}` : `${params.width}×${params.height}`;
@@ -3751,7 +3777,9 @@ function naiRenderCost() {
 }
 
 function updateNaiPromptMeta() {
-  const text = $("#nai-prompt").value.trim();
+  const editor = $("#nai-editor");
+  if (!editor) return;
+  const text = editor.value.trim();
   const n = text ? text.split(",").filter((x) => x.trim()).length : 0;
   $("#nai-prompt-meta").textContent = `${n} tags · ${text.length} 字符`;
 }
@@ -3821,10 +3849,11 @@ async function loadNaiApiStatus() {
 function initGenerateView() {
   naiSetMode(naiGenerationMode);
   naiRenderImg2ImgSource();
-  // P0: 进入生图视图时让 naiCharacters 单向镜像 state.prompt.characters（权威状态），
+  // 进入生图视图时让 naiCharacters 单向镜像 state.prompt.characters（权威状态），
   // 避免直接导航进入时 view adapter 与购物车角色数不一致。
   syncNaiCharactersFromState();
   naiRenderCharacters();
+  renderWorkbenchEditorFromDocument({ force: true });
   naiUpdateRangeLabels();
   naiSyncResolutionFromInputs();
   naiRenderCost();
@@ -3856,13 +3885,14 @@ function naiUpdateTierHint() {
 }
 
 async function naiGenerate() {
-  const prompt = $("#nai-prompt").value;
-  const negativePrompt = $("#nai-neg").value;
+  // 生成只读 PromptDocument 权威：Base/UC/角色一律来自 buildGenerationPromptState，
+  // 绝不读 #nai-prompt / #nai-neg；编译与预览共用同一份输入，保证 Preview == payload。
+  const generation = promptDocument.buildGenerationPromptState(state.prompt);
+  const prompt = generation.basePrompt;
+  const negativePrompt = generation.globalUc;
   if (!prompt.trim()) { toast("提示词为空"); return; }
   if (!naiApiConfigured) { toast("未配置 NovelAI 官方 API Token，已阻止生成"); return; }
   const parameters = naiCollectParameters();
-  // P0: #nai-prompt 只存 Base，#nai-neg 只存 Global UC，payload 直接取当前权威槽位，
-  // 无结构化 display 相等判定门；角色一律来自 naiCollectCharacters()（活 naiCharacters）。
   const compiled = naiCompileGeneration(prompt.trim(), negativePrompt).result;
   const generationPrompt = compiled.effectivePositive;
   const generationNegative = compiled.effectiveNegative;
@@ -3890,9 +3920,9 @@ async function naiGenerate() {
   naiSetPhase("submitting");
   try {
     const meta = {
-      rawPrompt: $("#nai-prompt").value,
+      rawPrompt: prompt,
       effectivePrompt: generationPrompt,
-      rawNegative: $("#nai-neg").value,
+      rawNegative: negativePrompt,
       effectiveNegative: generationNegative,
       promptSources: {
         userPositive: compiled.userPositive,
@@ -4027,29 +4057,12 @@ function naiSSE() {
   es.onerror = () => { toast("与 NovelAI API 服务断开，生成进度可能延迟"); };
 }
 
-async function naiFillFromCart() {
-  try {
-    const r = await api("/api/export", { method: "POST", body: JSON.stringify(exportPayload()) });
-    const basePrompt = [r.base, r.free_text].filter((part) => part?.trim()).join(", ");
-    const characters = (r.characters || [])
-      .filter((character) => character.prompt?.trim())
-      .map((character) => ({
-        prompt: character.prompt,
-        negative_prompt: character.uc || "",
-        position: character.position || "auto",
-      }));
-    if (!basePrompt.trim() && !(r.global_uc || "").trim() && !characters.length) { toast("购物车为空"); return; }
-    naiGenerationParent = null; // 从购物车填入属全新生成，清掉可能残留的父级血缘
-    // P0 结构化边界：#nai-prompt 只写 Base（base + free_text），#nai-neg 只写 Global UC，
-    // 角色只写入 naiCharacters[]；绝不把 Base:/Character N:/Global UC: 混合串写进 Base。
-    $("#nai-prompt").value = basePrompt;
-    $("#nai-neg").value = r.global_uc || "";
-    naiCharacters = characters.map((character) => ({ ...character, position: character.position === "auto" ? null : character.position }));
-    naiRenderCharacters();
-    updateNaiPromptMeta();
-    naiUpdateEffectivePreview();
-    toast(characters.length ? `已填入 Prompt（${characters.length} 个角色）` : "已填入购物车提示词");
-  } catch (e) { toast("填入失败：" + e.message); }
+// [7] 从购物车「继续到生图」不再导出→复制→写 DOM：生成视图直接读 PromptDocument，
+// 这里只负责单向镜像角色 + 切换视图。
+function switchToGenerateView() {
+  endEditTransaction();
+  syncNaiCharactersFromState();
+  return showView("generate");
 }
 
 // ---- Output Viewer / History ----
@@ -4090,7 +4103,7 @@ function renderViewer() {
     const itemMeta = extractMetaFromGalleryItem(it);
     if (b.dataset.metaAction === "restore") { sendGalleryEvent(it, "restore"); setGenerationParent(it); applyGenerationConfig(itemMeta); }
     else if (b.dataset.metaAction === "seed" && itemMeta.seed != null) { $("#nai-seed").value = String(itemMeta.seed); $("#nai-seed-mode").value = "fixed"; toast(`Seed ${itemMeta.seed} 已填入`); }
-    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt, itemMeta.rawNegative, itemMeta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); updateNaiPromptMeta(); naiUpdateEffectivePreview(); commitPromptChange(); toast("已填入 Prompt 框"); }); }
+    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt, itemMeta.rawNegative, itemMeta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); toast("已填入 Prompt 框"); }); }
   }));
   $("#nai-pin").textContent = it.favorite ? "♥ Pin" : "♡ Pin";
   $("#nai-pin").classList.toggle("on", !!it.favorite);
@@ -4180,15 +4193,45 @@ function naiSyncRestoredPromptToState(basePrompt, globalUc, characters) {
   });
 }
 
-// P0 结构化边界：把恢复出的干净 Base / Global UC / 角色分发到生成表单并同步权威状态。
-// 供 naiRestoreItem 与剪贴板失败回退共用（唯一恢复入口，绝不整串写回 #nai-prompt）。
-// basePrompt / globalUc 为 null 时不覆盖对应输入框。
+// 结构化边界：把恢复出的干净 Base / Global UC / 角色分发到生成表单并同步权威状态。
+// 供 naiRestoreItem 与剪贴板失败回退共用（唯一恢复入口，绝不整串写回 #nai-editor）。
+// 统一委托 restorePromptDocumentFromGeneration（restore → PromptDocument → notify → UI）。
 function naiApplyRestoredPrompt(basePrompt, globalUc, characters) {
-  naiSyncRestoredPromptToState(basePrompt ?? "", globalUc ?? "", characters || []);
+  restorePromptDocumentFromGeneration({
+    basePrompt: basePrompt ?? undefined,
+    globalUc: globalUc ?? undefined,
+    characters: characters || [],
+  });
+}
+
+// 统一恢复入口：把恢复出的生成字段归一化进 PromptDocument（复用 reconcileTargetText，
+// 绝不写 DOM）。flow = restore → PromptDocument → notify → UI。
+// data: { basePrompt, globalUc, characters:[{name?,prompt,uc?,negative_prompt?,position}], freeText?, freeTextEn?, useFreeTextEn? }
+function restorePromptDocumentFromGeneration(data = {}) {
+  if (!promptDocument || !state.prompt) return;
+  const src = data && typeof data === "object" ? data : {};
+  const characters = (Array.isArray(src.characters) ? src.characters : []).map((character) => ({
+    prompt: String(character?.prompt || ""),
+    negative_prompt: String(character?.uc ?? character?.negative_prompt ?? ""),
+    position: character?.position ? { x: Number(character.position.x), y: Number(character.position.y) } : null,
+    name: character?.name || null,
+  }));
+  naiSyncRestoredPromptToState(
+    src.basePrompt != null ? String(src.basePrompt) : "",
+    src.globalUc != null ? String(src.globalUc) : "",
+    characters,
+  );
+  // free text：可选；缺省清空（legacy basePrompt 已把 Free text 行并入 Base）。
+  state.prompt.free_text = src.freeText != null ? String(src.freeText) : "";
+  state.prompt.free_text_en = src.freeTextEn != null ? String(src.freeTextEn) : "";
+  state.prompt.use_free_text_en = !!src.useFreeTextEn;
+  characters.forEach((character, index) => {
+    if (character.name && state.prompt.characters[index]) state.prompt = promptDocument.renameCharacter(state.prompt, index, character.name);
+  });
   syncNaiCharactersFromState();
-  if (basePrompt != null) $("#nai-prompt").value = basePrompt;
-  if (globalUc != null) $("#nai-neg").value = globalUc;
-  naiRenderCharacters();
+  rebuildTargetSelect();
+  commitPromptChange({ refresh: true });
+  renderWorkbenchEditorFromDocument({ force: true });
 }
 
 // 只有明确点击恢复按钮时才写入编辑表单；点击历史缩略图只切换预览。
@@ -4238,8 +4281,6 @@ async function naiRestoreItem(it) {
   updateNaiPromptMeta();
   naiUpdateEffectivePreview();
   naiRenderCost();
-  // P0：恢复完成后统一 commit，持久化 / 刷新购物车 / notify，避免权威状态与生图视图分叉。
-  commitPromptChange();
   toast("已恢复此图的完整生成设置");
 }
 
@@ -4260,12 +4301,14 @@ function applyGenerationConfig(cfg) {
   // 2) 否则视为新版保存的干净 Base + Global UC + characterPrompts。
   // 3) 纯 flat 单角色 rawPrompt 仍按普通文本支持。
   const savedCharacters = Array.isArray(cfg.characterPrompts) ? cfg.characterPrompts : [];
-  // P0 结构化边界：与 naiRestoreItem 共用 naiResolveRestoredPrompt 拆分，
-  // 绝不把 Base:/Character N:/Global UC: 混合串整段写回 #nai-prompt。
+  // 结构化边界：与 naiRestoreItem 共用 naiResolveRestoredPrompt 拆分，绝不把
+  // Base:/Character N:/Global UC: 混合串整段写回编辑器；统一走 restorePromptDocumentFromGeneration。
   const restored = naiResolveRestoredPrompt(cfg.rawPrompt, cfg.rawNegative, savedCharacters);
-  if (restored.basePrompt != null) $("#nai-prompt").value = restored.basePrompt;
-  if (restored.globalUc != null) $("#nai-neg").value = restored.globalUc;
-  const restoredCharacters = restored.characters;
+  restorePromptDocumentFromGeneration({
+    basePrompt: restored.basePrompt ?? undefined,
+    globalUc: restored.globalUc ?? undefined,
+    characters: (restored.characters || []).map((character) => ({ prompt: character.prompt, uc: character.negative_prompt, position: character.position })),
+  });
   // Model
   naiSetSelectValue("#nai-model", cfg.model, "nai-diffusion-5-full");
   // Resolution
@@ -4307,15 +4350,10 @@ function applyGenerationConfig(cfg) {
   }
   // Mode
   if (cfg.mode) naiSetMode(cfg.mode);
-  // Characters（view adapter 由上面的结构化拆解 / characterPrompts 恢复结果统一赋值）
-  if (restoredCharacters) {
-    naiCharacters = restoredCharacters;
-    naiRenderCharacters();
-    if (naiCharacters.length > 0) {
-      activeNaiTarget = 0;
-      naiRenderCharacters();
-    }
-  }
+  // Characters 已由 restorePromptDocumentFromGeneration 写入 PromptDocument 权威，
+  // 这里仅同步 view adapter 并刷新角色列表（不含 textarea）。
+  syncNaiCharactersFromState();
+  naiRenderCharacters();
   // Refresh UI
   updateAdvSummary(naiCollectParameters());
   updateNaiPromptMeta();
@@ -4409,26 +4447,32 @@ $("#nai-character-add").addEventListener("click", (e) => {
 $("#nai-character-tabs")?.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-nai-char-tab]");
   if (!btn) return;
+  endEditTransaction(); // 目标切换结束上一次编辑会话
   activeNaiTarget = btn.dataset.naiCharTab === "base" ? "base" : Number(btn.dataset.naiCharTab);
+  workbenchCharIndex = activeNaiTarget === "base" ? null : activeNaiTarget;
   window.PromptBridge.setActiveTarget(activeNaiTarget === "base" ? "base" : `char:${activeNaiTarget}`);
   naiRenderCharacters();
+  renderWorkbenchEditorFromDocument({ force: true });
 });
 $("#nai-character-list").addEventListener("input", (event) => {
   const article = event.target.closest("[data-character-index]");
-  const field = event.target.dataset.characterField;
-  if (!article || !field) return;
-  const character = naiCharacters[Number(article.dataset.characterIndex)];
-  if (["x", "y"].includes(field)) {
-    const index = Number(article.dataset.characterIndex);
-    const position = { ...(state.prompt.characters[index].position || { x: 0.5, y: 0.5 }) };
-    position[field] = Math.max(0, Math.min(1, Number(event.target.value)));
-    window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index, position } });
+  if (!article) return;
+  const index = Number(article.dataset.characterIndex);
+  if (event.target.matches("[data-character-name]")) {
+    window.PromptBridge.dispatch({ type: "RENAME_CHARACTER", payload: { index, name: event.target.value } });
+    return;
   }
+  const field = event.target.dataset.characterField;
+  if (!field || !["x", "y"].includes(field)) return;
+  const position = { ...(state.prompt.characters[index].position || { x: 0.5, y: 0.5 }) };
+  position[field] = Math.max(0, Math.min(1, Number(event.target.value)));
+  window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index, position } });
 });
 $("#nai-character-list").addEventListener("change", (event) => {
-  if (!event.target.matches("[data-character-manual]")) return;
-  const article = event.target.closest("[data-character-index]");
-  window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index: Number(article.dataset.characterIndex), position: event.target.checked ? { x: 0.5, y: 0.5 } : null } });
+  if (event.target.matches("[data-character-manual]")) {
+    const article = event.target.closest("[data-character-index]");
+    window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index: Number(article.dataset.characterIndex), position: event.target.checked ? { x: 0.5, y: 0.5 } : null } });
+  }
 });
 $("#nai-character-list").addEventListener("click", (event) => {
   const article = event.target.closest("[data-character-index]");
@@ -4443,12 +4487,22 @@ $("#nai-character-list").addEventListener("click", (event) => {
   } else return;
   naiRenderCharacters();
 });
-$("#nai-fill-cart").addEventListener("click", naiFillFromCart);
 $("#nai-seed-random").addEventListener("click", () => { $("#nai-seed").value = Math.floor(Math.random() * 2147483647); });
-bindNaiAutocomplete($("#nai-prompt"), "base", { generateOnDoubleEnter: true });
-bindNaiAutocomplete($("#nai-neg"), "global_uc");
-$("#nai-prompt").addEventListener("input", (event) => { updateNaiPromptMeta(); if (!reconciliationBusy) window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target: "base", text: generationTargetText("base") } }); });
-$("#nai-neg").addEventListener("input", (event) => { updateNaiPromptMeta(); if (!reconciliationBusy) window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target: "global_uc", text: event.target.value } }); });
+// 单一编辑器：只有 #nai-editor 写 PromptDocument，目标随 workbench 视图动态解析。
+const naiEditor = $("#nai-editor");
+bindNaiAutocomplete(naiEditor, "base", { generateOnDoubleEnter: true });
+naiEditor.addEventListener("focus", beginEditTransaction);
+naiEditor.addEventListener("input", (event) => {
+  updateNaiPromptMeta();
+  const target = resolveWorkbenchEditorTarget(currentWorkbenchView());
+  if (target) window.PromptBridge.dispatch({ type: "RECONCILE_TEXT", payload: { target, text: event.target.value, transaction: true } });
+  naiUpdateEffectivePreview();
+});
+naiEditor.addEventListener("blur", endEditTransaction);
+// 自然语言补充：仅 Base Text 显示；写 state.prompt 权威字段。
+$("#nai-free-text")?.addEventListener("input", (event) => { state.prompt.free_text = event.target.value; state.prompt.use_free_text_en = false; commitPromptChange({ render: false }); naiUpdateEffectivePreview(); });
+$("#nai-free-text-en")?.addEventListener("input", (event) => { state.prompt.free_text_en = event.target.value; commitPromptChange({ render: false }); naiUpdateEffectivePreview(); });
+$("#nai-free-text-use-en")?.addEventListener("change", (event) => { state.prompt.use_free_text_en = event.target.checked && !!state.prompt.free_text_en.trim(); commitPromptChange({ render: false }); naiUpdateEffectivePreview(); });
 $("#nai-resolution-category").addEventListener("change", () => { naiApplyResolutionPreset(); updateAdvSummary(naiCollectParameters()); naiRenderCost(); });
 $("#nai-width").addEventListener("change", () => { naiSyncResolutionFromInputs(); naiRenderCost(); });
 $("#nai-height").addEventListener("change", () => { naiSyncResolutionFromInputs(); naiRenderCost(); });
@@ -4460,24 +4514,13 @@ $("#nai-zoom-fit").addEventListener("click", () => { naiZoom = 1; applyZoom(); }
 $("#nai-pin").addEventListener("click", naiPin);
 $("#nai-reuse").addEventListener("click", naiReuse);
 $("#nai-use-img2img").addEventListener("click", naiUseCurrentAsImg2Img);
+// Prompt / UC 标签：切换 workbench pane 并回流单一编辑器。
 document.querySelectorAll(".nai-tab").forEach((t) => t.addEventListener("click", () => {
   document.querySelectorAll(".nai-tab").forEach((x) => x.classList.toggle("active", x === t));
-  $("#nai-prompt").style.display = t.dataset.tab === "prompt" ? "" : "none";
-  $("#nai-neg").style.display = t.dataset.tab === "undesired" ? "" : "none";
+  endEditTransaction();
+  workbenchPane = t.dataset.tab === "uc" ? "uc" : "prompt";
+  renderWorkbenchEditorFromDocument({ force: true });
 }));
-$("#nai-split-neg").addEventListener("click", () => {
-  naiNegSplit = !naiNegSplit;
-  if (naiNegSplit) {
-    $("#nai-prompt").style.display = "";
-    $("#nai-neg").style.display = "";
-    document.querySelectorAll(".nai-tab").forEach((x) => x.classList.remove("active"));
-    toast("负面提示词已并排显示（再点恢复 Tab）");
-  } else {
-    $("#nai-prompt").style.display = "";
-    $("#nai-neg").style.display = "none";
-    document.querySelectorAll(".nai-tab").forEach((x) => x.classList.toggle("active", x.dataset.tab === "prompt"));
-  }
-});
 $("#nai-history-refresh").addEventListener("click", loadNaiGallery);
 
 // ---- P0: 档位选择器（正面 / 负面）/ Transparent / Effective Preview ----
@@ -4494,8 +4537,6 @@ $("#nai-negative-tier").addEventListener("change", () => {
   naiUpdateEffectivePreview();
 });
 $("#nai-transparent").addEventListener("change", () => { naiTransparentBg = $("#nai-transparent").checked; naiUpdateEffectivePreview(); });
-$("#nai-prompt").addEventListener("input", naiUpdateEffectivePreview);
-$("#nai-neg").addEventListener("input", naiUpdateEffectivePreview);
 $("#nai-model").addEventListener("change", () => { naiUpdateTierHint(); naiUpdateEffectivePreview(); });
 $("#nai-sampler").addEventListener("change", naiUpdateEffectivePreview);
 if ($("#nai-scheduler")) $("#nai-scheduler").addEventListener("change", naiUpdateEffectivePreview);

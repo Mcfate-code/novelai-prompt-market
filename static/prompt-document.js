@@ -280,4 +280,29 @@ function applyExclusiveGroup(document, payload = {}) {
   return doc;
 }
 
-export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
+// 生成视图的 Effective Free Text：勾选英文译文且译文非空时用译文，否则用中文原文。
+function effectiveFreeText(document) {
+  const doc = normalize(document);
+  return doc.use_free_text_en && (doc.free_text_en || "").trim() ? doc.free_text_en : doc.free_text;
+}
+
+// 生成 Prompt 的唯一权威编译入口（纯函数，无 DOM / 无应用状态）。
+// 返回 { basePrompt, globalUc, characters }：
+//   - basePrompt = [serializeTarget(base), effectiveFreeText].filter(Boolean).join(", ")
+//   - globalUc   = serializeTarget(global_uc)
+//   - characters = characters.map({ name, prompt: char:i, uc: char:i:uc, position })
+// 与 static/app.js 的 naiGenerate / naiUpdateEffectivePreview 共用，保证 Preview == payload。
+function buildGenerationPromptState(document) {
+  const doc = normalize(document);
+  const basePrompt = [serializeTarget(doc, "base"), effectiveFreeText(doc)].filter((part) => part && String(part).trim()).join(", ");
+  const globalUc = serializeTarget(doc, "global_uc");
+  const characters = doc.characters.map((character, index) => ({
+    name: character.name,
+    prompt: serializeTarget(doc, `char:${index}`),
+    uc: serializeTarget(doc, `char:${index}:uc`),
+    position: character.position ? { ...character.position } : null,
+  }));
+  return { basePrompt, globalUc, characters };
+}
+
+export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup, effectiveFreeText, buildGenerationPromptState };
