@@ -12,6 +12,11 @@
   --danger: #b84444;
   --chip: #eef1f2;
   --shadow: 0 1px 2px rgba(29, 37, 43, 0.06), 0 8px 24px rgba(29, 37, 43, 0.04);
+  /* nai 主题变量：稳定公共 scope（prompt 编辑器 / autocomplete 覆盖层共用）。
+     #nai-autocomplete 是 body 级 fixed 覆盖层（不在 .nai-layout 内），变量必须定义在
+     :root 才能级联到它；否则 var(--nai-card) 计算失败 -> 弹窗背景透明。 */
+  --nai-bg: #f4f6f7; --nai-card: #ffffff; --nai-border: #dfe4e8; --nai-sub: #f1f3f4;
+  --nai-text: #1d252b; --nai-muted: #6c777d; --nai-accent: #b6533d; --nai-accent-hover: #8f3d2e;
 }
 
 * { box-sizing: border-box; }
@@ -218,11 +223,13 @@ button.primary:hover { background: var(--accent-ink); border-color: var(--accent
 .layout.cart-advanced-layout > .cart { grid-area: cart; }
 .layout.cart-advanced-layout > .browse { grid-area: browse; }
 .layout.cart-advanced-layout .tag-thumb-wrap { display: none; }
-.nai-autocomplete { position: fixed; z-index: 55; max-width: min(520px, calc(100vw - 24px)); min-width: 220px; border: 1px solid var(--nai-border); border-radius: 6px; background: var(--nai-card); box-shadow: 0 8px 24px rgba(20, 28, 38, .18); overflow: hidden; }
+.nai-autocomplete { position: fixed; z-index: 55; max-width: min(520px, calc(100vw - 24px)); min-width: 220px; border: 1px solid var(--nai-border); border-radius: 6px; background: var(--nai-card); color: var(--nai-text); box-shadow: 0 8px 24px rgba(20, 28, 38, .18); overflow: hidden; }
 .nai-autocomplete[hidden] { display: none; }
 .nai-autocomplete [role="option"] { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; cursor: pointer; font-size: 12px; }
 .nai-autocomplete [role="option"][aria-selected="true"], .nai-autocomplete [role="option"]:hover { background: var(--accent-soft); }
 .nai-autocomplete small { color: var(--nai-muted); }
+/* Phase 2 键盘契约 hint（由 Integrator 通过 NaiInputKeys.buildHintHtml() 挂载，如弹窗底部） */
+.nai-ac-hint { padding: 5px 10px; border-top: 1px solid var(--nai-border); background: var(--nai-sub); color: var(--nai-muted); font-size: 11px; text-align: right; }
 @media (min-width: 760px) and (max-width: 1099px) { .layout.cart-advanced-layout { grid-template-columns: minmax(150px, .65fr) minmax(360px, 1.8fr) minmax(180px, .7fr); } }
 @media (max-width: 759px) { .layout.cart-advanced-layout { display: flex; flex-direction: column; } .layout.cart-advanced-layout > .cart { order: 1; } .layout.cart-advanced-layout > .browse { order: 2; } .layout.cart-advanced-layout > .categories { order: 3; max-height: 200px; } }
 .fav-toggle {
@@ -632,14 +639,13 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
 .ghost:hover { background: var(--accent-soft); color: var(--text); }
 
 
-/* ===== 生图视图（三栏工作台，对齐 NovelAI V5 信息架构） ===== */
+/* ===== 生图视图（三栏工作台：Prompt Editor / Image Viewer / Generation Settings，对齐 NovelAI V5 信息架构） ===== */
 .nai-layout {
-  --nai-bg: #f4f6f7; --nai-card: #ffffff; --nai-border: #dfe4e8; --nai-sub: #f1f3f4;
-  --nai-text: #1d252b; --nai-muted: #6c777d; --nai-accent: #b6533d; --nai-accent-hover: #8f3d2e;
+  /* nai 主题变量已提升至 :root 公共 scope（见文件顶部），此处直接继承，避免双份定义漂移 */
   display: grid;
   flex: 1 1 auto;
   min-height: 0;
-  grid-template-columns: minmax(340px, 380px) minmax(460px, 1fr) minmax(220px, 280px);
+  grid-template-columns: minmax(300px, 350px) minmax(420px, 1fr) minmax(300px, 340px);
   grid-template-rows: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
@@ -648,7 +654,34 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
   overflow: hidden;
 }
 .nai-left, .nai-center, .nai-right { border: 1px solid var(--nai-border); border-radius: 12px; background: var(--nai-card); padding: 16px; min-height: 0; }
-.nai-left { overflow-y: auto; overscroll-behavior: contain; }
+.nai-left, .nai-right { overflow-y: auto; overscroll-behavior: contain; }
+/* 面板标题条：小字大写 kicker，建立清晰层级 */
+.nai-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -16px -16px 12px;
+  padding: 9px 16px 8px;
+  border-bottom: 1px solid var(--nai-border);
+  background: linear-gradient(180deg, #fbfcfd, var(--nai-card));
+}
+.nai-panel-kicker { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--nai-muted); }
+.nai-prompt-mode { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--nai-border); border-radius: 7px; background: var(--nai-sub); }
+.nai-prompt-mode button { border: 0; border-radius: 5px; background: transparent; color: var(--nai-muted); padding: 3px 10px; font-size: 11px; cursor: pointer; }
+.nai-prompt-mode button.active { background: var(--nai-card); color: var(--nai-accent); box-shadow: 0 1px 2px rgba(32, 36, 44, .12); font-weight: 600; }
+/* 后续组件挂载点（Tag Assistant / Visual Builder）：占位不可见，不承载 JS */
+#tag-assistant-root, #visual-prompt-root { min-height: 0; }
+.nai-settings-body { display: flex; flex-direction: column; }
+/* History：右侧可折叠（纯 CSS 开关） */
+.nai-history-box { margin-top: 14px; border-top: 1px solid var(--nai-border); padding-top: 12px; }
+.nai-history-check { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.nai-history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.nai-history-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--nai-muted); text-transform: uppercase; letter-spacing: .04em; cursor: pointer; user-select: none; }
+.nai-history-toggle:hover { color: var(--nai-text); }
+.nai-history-caret { display: inline-block; transition: transform .15s ease; }
+.nai-history-check:not(:checked) ~ .nai-history-head .nai-history-caret { transform: rotate(-90deg); }
+.nai-history-check:not(:checked) ~ #nai-history { display: none; }
 .nai-section-title { font-size: 12px; font-weight: 500; color: var(--nai-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
 .nai-label { display: block; font-size: 12px; color: var(--nai-muted); margin: 12px 0 6px; }
 .nai-select, .nai-seed-input, .nai-resolution-row input, .nai-adv-ctrl select { width: 100%; border: 1px solid var(--nai-border); border-radius: 8px; padding: 8px 10px; font: inherit; background: var(--nai-card); color: var(--nai-text); }
@@ -752,7 +785,7 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
 .nai-viewer { flex: 1; display: flex; align-items: center; justify-content: center; background: var(--nai-sub); border-radius: 8px; overflow: hidden; position: relative; min-height: 420px; }
 .nai-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform .1s; cursor: zoom-in; }
 .nai-viewer-footer { margin-top: 10px; font-size: 12px; color: var(--nai-muted); word-break: break-all; min-height: 16px; }
-.nai-history { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; max-height: calc(100vh - 200px); overflow-y: auto; }
+.nai-history { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; max-height: min(300px, 38vh); overflow-y: auto; }
 .nai-history .nh-group { grid-column: 1 / -1; font-size: 12px; color: var(--nai-muted); margin-top: 6px; }
 .nai-history img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; border: 1px solid var(--nai-border); cursor: pointer; }
 .nai-history img.current { outline: 2px solid var(--nai-accent); }
@@ -848,6 +881,7 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
 
 /* ---- Quick Toggles (Quality Tags / Heavy UC / Transparent) ---- */
 .nai-quick-toggles { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.nai-right .nai-quick-toggles { margin-top: 0; }
 .nai-toggle-item { display: flex; align-items: center; gap: 5px; padding: 5px 9px; border: 1px solid var(--nai-border); border-radius: 7px; background: var(--nai-card); font-size: 12px; color: var(--nai-text); cursor: pointer; transition: border-color .15s, background .15s; }
 .nai-toggle-item:has(input:checked) { border-color: var(--nai-accent); background: var(--accent-soft, #f8e9e4); }
 .nai-toggle-item input { accent-color: var(--nai-accent); margin: 0; }
@@ -989,10 +1023,14 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
 .gallery-review.toolbars-hidden { cursor: none; }
 
 @media (max-width: 1180px) {
-  .nai-layout { grid-template-columns: minmax(320px, 360px) minmax(0, 1fr); grid-template-rows: auto auto; align-items: start; overflow-y: auto; }
-  .nai-left { overflow: visible; }
-  .nai-right { grid-column: 1 / -1; }
-  .nai-history { grid-template-columns: repeat(auto-fill, minmax(88px, 120px)); max-height: 260px; }
+  .nai-layout { flex: 0 0 auto; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); grid-template-rows: auto auto; align-items: start; overflow-y: auto; }
+  .nai-left, .nai-right { overflow: visible; }
+  .nai-right { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(300px, 340px) minmax(0, 1fr); grid-template-rows: auto auto; gap: 0 16px; align-items: start; }
+  .nai-right .nai-panel-head { grid-column: 1 / -1; margin-bottom: 10px; }
+  .nai-right .nai-settings-body { grid-column: 1; grid-row: 2; }
+  .nai-right .nai-bottom { grid-column: 1; grid-row: 3; position: static; margin: 14px 0 0; background: var(--nai-card); border: 1px solid var(--nai-border); border-radius: 8px; }
+  .nai-right .nai-history-box { grid-column: 2; grid-row: 2 / span 2; margin-top: 0; border-top: 0; padding-top: 0; }
+  .nai-history { grid-template-columns: repeat(auto-fill, minmax(88px, 120px)); max-height: none; }
 }
 
 @media (max-width: 1050px) {
@@ -1032,8 +1070,15 @@ body.review-active .gallery-layout > .gallery-preview { display: none; }
   .prompt-preview-bar { position: sticky; bottom: 0; z-index: 20; }
   .gallery-layout, .nai-layout { flex: none; flex-direction: column; height: auto; min-height: 100vh; padding: 6px; overflow: visible; }
   .gallery-layout[style*="display: grid"], .nai-layout[style*="display: grid"] { display: flex !important; }
+  /* 单列堆叠：Prompt → Generation Settings / History → Viewer */
+  .nai-layout > .nai-left { order: 1; }
+  .nai-layout > .nai-right { order: 2; }
+  .nai-layout > .nai-center { order: 3; }
   .nai-left, .nai-center, .nai-right { width: 100%; padding: 12px; }
   .nai-left { overflow: visible; }
+  .nai-right { display: flex; flex-direction: column; overflow: visible; }
+  .nai-panel-head { margin: -12px -12px 10px; padding: 8px 12px; }
+  .nai-history-box { margin-top: 14px; border-top: 1px solid var(--nai-border); padding-top: 12px; }
   .nai-center { min-height: 60vh; }
   .nai-viewer-toolbar { align-items: flex-start; gap: 8px; }
   .nai-viewer-actions { flex-wrap: wrap; justify-content: flex-end; }

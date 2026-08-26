@@ -43,11 +43,246 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 - **TagBundle**：只保存 Tag、分区、权重与顺序的复用组合（如角色外观、画风、构图）。
 - **Preset**：保存生图参数与工作台设置。二者职责分离。
 
+#### PromptDocument 数据契约（schema_version=2）
+
+前端纯数据层位于 `static/prompt-document.js`，是 Prompt 的统一契约；`state.prompt` 保持唯一权威状态，旧的 `base` / `characters` / `global_uc` 数组仅作为兼容投影。文档包含 `sections`、`characters[].prompt_sections/uc_sections`、`global_uc_sections`、自由文本字段与 `assistant_context`（推荐 / Scene Builder 的兼容 metadata，`participant_count / primary_scene_type / stage / position / body_focus / additional_activities / clothing_state:char:N`，随 snapshot/restore/gallery continue generate 保留，**绝不编译进 Prompt**）；条目统一保存 `id`、`tag`、`weight`、`section`、来源与 Bundle 元数据。支持的目标为 `base`、`global_uc`、`char:N`、`char:N:uc`。`normalize()` 同时接受现有 snapshot 的旧数组形态和 schema v2，`serializeTarget()` / `parseTargetText()` 保留 NovelAI `weight::tag::` 权重语法及括号标签。
+
 ### 推荐与冲突提示
 
-- 本地共现（`tag_cooccurrence`）、个人使用频率（`recent_tags.use_count`）提供轻量推荐。
-- 冲突规则（`tag_conflict`，如长发/短发、睁眼/闭眼）给出提示。
-- 推荐与冲突只用于提示，**不自动改写 Prompt**。
+- 推荐由 Recommendation V2 多源确定性引擎提供：全局关联（远程可注入，失败回退本地）/ 本地共现（`tag_cooccurrence`）/ 个人最近使用（`recent_tags.use_count`）/ 语义节点 seed / 成人场景上下文（`mode=adult`）。
+- 冲突规则（`tag_conflict`，如长发/短发、睁眼/闭眼）给出提示；严格互斥组（`SET_EXCLUSIVE_GROUP`）原子处理，普通冲突仍 warning-only。
+- 推荐与冲突只用于提示，**不自动改写 Prompt**（点击 `+` 才 ADD_TAG）。
+
+#### Recommendation Engine V2（纯 Python service）
+
+`prompt/recommendation.py` 提供不依赖 FastAPI、LLM、embedding 或向量数据库的只读 `RecommendationService`。Integrator 可传入 `conn` 和可注入 source adapter，调用：
+
+```python
+from prompt.recommendation import RecommendationService
+
+result = RecommendationService(conn, hidden_tags=hidden, adolescent_mode=True).recommend(
+    tags=positive_tags, target="base", node_id="env_indoor", limit=20,
+    mode="general", active_target="base", active_section="scene",
+)
+```
+
+输入还支持 `participant_count / primary_scene_type / stage / position / body_focus / semantic_node / last_added_tag`；返回 `groups` 与扁平 `recommendations`，每项含 `tag / canonical / zh / group / reason / sources`。候选源分别为全局关联、本地共现、个人最近使用、语义上下文和成人场景上下文；各源独立排序后用固定 `RRF_K=60` 融合，再做上下文重排和分组多样性。远程 related adapter（`prompt/related_client.py`）超时或异常时返回空源，由本地源继续工作。
+
+硬过滤发生在融合前：已选标签、青少年隐藏/NSFW、成人未成年或幼态候选、人数、target/section/node 不兼容及 exclusive/conflict 均不出现在结果中；`post_count` 只作弱 tie-break。成人模式支持 `PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，并保留当前阶段/下一阶段分组。V2 service 只读，不修改 `PromptDocument` 或学习表；snapshot/generation 学习链路仍只记录一次 positive Base/Character，Global UC / Character UC 不作为 positive 样本。
+
+### Tag Assistant（独立前端组件）
+
+`static/tag-assistant.js` + `static/tag-assistant.css` 提供挂载到 `#tag-assistant-root` 的原生 JS 组件（无框架 / 零依赖），由 Workbench V3 通过 `PromptBridge` 接入：
+
+- **四入口**：推荐（默认）/ 目录 / 搜索 / 收藏。
+- **推荐**：按当前 Prompt 的 positive 标签、active target、语义节点调 `POST /api/recommendations`；结果按语义分区分组显示（紧凑 Tag card：英文 tag、中文名、热度、reason/source、`+`，非图片墙）；已选标签自动去重。
+- **目录**：显示创作意图骨架（`GET /api/catalog/semantic`，Base/Character 概念树，最多两级），点击节点（如 Indoor → `bedroom`）只显示该节点的推荐标签，**不展开全量标签树**；无推荐结果时回退展示节点 `seed_tags`（词库真实标签）。
+- **搜索**：复用 `GET /api/search`（英文 / 中文 / 拼音 / 别名由后端支持），输入防抖 250ms，Enter 立即搜索，Esc 清空。
+- **收藏**：复用 `GET /api/favorites`，进入即刷新。
+- **PromptBridge 消费**：只读 `getDocument()` / `getActiveTarget()`，`subscribe()` 变化 400ms 防抖合并刷新推荐（不随每次按键请求）；点击 `+` 只 dispatch `ADD_TAG`，**不维护第二份 Prompt 权威状态**（组件只缓存视图数据，文档每次按需读取）。
+- **健壮性**：无 PromptBridge / 后端不可用时显示空态或错误态（带重试），不崩溃；事件委托（root 单监听器）、tab 方向键、原生按钮焦点、aria labels。
+- 挂载方式与 PromptBridge 契约见下方「Tag Assistant 集成契约」。
+
+#### Tag Assistant 集成契约
+
+```js
+import { createTagAssistant } from "/static/tag-assistant.js";
+const assistant = createTagAssistant({
+  root: document.getElementById("tag-assistant-root"),
+  bridge: window.PromptBridge,   // 缺省自动回退 window.PromptBridge
+  apiBase: "",                   // 后端前缀（默认同源）
+  limit: 20,                     // 推荐 / 搜索条数
+  debounceMs: 400,               // Prompt 变化 -> 推荐刷新防抖
+  nodeId: "",                    // 初始语义节点（可选）
+});
+assistant.mount();               // 卸载：assistant.destroy()
+```
+
+PromptBridge 由集成方提供，需实现：
+
+| 方法 | 说明 |
+| --- | --- |
+| `getDocument()` | 返回 PromptDocument（schema v2，见 `static/prompt-document.js`） |
+| `getActiveTarget()` | 返回 `base` / `global_uc` / `char:N` / `char:N:uc` |
+| `subscribe(listener)` | Prompt 变化时调用 listener；返回 unsubscribe |
+| `dispatch(action)` | 消费组件发出的 action |
+
+组件只发出一种 action：`{ type: "ADD_TAG", payload: { tag, target, section?, weight? } }`（`target` 为当前 active target）。`REMOVE_TAG / SET_WEIGHT / MOVE_SECTION` 由集成方定义，组件不直接使用。组件导出纯函数（`positiveTagsFromDocument` / `buildRecommendPayload` / `filterSelected` / `groupRecommendations` / `flattenSemanticTree` / `toCard` / `buildAddTagAction` 等）供测试与集成方复用。
+
+### Visual Prompt Builder（独立前端组件）
+
+`static/visual-builder.js` + `static/visual-builder.css` 提供挂载到 `#visual-prompt-root` 的原生 JS 组件（无框架 / 零依赖），由 Workbench V3 接入，用**语义卡片 + chip 编辑**方式编辑 Prompt（不做无限画布 / 无连线）：
+
+- **一级工作区**：Base / Character 1..N / 「+」添加角色；Base 与 Character 内容互不串用（每个工作区只渲染自己目标的 chip；新增标签一律按 `ADD_TAG` 写入当前 active target，与 Text 编辑保持同一目标）。
+- **语义卡片**：来自 `GET /api/catalog/semantic` 的 Base/Character 概念骨架（不硬编码数千 taxonomy）——Base 卡片 Style / Composition / Environment / Lighting / Time-Weather / Objects / Quality（Quality 为组件内置最小兜底节点：当后端 base 树无 `section=quality` 节点时注入，seed_tags 仅 4 个核心质量词）；Character 卡片 Identity / Appearance（Body Skin Hair Face Eyes）/ Clothing / Expression / Pose / Action-Interaction。点击卡片下钻 `?node_id=` 刷新推荐 / seed tags（青少年模式由后端裁剪 nsfw 节点，组件原样渲染不绕过），点「＋ 标签」ADD_TAG 到当前 active target（携带卡片对应分区）。
+- **chip 编辑**：已选标签按固定 10 分区成组显示为 chip；每个 chip 支持删除（`REMOVE_TAG`）、权重显示与 `−`/`＋` 步进调权（`SET_WEIGHT`，±0.05 夹底 0.1）、分区移动（`MOVE_SECTION` 下拉）；`weight=1` 简洁显示 tag，非 1 显示如 `blue eyes · 1.3`。
+- **Character UC / Global UC**：折叠面板（`<details>`）且底色 / 边框明显区分，与正片互不混淆。
+- **角色管理**：工作区头部的角色名输入（change 时 `RENAME_CHARACTER`）与「移除角色」按钮（`REMOVE_CHARACTER`，仅剩 1 个角色时禁用），tab 栏「+」添加角色（`ADD_CHARACTER`）。
+- **Text/Visual 一致性**：所有编辑动作只 `dispatch`，组件通过 `PromptBridge.subscribe()` 收到变化后从 `getDocument()` **按需重读**并刷新——**不维护第二份 Prompt 权威状态**（只缓存视图数据：语义卡片树 / 选中节点 / 工作区选择 / UC 折叠态），与 Tag Assistant 同一契约精神。
+- **健壮性 / 无障碍**：无 PromptBridge / 无文档 / 接口错误均有可见空态或错误态（带重试）；事件委托（root 单监听器）、工作区 tab 方向键、原生按钮 / select / details、aria-labels / aria-selected / aria-expanded。
+
+#### Visual Prompt Builder 集成契约
+
+```js
+import { createVisualBuilder } from "/static/visual-builder.js";
+const builder = createVisualBuilder({
+  root: document.getElementById("visual-prompt-root"),
+  bridge: window.PromptBridge,   // 缺省自动回退 window.PromptBridge
+  apiBase: "",                   // 后端前缀（默认同源）
+  fetchImpl: undefined,          // 自定义 fetch（测试注入）
+});
+builder.mount();                 // 卸载：builder.destroy()
+```
+
+PromptBridge 与 Tag Assistant 同源（`getDocument()` / `getActiveTarget()` / `subscribe()` / `dispatch()`，见上方表格）。Visual Builder 发出以下全部 action（`REMOVE_TAG / SET_WEIGHT / MOVE_SECTION / ADD_CHARACTER / REMOVE_CHARACTER / RENAME_CHARACTER` 由集成方实现）：
+
+| Action | payload | 触发 |
+| --- | --- | --- |
+| `ADD_TAG` | `{ tag, target, section?, weight? }` | 语义卡片点「＋ 标签」（target 恒为当前 active target） |
+| `REMOVE_TAG` | `{ target, entryId }` | chip 删除（target 为 chip 所属目标） |
+| `SET_WEIGHT` | `{ target, entryId, weight }` | chip `−` / `＋` 步进调权（绝对值） |
+| `MOVE_SECTION` | `{ target, entryId, section }` | chip 分区下拉 |
+| `ADD_CHARACTER` | `{ name? }` | 工作区 tab「+」 |
+| `REMOVE_CHARACTER` | `{ index }` | 角色工作区「移除角色」 |
+| `RENAME_CHARACTER` | `{ index, name }` | 角色名输入 change |
+
+组件导出纯函数（`chipLabel` / `adjustWeight` / `workspaceForTarget` / `workspaceTabs` / `buildWorkspaceChips` / `semanticCards` / `normalizeSemanticNode` / `buildRemoveTagAction` / `buildSetWeightAction` / `buildMoveSectionAction` / `buildAddCharacterAction` / `buildRemoveCharacterAction` / `buildRenameCharacterAction` / `dispatchAction` 等）供测试与集成方复用。
+
+### NSFW Scene Builder（Phase 2，独立前端组件，待 Integrator wiring）
+
+`static/nsfw-builder.js` + `static/nsfw-builder.css` 提供挂载到 `#nsfw-builder-root` 的原生 JS 组件（无框架 / 零依赖），为成人内容场景搭建提供独立的 UI 数据模型。已由 Workbench 接入：`app.js` 在 `mountWorkbenchComponents()` 中挂载，`adolescentMode` 从 `/api/settings` 注入，候选从 `GET /api/nsfw-builder/options` 派生（受限分类的真实 canonical tag，不整面铺成人词库）。组件遵守后端 adolescent / NSFW 内容策略，不绕过：
+
+- **启用条件**：只有成人模式（`adolescent_mode=false`）才启用；青少年模式下组件整体禁用 / 隐藏（渲染为禁用空态，且不 dispatch 任何 action）。`adolescentMode` 必须由集成方从 `/api/settings` 注入（也支持 `settings.adolescent_mode`）。
+- **UI 数据模型**：participants 1/2/3/4+；primary scene 单选；stage（`PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，语义标识而非 canonical tag）单选；position 单选；每角色 clothing state；additional activities 多选；body focus；recommendations 区域。现有 Characters 直接复用（不维护 `nsfwCharacters[]`）。
+- **不凭记忆造 canonical tags**：场景 / 体位 / 服装状态 / 附加活动 / 身体聚焦的真实候选一律由集成方通过 `options` 注入，或由推荐 API 返回；组件只内置 stage 语义标识与 participant 计数档（二者均非 canonical tag）。
+- **strict exclusive groups**：`participant_count` / `primary_scene_type` / `stage` / `position` / `clothing_state:char:N`。新选择 dispatch **一个** `SET_EXCLUSIVE_GROUP` action（payload 明确 `group / key / newTag / target / characterIndex / members`），Integrator 原子删除明确属于同组的旧 entries、加入新 tag、更新 context、只通知一次。组件不自行拆分 REMOVE_TAG + ADD_TAG。普通 conflict（非严格互斥）仍保持 warning-only。
+- **上下文不泄漏为 tags**：所有上下文 metadata（participant_count / scene / stage / position / body_focus / additional_activities / clothing_state）通过 `SET_ASSISTANT_CONTEXT`（payload `{ context }`，对齐 Recommendation V2）交给 Integrator，**不直接编译成 Prompt tags**；只有需要真实 canonical tag 的选择（带 tag 的活动新增、推荐点击）才 `ADD_TAG`。
+- **Additional activities** 为 multi-select：toggle 只更新 context（`SET_ASSISTANT_CONTEXT`），不互相删除、不触发 primary replacement；带 canonical tag 的活动新增时额外 `ADD_TAG` 到 active target。
+- **位置候选过滤**：根据 participant / scene 过滤（选项支持 `minParticipants` / `requiresScenes`）；3+ 参与者仅允许简单 interaction assignment，不做自由关系图。不显示整面成人词库。
+- **Clothing A→B 隔离**：只影响该 Character 的 `clothing_state` strict group（payload 携带 `characterIndex` 与 `target`），不触碰其他角色、不触碰服装 identity。
+- **推荐**：可由注入 `recommend(payload)` 函数或默认 `POST /api/recommendations` 获取；点击推荐只 `ADD_TAG` 到当前 active target，**不自动改变 stage**（无自动阶段推进）。
+- **健壮性 / 无障碍**：无 PromptBridge / 无文档 / 接口错误均有可见空态或错误态；事件委托（root 单监听器）、radiogroup 方向键、原生按钮焦点、`aria-checked` / `aria-pressed` / aria-labels。
+
+#### NSFW Scene Builder 集成契约
+
+```js
+import { createNsfwBuilder } from "/static/nsfw-builder.js";
+const builder = createNsfwBuilder({
+  root: document.getElementById("nsfw-builder-root"),
+  bridge: window.PromptBridge,              // 缺省自动回退 window.PromptBridge
+  apiBase: "",                              // 后端前缀（默认同源）
+  fetchImpl: undefined,                     // 自定义 fetch（测试注入）
+  adolescentMode: settings.adolescent_mode, // 必须注入后端 /api/settings，true=禁用
+  mode: "nsfw",                             // Recommendation V2 mode
+  // 真实候选（canonical tag 可选，缺 tag 只更新 context 不 ADD_TAG）：
+  participants: [{ key: "1", label: "1" }, { key: "2", label: "2" }, { key: "3", label: "3" }, { key: "4+", label: "4+" }],
+  scenes: [{ key: "indoor", label: "室内", tag: "bedroom" }],            // 示例，需集成方注入真实候选
+  stages: undefined,                          // 缺省用内置语义标识（PREPARATION…AFTERMATH）
+  positions: [{ key: "x", label: "X", tag: "...", minParticipants: 2, requiresScenes: ["indoor"] }],
+  clothingStates: [{ key: "clothed", label: "穿衣", tag: "..." }],
+  activities: [{ key: "a", label: "A", tag: "..." }],
+  bodyFocus: [{ key: "face", label: "面部" }],
+  recommend: async (payload) => [...],        // 可选注入推荐来源
+});
+builder.mount();                 // 卸载：builder.destroy()
+```
+
+PromptBridge 与 Tag Assistant / Visual Builder 同源（`getDocument()` / `getActiveTarget()` / `subscribe()` / `dispatch()`）。NSFW Scene Builder 发出的 action：
+
+| Action | payload | 触发 |
+| --- | --- | --- |
+| `SET_EXCLUSIVE_GROUP` | `{ group, key, newTag, target, characterIndex, members }` | strict 互斥组新选择（Integrator 原子删除同组旧 entries + 加入 newTag + 更新 context + 只通知一次；`newTag` 为空表示只设 group 不 ADD_TAG；clothing 组 `characterIndex` 为作用域角色） |
+| `SET_ASSISTANT_CONTEXT` | `{ context }` | body_focus / activities / 全量 context 快照（上下文 metadata 不编译为 tags） |
+| `ADD_TAG` | `{ tag, target, section? }` | 带 canonical tag 的活动新增、推荐点击（target 恒为当前 active target） |
+
+组件导出纯函数（`buildContext` / `buildRecommendPayload` / `buildSetExclusiveGroupAction` / `buildSetAssistantContextAction` / `buildAddTagAction` / `exclusiveMembers` / `filterPositions` / `normalizeOption(s)` / `normalizeRecommendation(s)` / `participantNumber` / `radioMoveIndex` / `isSelected` / `optionVisibleForCount` / `positiveTagsFromDocument` / `dispatchAction` 等）供测试与集成方复用。
+
+### Prompt Input / Autocomplete 键盘契约（Phase 2，独立模块，已接入）
+
+`static/nai-input-keys.js` 提供 Prompt 输入框（含 autocomplete 弹窗）的键盘决策纯模块（无 DOM / 无 PromptDocument / 不引用 app.js），由 `app.js` 在现有 `bindNaiAutocomplete` handler 上接线（`createNaiInputKeys` 有状态 controller；模块以 `<script type="module">` 加载并挂到 `window.NaiInputKeys`）。核心入口 `handleKeydown(event, context)` 返回统一 action：
+
+```js
+import { handleKeydown, createNaiInputKeys, ACCEPT_DELIMITER, HINT_TEXT } from "/static/nai-input-keys.js";
+```
+
+- **方向键**：弹窗打开时 `ArrowUp` / `ArrowDown` 导航候选（首尾回卷），action `{ action:"navigate", direction, index, preventDefault:true }`。
+- **Tab 接受**：接受当前选中（越界夹到末项）候选并追加分隔符 `, `（`ACCEPT_DELIMITER`），action `{ action:"accept", index, tag, delimiter:", ", preventDefault:true }`；用 `delimiterToAppend(afterText)` 避免与既有分隔符重复。
+- **Esc 关闭**：action `{ action:"close", preventDefault:true }`。
+- **单 Enter 永远换行**：即使弹窗打开也绝不接受候选，action `{ action:"newline" }`（不 preventDefault）。
+- **Enter×2 生成**：第二击 Enter 在 300–400ms 窗口内（默认 `DEFAULT_DOUBLE_ENTER_MS=350`）触发 `{ action:"generate", undo:true, preventDefault:true }` **恰好一次** —— preventDefault 使第二击的空行不插入，即撤销本次检测产生的额外空行；第一击已插入的换行属既有换行，绝不删除。生成后计时器复位，第三击快速 Enter 是全新换行。
+- **IME 组合**：`event.isComposing` 与 `context.composing`（`compositionstart`/`end` 维护）优先；组合中的 Enter 一律普通换行，不计入 double-enter、不生成、不导航 / 不接受弹窗。
+- **鼠标接受契约**：弹窗 option 的 `mousedown` handler 调用 `acceptActionFor(index, results)`（即 `mouseAcceptAction`），返回与 Tab 相同的 accept action，由 Integrator 自行应用。
+- **撤销额外空行工具**：`trailingNewlineRange(value, caret)` 定位 caret 正前方那一个换行，`removeRange(value, range)` 只删它——用于「已放任第二击换行插入后」的补救路径。
+- **轻量 UI hint**：`buildHintHtml()` 生成 `Tab 补全 · Enter 换行 · Enter×2 生成`（`HINT_TEXT`），Integrator 可挂载到弹窗底部（`.nai-ac-hint` 样式在 app.css，由 Integrator 挂载，本模块不改 index.html）。
+- **主题**：autocomplete 弹窗是 body 级 fixed 覆盖层，`--nai-*` 主题变量已提升至 `:root` 公共 scope（`.nai-layout` 直接继承），弹窗背景 `var(--nai-card)` 稳定不透明，无 opacity hack。
+
+#### Prompt Input 键盘契约接入说明
+
+```js
+// 纯函数式（double-enter 状态自行持有）：
+let doubleEnter = {};
+function onKeydown(event) {
+  const action = handleKeydown(event, {
+    popup:  { open: boxOpen, results, selected },
+    doubleEnter,
+    composing: isComposingState,          // compositionstart/end 维护
+    options: { doubleEnterMs: 350, now: Date.now },
+  });
+  if (action.nextDoubleEnter) doubleEnter = action.nextDoubleEnter;
+  apply(event, action);
+}
+
+// 或一行接入的有状态 controller：
+const keys = createNaiInputKeys({ doubleEnterMs: 350 });
+input.addEventListener("keydown", (e) => apply(e, keys.handleKeydown(e, { popup })));
+input.addEventListener("compositionstart", () => keys.setComposing(true));
+input.addEventListener("compositionend",   () => keys.setComposing(false));
+
+function apply(event, action) {
+  if (action.preventDefault) event.preventDefault();
+  switch (action.action) {
+    case "navigate": popupSelected = action.index; render(); break;
+    case "accept": {
+      // 1) Integrator 既有 token 替换（replacePromptTokenWithCaret）
+      const { value, caret } = replacePromptTokenWithCaret(input.value, input.selectionStart, action.tag);
+      // 2) 新契约：追加分隔符 `, `（不重复）
+      input.value = value + delimiterToAppend(value.slice(caret), action.delimiter);
+      closePopup();
+      break;
+    }
+    case "close": closePopup(); break;
+    case "generate": triggerGenerate(); break;      // undo:true 已由 preventDefault 达成
+    case "newline": break;                           // 默认换行
+    case "none": break;
+  }
+}
+```
+
+模块导出纯函数（`handleKeydown` / `createNaiInputKeys` / `stepDoubleEnter` / `moveSelection` / `clampSelection` / `classifyPopupKey` / `acceptActionFor` / `mouseAcceptAction` / `delimiterToAppend` / `trailingNewlineRange` / `removeRange` / `isComposing` / `buildHintHtml` 及常量）供测试与集成方复用，详见 `tests/test_nai_input_keys.mjs`。
+
+#### 语义导航与确定性推荐
+
+- **语义导航树**：`config/prompt_navigation.json` 定义 Base / Character 两棵创作概念骨架
+  （Style、Composition、Environment（室内/室外）、Lighting、Time/Weather、Objects；
+  Identity、Appearance（体型/皮肤/头发/面部/眼睛）、Clothing、Expression、Pose、Action）。
+  节点字段固定为 `id / label / zh / target / section / nsfw / seed_tags / children`；
+  `seed_tags` 全部取自本地词库的真实标签。接口复用 catalog 家族：
+  `GET /api/catalog?semantic=1` 或 `GET /api/catalog/semantic`，支持 `node_id` 下钻单节点；
+  青少年模式下自动裁剪 `nsfw` 节点，旧目录树请求不受影响。
+- **确定性简单评分**（无 embedding / LLM / 向量库），信号按优先级：
+  1. 当前 Prompt positive 标签的共现（`tag_cooccurrence`）；
+  2. 语义节点 `seed_tags`（含祖先）上下文加分 —— 例如 bedroom 节点优先
+     `bed / pillow / lamp`，`blue eyes + long hair` 优先角色外观而非随机场景；
+  3. `recent_tags.use_count` 个人偏好（有界小权重）；
+  4. `post_count` 弱先验 / 同分排序。
+  排除已选标签与青少年模式隐藏标签；`target=base|character` 对候选做分区过滤；
+  Global UC / Character UC 不作为 positive 样本。
+- **共现记录审计**：snapshot / 正式 generation 只对 Base positive 与 Character positive
+  记录一次正面共现（同标签跨目标去重）；不记录 Global UC / Character UC，键盘输入不入库。
+- `POST /api/recommendations` 接受 `tags / target / node_id / limit`（旧请求仅 `tags/limit`
+  兼容）与 V2 上下文 `mode / participant_count / primary_scene_type / stage / position /
+  body_focus / active_target / active_section / last_added_tag`；返回 `{ groups, recommendations }`，
+  每项含 `tag / canonical / zh / group / reason / sources`，并附旧前端兼容的 `section / count`。
 
 ### 提示词导入
 
@@ -57,6 +292,25 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 - `normalized`：规范化后命中；
 - `candidate`：仅提供候选，用户确认前不写入；
 - `custom`：已有自定义标签，或用户选择「保留原文」。
+
+#### Prompt Auto-Split（Phase 2，纯 Python）
+
+`prompt/auto_split.py` 的 `auto_split(prompt, metadata_resolver=None, manual_assignments=None)`
+只生成归属 proposal，不修改 `PromptDocument`，不调用 LLM，也不应绑定到 keypress。输入可以是 flat prompt 文本、
+`prompt/import_parser.py` 的结构化结果，或已有 schema v2 文档；后两者带有明确角色段时会直接保留，避免二次拆分。
+返回 `base`、`characters`、`global_uc`、`summary`、`unassigned`，以及可选的 `assistant_context`。
+
+归属顺序是明确结构 / 项目 separator → metadata-backed character identity → 确定性语义分区 → Base。
+角色身份应通过注入的 metadata resolver 提供（支持 canonical / alias 与 Danbooru character category 4，括号名称不会被拆坏）；
+人数标签如 `2girls` 只进入 Base，无法建立可靠边界时 `summary` 会明确报告
+`detected multiple subjects but no reliable character boundary`。`source#`、`target#`、`mutual#` 原样保留，
+不明确的 interaction 留在 Base。人工映射可使用 `base`、`global_uc`、`char:N`、`char:N:uc`，优先级最高。
+
+接入：`POST /api/prompt/auto-split`（body `{ text | prompt, manual_assignments? }`）调用同一 service，
+对 proposal 的每个 tag 用 `classify_tag` 补 `section`，返回 `{ proposal, summary, structured, resplit }`，
+**不修改** PromptDocument。前端 Import 弹窗「自动整理角色」按钮请求该接口后 dispatch 单个
+`APPLY_AUTO_SPLIT`（`PromptBridge` 一次 proposal → `PromptDocument` 整体替换 → 单次 notify，不逐 tag dispatch），
+并复用现有 `undo` 回退；不在 keypress 上重拆，已有 structured metadata（`resplit=false`）直接恢复，不二次 split。
 
 ### NovelAI 生图（官方 API）
 
@@ -71,6 +325,15 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 - 透明背景、Advanced Settings（Sampler / Scheduler / Steps / CFG / CFG Rescale / Auto SMEA）。
 - **Effective Preview**：预览与实际发送共用同一份编译结果（含 Quality / UC 来源与跨极性冲突 warning-only 提示），raw prompt 永不改写。
 - 积分提示只展示可由官方规则确认的结论；是否扣费以 NovelAI 实际结算为准。任意一张失败即停止后续请求；取消只阻止未发送的请求。
+
+#### 生图工作台布局（Prompt-first）
+
+生图视图为三栏桌面布局，高信息密度、Prompt 优先，参照 NovelAI 官方信息架构：
+
+- **左：Prompt Editor** — Prompt / Undesired 作为同一输入区 tabs 切换（「⇱」可分离并排）；Base / Character tabs 与多角色编辑；角色位置（Auto 居中 / 手动 X/Y）；「实际发送内容」Effective Preview 折叠展开。`#prompt-mode-switch` 提供 Text / Visual 视图切换，`#tag-assistant-root` 与 `#visual-prompt-root` 由 Workbench V3 自动挂载；两种视图只通过正式 `window.PromptBridge` 读写同一份 PromptDocument。
+- **中：Image Viewer** — 中心画布，Fit / 缩放 / 点击 100% 查看、Pin 收藏、「恢复设置」、「以此图图生图」。
+- **右：Generation Settings** — 基础参数常显：Model / 尺寸档位 / 批次 / Seed（Random / Fixed / Increment）/ 文生图·图生图（Strength / Noise）/ 透明背景 / 正负提示词档位；Advanced Settings（Sampler / Scheduler / Steps / CFG / CFG Rescale / Auto SMEA）折叠；Generate / Cancel 与积分预估常驻底部。History 位于同栏底部，点击标题可折叠隐藏。
+- 移动端单列堆叠：Prompt → Generation Settings / History → Viewer，无横向溢出。
 
 ### 标签例图
 
@@ -120,11 +383,16 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 | `search.py` | 搜索排序、别名解析、拼音匹配、分类浏览 |
 | `importer/` | Danbooru 数据导入、中文别名、拼音回填、受限分类、目录构建 |
 | `prompt/` | 固定分区与本地分类器、导入解析、NovelAI 语法导出 |
+| `config/prompt_navigation.json` | 语义导航骨架（Base/Character 概念树与推荐 seed 上下文，随仓库维护） |
 | `server/server.mjs` | Node 服务入口：静态面板、Python 路由代理、SSE、官方 API 生图路由 |
 | `server/novelai-provider.mjs` | NovelAI 官方 API payload 构建与响应解析 |
 | `server/generation-request.mjs` | 生图请求规范化与模型默认值 |
 | `server/api-batch.mjs` | 1–6 张严格串行批次控制器 |
-| `static/` | 前端（index.html / app.js / app.css / prompt-compiler.js） |
+| `static/` | 前端（index.html / app.js / app.css / prompt-compiler.js / prompt-document.js / nai-structured.js / nai-input-keys.js） |
+| `static/tag-assistant.js` + `static/tag-assistant.css` | Tag Assistant 独立组件（推荐 / 目录 / 搜索 / 收藏四入口，消费 PromptBridge，见「Tag Assistant 集成契约」） |
+| `static/visual-builder.js` + `static/visual-builder.css` | Visual Prompt Builder 独立组件（语义卡片 + chip 编辑，消费 PromptBridge 全量 action，见「Visual Prompt Builder 集成契约」） |
+| `static/nsfw-builder.js` + `static/nsfw-builder.css` | NSFW Scene Builder 独立组件（strict exclusive groups / 成人上下文，消费 PromptBridge，见「NSFW Scene Builder 集成契约」） |
+| `prompt/recommendation.py` + `prompt/related_client.py` + `prompt/auto_split.py` + `prompt/semantics.py` | Recommendation V2（多源 RRF）+ 远程 related adapter + 确定性 Auto-Split proposal + 语义 helper |
 | `data/` | 本地 SQLite 与种子数据（已 gitignore，首次启动自动生成） |
 
 ## 快速开始
@@ -228,7 +496,8 @@ Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici"
 | `GET /api/search?q=` | 搜索 V2（含拼音、词序无关，返回 match_type / reason / similarity） |
 | `GET /api/resolve?q=` | 别名 / 前缀解析为 canonical tag |
 | `POST /api/semantic-search` | 中文自然语言语义找词（代理 Danbooru 语义检索） |
-| `GET /api/taxonomy` / `GET /api/catalog` | 分类浏览树 / 目录树 |
+| `GET /api/taxonomy` / `GET /api/catalog` | 分类浏览树 / 目录树（`?semantic=1` 返回语义导航树） |
+| `GET /api/catalog/semantic` | 语义导航树专用路由（Base/Character 概念骨架，可 `node_id` 下钻） |
 | `GET /api/zh` / `POST /api/zh-notes` | 中文名映射 / 自定义中文备注 |
 | `GET /api/thumbs` | 标签例图 URL（懒抓取 + 本地缓存） |
 | `GET/POST /api/settings` | 读取 / 保存用户设置（凭据不回显） |
@@ -243,7 +512,8 @@ Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici"
 | `POST /api/export` | 按模型导出 NovelAI 原生语法（含权重） |
 | `GET/POST /api/favorites` / `GET/POST /api/recent` | 收藏 / 最近使用 |
 | `GET/POST/DELETE /api/presets` | 生图 Preset |
-| `POST /api/cooccurrence/record` / `POST /api/recommendations` / `GET /api/conflicts` | 推荐与冲突提示 |
+| `POST /api/cooccurrence/record` / `POST /api/recommendations` / `GET /api/conflicts` | 共现记录 / 确定性推荐（Recommendation V2 多源 RRF + 语义节点与成人上下文）/ 冲突提示 |
+| `POST /api/prompt/auto-split` / `GET /api/nsfw-builder/options` | 确定性 Auto-Split proposal（不修改文档）/ Scene Builder 候选（受限分类真实 tag） |
 | `POST/GET /api/snapshots` / `POST /api/snapshots/{id}/restore` | PromptSnapshot 创建 / 分区恢复 |
 | `GET /api/gallery` / `POST /api/gallery/import` / `POST /api/gallery/item` | 图库列表 / zip 导入 / 图片回写 |
 | `POST /api/gallery/favorite` / `DELETE /api/gallery/{dir}` | 图库收藏 / 删除（移入待清理） |
@@ -277,13 +547,23 @@ python -m unittest discover -s tests
 # Node（服务端 + Prompt Compiler）
 node --test server/*.test.mjs tests/test_prompt_compiler.mjs
 node --test tests/test_app_helpers.mjs
+node --test tests/test_prompt_document.mjs
+node --test tests/test_tag_assistant.mjs
+node --test tests/test_visual_builder.mjs
+node --test tests/test_nsfw_builder.mjs
+node --test tests/test_nai_structured.mjs
+node --test tests/test_nai_input_keys.mjs
+node --test tests/test_phase2_integration.mjs
 
 # 前端 / 服务端语法检查
 node --check static/app.js
+node --check static/tag-assistant.js
+node --check static/visual-builder.js
+node --check static/nai-input-keys.js
 node --check server/server.mjs
 ```
 
-当前回归基线（非付费）：Python 120 项、Node 服务端与 Prompt Compiler 74 项、app.js 纯函数 24 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置与防互杀守卫。
+当前回归基线（非付费）：Python 159 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node 服务端 53 项、前端组件与纯函数 197 项（app.js 纯函数 28、Prompt Document 10、Tag Assistant 22、Visual Builder 25、NSFW Scene Builder 43、Prompt Compiler 33、结构化恢复 6、Prompt Input 键盘契约 23、Phase 2 集成契约 7）全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
 
 ### 本地工作流提示
 

@@ -1,0 +1,152 @@
+/* NSFW Scene Builder —— Phase 2 独立前端组件样式。
+ * 命名前缀 nb-，避免与现有 app / visual-builder / tag-assistant 冲突。 */
+
+.nsfw-builder {
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #2c2c2c;
+  border: 1px solid #e3e3e3;
+  border-radius: 8px;
+  padding: 14px;
+  background: #fafafa;
+}
+
+.nsfw-builder.is-disabled {
+  opacity: 0.75;
+}
+
+.nb-disabled {
+  padding: 12px;
+  border: 1px dashed #d0a9a9;
+  border-radius: 6px;
+  background: #fdf3f3;
+  color: #a33;
+}
+
+.nb-status {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+.nb-error {
+  background: #fdecea;
+  color: #b3261e;
+  border: 1px solid #f2c8c5;
+}
+.nb-empty {
+  background: #fff8e6;
+  color: #8a6d3b;
+  border: 1px solid #f0e0b6;
+}
+.nb-hint {
+  color: #777;
+  font-size: 12px;
+  margin-top: 6px;
+}
+.nb-status-flash {
+  min-height: 18px;
+  color: #888;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.nb-group {
+  margin-bottom: 14px;
+}
+.nb-group:last-child {
+  margin-bottom: 0;
+}
+
+.nb-fieldset {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 10px 12px 12px;
+  margin: 0 0 12px;
+}
+.nb-fieldset:last-child {
+  margin-bottom: 0;
+}
+.nb-fieldset:disabled {
+  opacity: 0.55;
+}
+
+.nb-legend {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #444;
+}
+.nb-legend small,
+.nb-multi-note {
+  font-weight: 400;
+  color: #999;
+  margin-left: 4px;
+}
+
+.nb-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.nb-options button {
+  border: 1px solid #d6d6d6;
+  background: #fff;
+  color: #333;
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.nb-options button:hover {
+  border-color: #aaa;
+}
+.nb-options button.active {
+  background: #5b7c99;
+  border-color: #4a6781;
+  color: #fff;
+}
+
+.nb-tag {
+  font-weight: 400;
+  color: inherit;
+  opacity: 0.8;
+}
+.nb-tag::before {
+  content: "· ";
+}
+
+.nb-zh {
+  color: #888;
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.nb-recommend-btn {
+  border: 1px solid #c2cfdb;
+  background: #eef4fa;
+  color: #24527a;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.nb-recommend-btn:hover {
+  background: #dfeaf4;
+}
+
+.nb-recs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.nb-rec {
+  border: 1px solid #d8d8d8;
+  background: #fff;
+  color: #333;
+  border-radius: 16px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.nb-rec:hover {
+  border-color: #5b7c99;
+  color: #24527a;
+}

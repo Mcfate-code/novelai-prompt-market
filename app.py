@@ -24,6 +24,7 @@ import urllib.request
 import uuid
 import threading
 import zipfile
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,7 +35,7 @@ import db  # noqa: E402
 import imageutil  # noqa: E402
 import search  # noqa: E402
 from importer import build_catalog, import_aliases, import_danbooru_zh, import_restricted, import_taxonomy, sync_danbooru  # noqa: E402
-from prompt import composer, import_parser, novelai_export, sections as prompt_sections  # noqa: E402
+from prompt import auto_split, composer, import_parser, novelai_export, recommendation, related_client, sections as prompt_sections  # noqa: E402
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -56,6 +57,8 @@ NOVELAI_EXAMPLE_PROMPT_TEMPLATE = "{tag}, {rating}, masterpiece, best quality, v
 GALLERY_DIR = BASE_DIR / "data" / "gallery"
 GALLERY_TRASH_DIR = BASE_DIR / "待清理" / "图库"
 SETTINGS = db.load_json(BASE_DIR / "config" / "app_settings.json")
+# 语义导航：创作概念骨架（Base/Character），供导航树与推荐上下文使用（不含 embedding/LLM/向量库）。
+PROMPT_NAVIGATION_PATH = BASE_DIR / "config" / "prompt_navigation.json"
 # WorkBuddy 本机目录：默认 ~/.workbuddy，可用环境变量 WORKBUDDY_HOME 覆盖（与 server/start-nai.sh 一致）。
 WORKBUDDY_HOME = Path(os.path.expanduser(os.getenv("WORKBUDDY_HOME") or "~/.workbuddy"))
 USER_SETTINGS_PATH = WORKBUDDY_HOME / "tags-market-settings.json"
@@ -1847,9 +1850,88 @@ def translate(body: TranslateBody):
     return {"text": text, "translated": "\n".join(str(item.get("dst") or "") for item in result)}
 
 
+def _load_prompt_navigation() -> dict:
+    """加载 config/prompt_navigation.json 语义导航骨架；缺失/损坏返回 {}。"""
+    try:
+        data = json.loads(PROMPT_NAVIGATION_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _find_nav_node(tree: dict, node_id: str) -> tuple[dict, list[dict]] | None:
+    """按 id 在语义导航树中查找节点，返回 (node, ancestors)；找不到返回 None。"""
+    def walk(node, ancestors):
+        if not isinstance(node, dict) or not node.get("id"):
+            return None
+        if node["id"] == node_id:
+            return node, ancestors
+        for child in node.get("children") or []:
+            found = walk(child, ancestors + [node])
+            if found is not None:
+                return found
+        return None
+    for root in (tree.get("base"), tree.get("character")):
+        found = walk(root, [])
+        if found is not None:
+            return found
+    return None
+
+
+def _filter_nav_node_nsfw(node, adolescent: bool) -> dict | None:
+    """青少年模式下递归剪掉 nsfw 节点；返回 None 表示该节点被隐藏。"""
+    if not adolescent:
+        return node
+    if node.get("nsfw"):
+        return None
+    node = dict(node)
+    node["children"] = [
+        child for child in (_filter_nav_node_nsfw(c, adolescent) for c in node.get("children") or [])
+        if child is not None
+    ]
+    return node
+
+
+def _semantic_tree_response(node_id: str = "") -> dict:
+    """语义导航树响应（Base/Character 创作概念骨架）。"""
+    tree = _load_prompt_navigation()
+    if not tree.get("base") and not tree.get("character"):
+        raise HTTPException(404, "semantic navigation not configured")
+    adolescent = _load_user_settings()["adolescent_mode"]
+    if node_id:
+        found = _find_nav_node(tree, node_id)
+        if found is None:
+            raise HTTPException(404, "node not found")
+        node = found[0]
+        if adolescent and node.get("nsfw"):
+            raise HTTPException(404, "node not found")
+        return {"node": _filter_nav_node_nsfw(node, adolescent)}
+    filtered = {}
+    for key in ("base", "character"):
+        root = tree.get(key)
+        if isinstance(root, dict):
+            pruned = _filter_nav_node_nsfw(root, adolescent)
+            if pruned is not None:
+                filtered[key] = pruned
+    return {"tree": filtered}
+
+
+@app.get("/api/catalog/semantic")
+def catalog_semantic_tree(node_id: str = ""):
+    """语义导航树专用路由（复用 catalog 扩展，不影响原目录树 /api/catalog）。"""
+    return _semantic_tree_response(node_id)
+
+
 @app.get("/api/catalog")
-def catalog_tree():
-    """返回目录树：分组 + 子目录（含数量估算）。"""
+def catalog_tree(semantic: bool = False, node_id: str = ""):
+    """返回目录树：分组 + 子目录（含数量估算）。
+
+    semantic=true 时复用同一入口返回语义导航树（config/prompt_navigation.json 的
+    Base/Character 创作概念骨架），并支持 node_id 下钻；旧请求（不带 semantic 参数）
+    返回原目录树，行为完全不变。
+    """
+    if semantic:
+        return _semantic_tree_response(node_id)
     conn = _conn()
     try:
         groups_rows = conn.execute(
@@ -2331,6 +2413,53 @@ class TagsRequest(BaseModel):
     limit: int = 20
 
 
+class RecommendRequest(TagsRequest):
+    """推荐请求：旧字段 tags/limit 兼容；新增 Recommendation V2 上下文。
+
+    target 兼容旧 base|character；也接受 char:N / global_uc 等精确目标（归到 active_target）。
+    """
+    target: str = ""
+    node_id: str = ""
+    mode: str = "general"
+    participant_count: int | str | None = None
+    primary_scene_type: str = ""
+    stage: str = ""
+    position: str = ""
+    body_focus: str = ""
+    active_target: str = ""
+    active_section: str = ""
+    last_added_tag: str = ""
+
+
+def _target_category(target: str) -> str:
+    """把精确目标归到 base / character / global_uc 三个分区类别（用于候选分区过滤）。
+
+    未指定目标返回空串 —— 旧请求（仅 tags/limit）不做分区过滤，保持兼容。
+    """
+    t = (target or "").strip().lower()
+    if not t:
+        return ""
+    if t in ("base", "character", "global_uc"):
+        return t
+    if t.startswith("char:"):
+        return "global_uc" if t.endswith(":uc") else "character"
+    return "base"
+
+
+def _recommendation_mode(raw: str) -> str:
+    """Recommendation V2 的 mode 归一：nsfw/adult 统一为 adult（成人上下文 gating 与重排）。"""
+    m = (raw or "").strip().lower()
+    return "adult" if m in ("nsfw", "adult", "18+") else "general"
+
+
+def _related_source() -> related_client.RelatedClient | None:
+    """远程 global related 源（默认关闭；TAGS_MARKET_RELATED_URL 配置后启用，失败自动回退本地源）。"""
+    url = os.environ.get("TAGS_MARKET_RELATED_URL", "").strip()
+    if not url:
+        return None
+    return related_client.RelatedClient(url, timeout=2.0)
+
+
 def _normalized_unique_tags(tags: list[str]) -> list[str]:
     return list(dict.fromkeys(search._norm(tag) for tag in tags if search._norm(tag)))
 
@@ -2367,39 +2496,201 @@ def cooccurrence_record(body: TagsRequest):
 
 
 @app.post("/api/recommendations")
-def recommendations(body: TagsRequest):
-    tags = _normalized_unique_tags(body.tags)
+def recommendations(body: RecommendRequest):
+    """Recommendation V2（确定性多源 RRF 融合，无 embedding/LLM/向量库）。
+
+    候选源：global related（远程可注入，失败回退本地）/ 本地共现 / 个人最近使用 /
+    语义节点 seed / 成人场景上下文（mode=adult）。各源独立排序后 RRF_K=60 融合，
+    再做上下文重排与分组多样性。硬过滤（已选 / 青少年隐藏 / 成人未成年与幼态 /
+    人数 / target / section / node 不兼容）发生在融合前。
+    返回 {groups, recommendations}，每项含 tag / canonical / zh / group / reason / sources，
+    另附 section（兼容旧前端分区展示）与 count（旧字段兼容，仅展示用）。
+    """
+    tags = _normalized_unique_tags(getattr(body, "tags", []) or [])
+    limit = max(0, min(int(getattr(body, "limit", 20) or 20), 100))
     if not tags:
-        return {"recommendations": []}
+        return {"groups": [], "recommendations": []}
     conn = _conn()
     try:
-        scores: dict[str, int] = {}
-        for tag in tags:
-            for row in conn.execute(
-                "SELECT tag_a, tag_b, count FROM tag_cooccurrence WHERE tag_a=? OR tag_b=?", (tag, tag)
-            ):
-                other = row["tag_b"] if row["tag_a"] == tag else row["tag_a"]
-                if other not in tags:
-                    scores[other] = scores.get(other, 0) + row["count"]
-        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:max(0, min(body.limit, 100))]
-        recommendations = []
-        for tag, count in ranked:
-            row = conn.execute(
-                "SELECT t.danbooru_name, t.prompt_tag, COALESCE(u.zh, t.zh_name, '') zh "
-                "FROM tags t LEFT JOIN user_zh u ON u.tag_name=t.prompt_tag "
-                "WHERE lower(t.prompt_tag)=lower(?) OR lower(t.danbooru_name)=lower(?) LIMIT 1",
-                (tag, tag),
-            ).fetchone()
-            canonical = row["danbooru_name"] if row else tag.replace(" ", "_")
-            prompt_tag = row["prompt_tag"] if row else tag
-            recommendations.append({
-                "tag": prompt_tag,
+        hidden = _hidden_tag_names(conn)
+        settings = _load_user_settings()
+        adolescent = settings["adolescent_mode"]
+        nav = _load_prompt_navigation()
+
+        node_id = (getattr(body, "node_id", "") or "").strip()
+        semantic_node = None
+        if node_id:
+            found = _find_nav_node(nav, node_id)
+            if found is None:
+                raise HTTPException(400, "node not found")
+            node, ancestors = found
+            if adolescent and node.get("nsfw"):
+                raise HTTPException(400, "node unavailable in adolescent mode")
+            seeds: list[str] = []
+            for n in ancestors + [node]:
+                seeds.extend(n.get("seed_tags") or [])
+            semantic_node = {"seed_tags": seeds}
+
+        raw_target = (getattr(body, "target", "") or "").strip().lower()
+        active_target = (getattr(body, "active_target", "") or "").strip().lower() or raw_target
+        target = _target_category(raw_target)
+
+        service = recommendation.RecommendationService(
+            conn,
+            sources={},
+            related_source=_related_source(),
+            hidden_tags=hidden,
+            adolescent_mode=adolescent,
+            navigation=nav,
+        )
+        result = service.recommend(
+            tags=tags,
+            target=target,
+            node_id=node_id,
+            limit=limit,
+            mode=_recommendation_mode(getattr(body, "mode", "general")),
+            participant_count=getattr(body, "participant_count", None),
+            primary_scene_type=getattr(body, "primary_scene_type", "") or "",
+            stage=getattr(body, "stage", "") or "",
+            position=getattr(body, "position", "") or "",
+            body_focus=getattr(body, "body_focus", "") or "",
+            active_target=active_target,
+            active_section=getattr(body, "active_section", "") or "",
+            semantic_node=semantic_node,
+            last_added_tag=getattr(body, "last_added_tag", "") or "",
+        )
+        # 旧前端兼容：分区字段 + 确定性 count 代理分（仅展示用，不影响 V2 内部排序）。
+        for item in result["recommendations"]:
+            item["section"] = prompt_sections.classify_tag(conn, item["tag"])
+            item["count"] = int(round(float(item.get("_score", 0.0)) * 100))
+        return result
+    finally:
+        conn.close()
+
+
+class AutoSplitRequest(BaseModel):
+    prompt: Any = None
+    text: str = ""
+    manual_assignments: dict = {}
+
+
+class _DbTagMetadataResolver:
+    """把 tags / tag_aliases / taxonomy 映射为 auto_split 需要的确定性元数据。
+
+    resolve_tag_metadata 只读 category / section / canonical / aliases；
+    is_character_identity 依赖 category==4（Danbooru character 分类）作为身份锚。
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+        self._cache: dict[str, dict] = {}
+
+    def __call__(self, tag: str) -> dict:
+        key = search._norm(tag)
+        if not key:
+            return {}
+        if key in self._cache:
+            return self._cache[key]
+        conn = self.conn
+        row = conn.execute(
+            "SELECT t.danbooru_name, t.prompt_tag, t.category FROM tags t "
+            "WHERE lower(t.prompt_tag)=lower(?) OR lower(t.danbooru_name)=lower(?) LIMIT 1",
+            (tag, tag),
+        ).fetchone()
+        result: dict = {}
+        if row:
+            canonical = row["danbooru_name"]
+            aliases = [r["alias"] for r in conn.execute(
+                "SELECT alias FROM tag_aliases WHERE canonical_name=?", (canonical,))]
+            result = {
+                "category": row["category"],
                 "canonical": canonical,
-                "zh": row["zh"] if row else "",
-                "section": prompt_sections.classify_tag(conn, prompt_tag),
-                "count": count,
-            })
-        return {"recommendations": recommendations}
+                "aliases": [row["prompt_tag"], canonical, *aliases],
+                "section": prompt_sections.classify_tag(conn, row["prompt_tag"]),
+            }
+        else:
+            result = {"section": prompt_sections.classify_tag(conn, tag)}
+        self._cache[key] = result
+        return result
+
+
+@app.post("/api/prompt/auto-split")
+def prompt_auto_split(body: AutoSplitRequest):
+    """Auto-Split proposal：只返回归属建议，不修改 PromptDocument（APPLY_AUTO_SPLIT 由前端执行）。"""
+    prompt = body.prompt
+    if prompt is None and (getattr(body, "text", "") or "").strip():
+        prompt = body.text.strip()
+    if prompt is None:
+        raise HTTPException(400, "prompt or text is required")
+    conn = _conn()
+    try:
+        resolver = _DbTagMetadataResolver(conn)
+        proposal = auto_split.auto_split(
+            prompt, resolver, getattr(body, "manual_assignments", None) or None)
+        _enrich_proposal_sections(proposal, conn)
+        return {
+            "proposal": proposal,
+            "summary": proposal.get("summary", ""),
+            "structured": bool(proposal.get("structured")),
+            "resplit": bool(proposal.get("resplit")),
+        }
+    finally:
+        conn.close()
+
+
+def _enrich_proposal_sections(proposal: dict, conn) -> dict:
+    """给 proposal 的每个 tag 条目补 prompt 分区（classify_tag），供前端按分区落位。"""
+    def walk(items):
+        for item in items or []:
+            if isinstance(item, dict) and item.get("tag"):
+                item.setdefault("section", prompt_sections.classify_tag(conn, item["tag"]))
+    walk(proposal.get("base"))
+    walk(proposal.get("global_uc"))
+    for character in proposal.get("characters") or []:
+        walk(character.get("prompt"))
+        walk(character.get("uc"))
+    return proposal
+
+
+# Scene Builder 候选：restricted_taxonomy_map 的 section_label -> 组 key（真实 canonical tag，不整面铺成人词库）。
+NSFW_BUILDER_SECTIONS = {
+    "scenes": ("基础性交", "多人成人场景", "女女性行为", "男男性行为"),
+    "positions": ("性交体位",),
+    "clothingStates": ("裸露与脱衣状态",),
+    "activities": ("抚摸与前戏", "口交与舔舐", "手淫", "非插入式刺激"),
+    "bodyFocus": ("胸部", "臀部、肛门与身体细节", "女性生殖器细节", "男性生殖器细节"),
+}
+
+
+@app.get("/api/nsfw-builder/options")
+def nsfw_builder_options():
+    """Scene Builder 候选（scenes/positions/clothingStates/activities/bodyFocus）。
+
+    青少年模式下返回空候选（组件整体禁用）；成人模式下从受限分类派生真实 canonical tag，
+    供 SET_EXCLUSIVE_GROUP / SET_ASSISTANT_CONTEXT 使用。
+    """
+    conn = _conn()
+    try:
+        if _load_user_settings()["adolescent_mode"]:
+            return {group: [] for group in NSFW_BUILDER_SECTIONS}
+        options: dict[str, list[dict]] = {}
+        for group, labels in NSFW_BUILDER_SECTIONS.items():
+            seen: set[str] = set()
+            out: list[dict] = []
+            for label in labels:
+                for row in conn.execute(
+                    "SELECT COALESCE(t.prompt_tag, m.seed, m.canonical_name) AS tag "
+                    "FROM restricted_taxonomy_map m LEFT JOIN tags t ON t.danbooru_name=m.canonical_name "
+                    "WHERE m.section_label=? AND m.status != 'anomalous' ORDER BY m.sort_order LIMIT 12",
+                    (label,),
+                ):
+                    tag = row["tag"]
+                    if not tag or tag in seen:
+                        continue
+                    seen.add(tag)
+                    out.append({"key": tag, "label": tag, "tag": tag})
+            options[group] = out
+        return options
     finally:
         conn.close()
 
@@ -2438,6 +2729,32 @@ def _collect_structured_tags(value) -> list[str]:
     return found
 
 
+def _collect_positive_tags(state) -> list[str]:
+    """只收集 Base positive 与 Character positive 的 tag 条目，用于共现记录。
+
+    覆盖：
+      - state.sections[*]（Base positive）
+      - state.characters[].prompt_sections[*]（Character positive）
+    明确不收集：
+      - characters[].uc_sections、global_uc_sections（UC 不作为正面共现样本）；
+      - 自由文本字符串 / 非条目结构（键盘输入不写 DB）。
+    同一 tag 在 Base 与 Character 同时出现时只返回一次语义（后续 _record_cooccurrence 去重）。
+    """
+    if not isinstance(state, dict):
+        return []
+    tags: list[str] = []
+    sections = state.get("sections")
+    if isinstance(sections, dict):
+        tags.extend(_collect_structured_tags(sections))
+    for character in state.get("characters") or []:
+        if not isinstance(character, dict):
+            continue
+        prompt_map = character.get("prompt_sections")
+        if isinstance(prompt_map, dict):
+            tags.extend(_collect_structured_tags(prompt_map))
+    return tags
+
+
 class SnapshotBody(BaseModel):
     positive_prompt: str = ""
     negative_prompt: str = ""
@@ -2463,7 +2780,7 @@ def snapshot_create(body: SnapshotBody):
             (snapshot_id, body.positive_prompt, body.negative_prompt,
              json.dumps(body.structured_state, ensure_ascii=False), json.dumps(body.generation, ensure_ascii=False), db.now_iso()),
         )
-        _record_cooccurrence(conn, _collect_structured_tags(body.structured_state))
+        _record_cooccurrence(conn, _collect_positive_tags(body.structured_state))
         conn.commit()
         return _snapshot_dict(conn.execute("SELECT * FROM prompt_snapshot WHERE id=?", (snapshot_id,)).fetchone())
     finally:

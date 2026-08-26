@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "_note": "语义导航：创作概念骨架（不引用具体目录表，纯前端导航 + 推荐上下文）。root 为 base / character 两棵；节点字段固定为 id/label/zh/target/section/nsfw/seed_tags/children。target=base|character 决定该节点建议进入 Base 还是角色 Prompt；section 对应 prompt/sections.py 的固定分区，供 Base/Character 目标过滤与分类显示。seed_tags 是从库内（data/tags.sqlite）核验过的真实标签，作为确定性推荐上下文：节点（含祖先）的 seed_tags 参与评分，并受青少年模式隐藏规则约束。新增节点时请确保 seed_tags 全部为安全标签、nsfw 如实标注。",
+  "base": {
+    "id": "base",
+    "label": "Base",
+    "zh": "基础画面",
+    "target": "base",
+    "section": "scene",
+    "nsfw": false,
+    "seed_tags": [],
+    "children": [
+      {
+        "id": "base_style",
+        "label": "Style",
+        "zh": "风格",
+        "target": "base",
+        "section": "style",
+        "nsfw": false,
+        "seed_tags": ["masterpiece", "best quality", "anime style", "lineart", "flat color"],
+        "children": []
+      },
+      {
+        "id": "base_composition",
+        "label": "Composition",
+        "zh": "构图",
+        "target": "base",
+        "section": "composition",
+        "nsfw": false,
+        "seed_tags": ["portrait", "close-up", "full body", "looking at viewer"],
+        "children": []
+      },
+      {
+        "id": "base_environment",
+        "label": "Environment",
+        "zh": "环境",
+        "target": "base",
+        "section": "scene",
+        "nsfw": false,
+        "seed_tags": ["indoors", "outdoors"],
+        "children": [
+          {
+            "id": "env_indoor",
+            "label": "Indoor",
+            "zh": "室内",
+            "target": "base",
+            "section": "scene",
+            "nsfw": false,
+            "seed_tags": ["bedroom", "cafe", "window", "candlelight"],
+            "children": []
+          },
+          {
+            "id": "env_outdoor",
+            "label": "Outdoor",
+            "zh": "室外",
+            "target": "base",
+            "section": "scene",
+            "nsfw": false,
+            "seed_tags": ["forest", "beach", "street", "city", "rain"],
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "base_lighting",
+        "label": "Lighting",
+        "zh": "光照",
+        "target": "base",
+        "section": "scene",
+        "nsfw": false,
+        "seed_tags": ["sunlight", "moonlight", "golden hour", "neon lights", "candlelight"],
+        "children": []
+      },
+      {
+        "id": "base_time_weather",
+        "label": "Time / Weather",
+        "zh": "时间与天气",
+        "target": "base",
+        "section": "scene",
+        "nsfw": false,
+        "seed_tags": ["day", "night", "sunset", "winter", "snow", "rain"],
+        "children": []
+      },
+      {
+        "id": "base_objects",
+        "label": "Objects",
+        "zh": "物件",
+        "target": "base",
+        "section": "scene",
+        "nsfw": false,
+        "seed_tags": ["bed", "pillow", "lamp", "table", "chair", "umbrella", "mirror", "bookshelf", "flower"],
+        "children": []
+      }
+    ]
+  },
+  "character": {
+    "id": "character",
+    "label": "Character",
+    "zh": "角色",
+    "target": "character",
+    "section": "character",
+    "nsfw": false,
+    "seed_tags": [],
+    "children": [
+      {
+        "id": "char_identity",
+        "label": "Identity",
+        "zh": "身份",
+        "target": "character",
+        "section": "character",
+        "nsfw": false,
+        "seed_tags": ["solo", "1girl"],
+        "children": []
+      },
+      {
+        "id": "char_appearance",
+        "label": "Appearance",
+        "zh": "外观",
+        "target": "character",
+        "section": "appearance",
+        "nsfw": false,
+        "seed_tags": ["long hair", "blue eyes"],
+        "children": [
+          {
+            "id": "char_body",
+            "label": "Body",
+            "zh": "体型",
+            "target": "character",
+            "section": "appearance",
+            "nsfw": false,
+            "seed_tags": ["full body", "bare shoulders", "barefoot"],
+            "children": []
+          },
+          {
+            "id": "char_skin",
+            "label": "Skin",
+            "zh": "皮肤",
+            "target": "character",
+            "section": "appearance",
+            "nsfw": false,
+            "seed_tags": ["bare shoulders", "freckles", "mole"],
+            "children": []
+          },
+          {
+            "id": "char_hair",
+            "label": "Hair",
+            "zh": "头发",
+            "target": "character",
+            "section": "appearance",
+            "nsfw": false,
+            "seed_tags": ["long hair", "blonde hair", "red hair", "ponytail", "twintails", "hair ornament", "ribbon"],
+            "children": []
+          },
+          {
+            "id": "char_face",
+            "label": "Face",
+            "zh": "面部",
+            "target": "character",
+            "section": "appearance",
+            "nsfw": false,
+            "seed_tags": ["scar", "glasses", "freckles", "eyebrows"],
+            "children": []
+          },
+          {
+            "id": "char_eyes",
+            "label": "Eyes",
+            "zh": "眼睛",
+            "target": "character",
+            "section": "appearance",
+            "nsfw": false,
+            "seed_tags": ["blue eyes", "glasses"],
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "char_clothing",
+        "label": "Clothing",
+        "zh": "服装",
+        "target": "character",
+        "section": "clothing",
+        "nsfw": false,
+        "seed_tags": ["school uniform", "white shirt", "white dress", "dress", "skirt"],
+        "children": [
+          {
+            "id": "char_clothing_top",
+            "label": "Top",
+            "zh": "上装",
+            "target": "character",
+            "section": "clothing",
+            "nsfw": false,
+            "seed_tags": ["white shirt", "t-shirt", "blouse", "sweater", "hoodie"],
+            "children": []
+          },
+          {
+            "id": "char_clothing_bottom",
+            "label": "Bottom",
+            "zh": "下装",
+            "target": "character",
+            "section": "clothing",
+            "nsfw": false,
+            "seed_tags": ["skirt", "shorts", "pants", "jeans"],
+            "children": []
+          },
+          {
+            "id": "char_clothing_outer",
+            "label": "Outerwear",
+            "zh": "外套",
+            "target": "character",
+            "section": "clothing",
+            "nsfw": false,
+            "seed_tags": ["jacket", "coat", "suit", "lab coat"],
+            "children": []
+          },
+          {
+            "id": "char_clothing_shoes",
+            "label": "Shoes",
+            "zh": "鞋",
+            "target": "character",
+            "section": "clothing",
+            "nsfw": false,
+            "seed_tags": ["shoes", "boots", "sneakers", "barefoot"],
+            "children": []
+          },
+          {
+            "id": "char_clothing_accessory",
+            "label": "Accessory",
+            "zh": "配饰",
+            "target": "character",
+            "section": "clothing",
+            "nsfw": false,
+            "seed_tags": ["glasses", "earrings", "necklace", "choker", "ribbon", "scarf", "cap", "top hat", "gloves", "watch", "ring", "belt", "backpack"],
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "char_expression",
+        "label": "Expression",
+        "zh": "表情",
+        "target": "character",
+        "section": "expression",
+        "nsfw": false,
+        "seed_tags": ["smile", "open mouth", "crying", "blush"],
+        "children": []
+      },
+      {
+        "id": "char_pose",
+        "label": "Pose",
+        "zh": "姿势",
+        "target": "character",
+        "section": "action",
+        "nsfw": false,
+        "seed_tags": ["standing", "sitting", "holding"],
+        "children": []
+      },
+      {
+        "id": "char_action",
+        "label": "Action / Interaction",
+        "zh": "动作与互动",
+        "target": "character",
+        "section": "action",
+        "nsfw": false,
+        "seed_tags": ["looking at viewer", "holding", "sitting", "standing"],
+        "children": []
+      }
+    ]
+  }
+}

@@ -1,0 +1,239 @@
+/* Tag Assistant —— 独立前端组件样式（配套 static/tag-assistant.js）
+   全部类名以 .tag-assistant / .ta- 为前缀，使用 app.css 既有 CSS 变量，不侵入全局。 */
+
+.tag-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text, #1d252b);
+  background: var(--panel, #ffffff);
+  border: 1px solid var(--border, #dfe4e8);
+  border-radius: 10px;
+  padding: 10px;
+  min-height: 120px;
+}
+
+/* ---- 入口 Tabs（默认推荐） ---- */
+.tag-assistant .ta-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border, #dfe4e8);
+  padding-bottom: 6px;
+}
+.tag-assistant .ta-tabs [role="tab"] {
+  border: 1px solid var(--border, #dfe4e8);
+  border-radius: 6px;
+  background: var(--panel-soft, #f8fafb);
+  color: var(--text, #1d252b);
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.tag-assistant .ta-tabs [role="tab"]:hover {
+  background: var(--accent-soft, #f8e9e4);
+  border-color: #d9a79c;
+}
+.tag-assistant .ta-tabs [role="tab"].active,
+.tag-assistant .ta-tabs [role="tab"][aria-selected="true"] {
+  background: var(--accent, #b6533d);
+  border-color: var(--accent, #b6533d);
+  color: #fff;
+}
+
+/* ---- 面板与状态 ---- */
+.tag-assistant .ta-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tag-assistant .ta-status {
+  font-size: 12px;
+  color: var(--text, #1d252b);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--panel-soft, #f8fafb);
+}
+.tag-assistant .ta-status.ta-hint { color: #5a6a76; }
+.tag-assistant .ta-status.ta-empty { color: #5a6a76; }
+.tag-assistant .ta-status.ta-loading { color: var(--accent-ink, #8f3d2e); }
+.tag-assistant .ta-status.ta-error {
+  color: #a33;
+  background: #fdf0ef;
+  border: 1px solid #ecc;
+}
+.tag-assistant .ta-retry {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border-radius: 6px;
+  border: 1px solid #d9a79c;
+  background: var(--accent-soft, #f8e9e4);
+  color: var(--accent-ink, #8f3d2e);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ---- 推荐上下文行 ---- */
+.tag-assistant .ta-context {
+  font-size: 12px;
+  color: #5a6a76;
+  padding: 0 2px;
+}
+
+/* ---- 语义分组 ---- */
+.tag-assistant .ta-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tag-assistant .ta-group-title,
+.tag-assistant .ta-node-recommend-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-ink, #8f3d2e);
+  margin-bottom: 4px;
+}
+
+/* ---- 紧凑 Tag card（英文 canonical/tag、中文名、热度、reason/source、+；非图片墙） ---- */
+.tag-assistant .ta-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 6px;
+}
+.tag-assistant .ta-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px 6px 30px;
+  border: 1px solid var(--border, #dfe4e8);
+  border-radius: 8px;
+  background: var(--panel-soft, #f8fafb);
+  overflow: hidden;
+}
+.tag-assistant .ta-card .ta-card-en {
+  font-size: 13px;
+  font-weight: 500;
+  word-break: break-word;
+}
+.tag-assistant .ta-card .ta-card-zh {
+  font-size: 12px;
+  color: #5a6a76;
+}
+.tag-assistant .ta-card .ta-card-heat {
+  font-size: 11px;
+  color: var(--accent-ink, #8f3d2e);
+}
+.tag-assistant .ta-card .ta-card-meta {
+  font-size: 11px;
+  color: #7a8a96;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tag-assistant .ta-add {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  border-radius: 6px;
+  border: 1px solid #d9a79c;
+  background: var(--accent-soft, #f8e9e4);
+  color: var(--accent-ink, #8f3d2e);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.tag-assistant .ta-add:hover {
+  background: var(--accent, #b6533d);
+  color: #fff;
+  border-color: var(--accent, #b6533d);
+}
+
+/* ---- 目录：创作意图骨架（不展开全量标签树） ---- */
+.tag-assistant .ta-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tag-assistant .ta-nav-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-ink, #8f3d2e);
+  border-bottom: 1px dashed var(--border, #dfe4e8);
+  padding-bottom: 2px;
+}
+.tag-assistant .ta-nav-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.tag-assistant .ta-node {
+  border: 1px solid var(--border, #dfe4e8);
+  border-radius: 6px;
+  background: var(--panel, #ffffff);
+  color: var(--text, #1d252b);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.tag-assistant .ta-node:hover {
+  background: var(--accent-soft, #f8e9e4);
+  border-color: #d9a79c;
+}
+.tag-assistant .ta-node.active {
+  background: var(--accent, #b6533d);
+  border-color: var(--accent, #b6533d);
+  color: #fff;
+}
+.tag-assistant .ta-node .ta-node-seed-count {
+  opacity: 0.7;
+  font-weight: 400;
+}
+.tag-assistant .ta-node-recommend {
+  border-top: 1px dashed var(--border, #dfe4e8);
+  padding-top: 8px;
+}
+
+/* ---- 搜索栏 ---- */
+.tag-assistant .ta-search-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.tag-assistant .ta-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #dfe4e8);
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--panel, #ffffff);
+  color: var(--text, #1d252b);
+}
+.tag-assistant .ta-search-input:focus {
+  outline: 2px solid var(--accent, #b6533d);
+  border-color: var(--accent, #b6533d);
+}
+.tag-assistant .ta-search-go,
+.tag-assistant .ta-search-clear {
+  border: 1px solid var(--border, #dfe4e8);
+  border-radius: 8px;
+  background: var(--panel-soft, #f8fafb);
+  color: var(--text, #1d252b);
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.tag-assistant .ta-search-go:hover {
+  background: var(--accent, #b6533d);
+  color: #fff;
+  border-color: var(--accent, #b6533d);
+}
+.tag-assistant .ta-search-clear {
+  padding: 6px 9px;
+}

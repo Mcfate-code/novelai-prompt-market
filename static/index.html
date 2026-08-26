@@ -3,12 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NovelAI 提示词超市 V2</title>
+  <title>NovelAI 提示词超市 V3</title>
   <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/tag-assistant.css" />
+  <link rel="stylesheet" href="/static/visual-builder.css" />
+  <link rel="stylesheet" href="/static/nsfw-builder.css" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">NovelAI 提示词超市 V2</div>
+    <div class="brand">NovelAI 提示词超市 V3</div>
     <div class="model-picker">
       <label>模型</label>
       <select id="model-select"></select>
@@ -57,9 +60,19 @@
   </div>
 
 
-  <!-- 生图视图（三栏：生成控制 / Output Viewer / History） -->
+  <!-- 生图视图（三栏：Prompt Editor / Image Viewer / Generation Settings + History） -->
   <main id="generate-view" class="nai-layout" style="display:none">
+    <!-- 左：Prompt Editor（Prompt/UC tabs、Base/Character tabs、多角色、Effective Preview） -->
     <section class="panel nai-left">
+      <div class="nai-panel-head">
+        <span class="nai-panel-kicker">Prompt Editor</span>
+        <div id="prompt-mode-switch" class="nai-prompt-mode" role="group" aria-label="提示词模式（Text / Visual）">
+          <button type="button" class="active" data-prompt-mode="text">Text</button>
+          <button type="button" data-prompt-mode="visual">Visual</button>
+        </div>
+      </div>
+      <div id="nai-api-status" class="nai-live" title="NovelAI 官方 API 连接状态"><span class="nai-live-dot"></span><span>正在检查官方 API…</span></div>
+
       <div class="nai-tabs">
         <button class="nai-tab active" data-tab="prompt">Prompt</button>
         <button class="nai-tab" data-tab="undesired">Undesired</button>
@@ -70,78 +83,18 @@
         <button type="button" class="nai-char-tab" id="nai-character-add" title="添加角色">+ 角色</button>
         <span class="nai-character-count" id="nai-character-count">0</span>
       </div>
-      <div id="nai-api-status" class="nai-live" title="NovelAI 官方 API 连接状态"><span class="nai-live-dot"></span><span>正在检查官方 API…</span></div>
 
       <textarea id="nai-prompt" class="nai-prompt" placeholder="1girl, masterpiece, …（也可从购物车填入）"></textarea>
       <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
       <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
-      <div class="nai-quick-toggles">
-        <label class="nai-toggle-item" title="Prompt 追加 transparent background，API 使用 straight_alpha">
-          <input type="checkbox" id="nai-transparent" /><span>透明背景</span>
-        </label>
-      </div>
 
       <div id="nai-character-list" class="nai-character-list"><div class="empty">Base Prompt 在顶部编辑</div></div>
 
-      <div class="nai-control-strip">
-        <label class="nai-strip-field"><span>Model</span><select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 Full</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 Curated</option><option value="nai-diffusion-4-5-full">NAI Diffusion V4.5 Full</option><option value="nai-diffusion-4-full">NAI Diffusion V4 Full</option></select></label>
-        <label class="nai-strip-field"><span>尺寸档位</span><select id="nai-resolution-category" class="nai-select">
-          <option value="small_portrait">Small · 纵向 512×768</option>
-          <option value="small_square">Small · 方形 640×640</option>
-          <option value="small_landscape">Small · 横向 768×512</option>
-          <option value="normal_portrait" selected>Normal · 纵向 832×1216</option>
-          <option value="normal_square">Normal · 方形 1024×1024</option>
-          <option value="normal_landscape">Normal · 横向 1216×832</option>
-          <option value="large_portrait">Large · 纵向 1024×1536</option>
-          <option value="large_square">Large · 方形 1472×1472</option>
-          <option value="large_landscape">Large · 横向 1536×1024</option>
-          <option value="custom">自定义宽高</option>
-        </select></label>
-        <label class="nai-strip-field"><span>批次</span><input id="nai-count" class="nai-select" type="number" min="1" max="6" step="1" value="1" inputmode="numeric" /></label>
-      </div>
-      <div class="nai-seed-row">
-        <select id="nai-seed-mode" class="nai-select nai-seed-mode">
-          <option value="random">Random：每张随机</option>
-          <option value="fixed">Fixed：批次内固定</option>
-          <option value="increment">Increment：逐张递增</option>
-        </select>
-        <input id="nai-seed" class="nai-seed-input" placeholder="Random 模式无需填写" autocomplete="off" />
-        <button id="nai-seed-random" class="nai-icon-btn" title="生成基础 Seed">随机</button>
-      </div>
-      <div id="nai-custom-resolution" class="nai-resolution-row" hidden>
-        <input id="nai-width" type="number" min="64" step="64" aria-label="宽度" value="832" placeholder="W" />
-        <span>×</span>
-        <input id="nai-height" type="number" min="64" step="64" aria-label="高度" value="1216" placeholder="H" />
-      </div>
-
-      <div class="nai-mode-switch" role="group" aria-label="生成模式">
-        <button type="button" class="active" data-nai-mode="txt2img">文生图</button>
-        <button type="button" data-nai-mode="img2img">图生图</button>
-      </div>
-      <div class="nai-tier-grid">
-        <label><span>正面提示词档位</span><select id="nai-positive-tier" class="nai-select">
-          <option value="off">关闭</option>
-          <option value="standard" selected>Standard</option>
-          <option value="light">Light</option>
-        </select></label>
-        <label><span>负面提示词档位</span><select id="nai-negative-tier" class="nai-select">
-          <option value="off">关闭</option>
-          <option value="light">Light</option>
-          <option value="heavy" selected>Heavy</option>
-          <option value="furry_focus">Furry Focus</option>
-          <option value="human_focus">Human Focus</option>
-        </select></label>
-      </div>
-      <div id="nai-tier-hint" class="nai-tier-hint"></div>
-      <section id="nai-img2img-panel" class="nai-img2img-panel" hidden>
-        <input id="nai-img2img-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
-        <button id="nai-img2img-pick" type="button" class="nai-source-picker">选择基础图</button>
-        <div id="nai-img2img-preview" class="nai-source-preview"><span>尚未选择图片</span></div>
-        <div class="nai-range-grid">
-          <label><span>Strength <output id="nai-strength-value">0.70</output></span><input id="nai-strength" type="range" min="0.01" max="0.99" step="0.01" value="0.70" /></label>
-          <label><span>Noise <output id="nai-noise-value">0.00</output></span><input id="nai-noise" type="range" min="0" max="0.99" step="0.01" value="0" /></label>
-        </div>
-      </section>
+      <!-- Tag Assistant and Visual Builder share PromptBridge state. -->
+      <div id="tag-assistant-root"></div>
+      <div id="visual-prompt-root"></div>
+      <!-- NSFW Scene Builder（成人模式启用；青少年模式禁用空态）。 -->
+      <div id="nsfw-builder-root"></div>
 
       <details class="nai-effective-preview">
         <summary id="nai-effective-toggle"><span>实际发送内容 ▸</span></summary>
@@ -165,27 +118,9 @@
           </div>
         </div>
       </details>
-
-      <details class="nai-advanced" id="nai-advanced-section">
-        <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value"></span></summary>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Sampler</span><select id="nai-sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option><option value="k_dpmpp_2m">DPM++ 2M</option></select></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Scheduler</span><select id="nai-scheduler"><option value="karras">Karras</option><option value="normal">Normal</option><option value="exponential">Exponential</option></select></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" value="23" placeholder="NovelAI 默认" /></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Guidance (CFG)</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="7" placeholder="NovelAI 默认" /></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>CFG Rescale</span><input id="nai-cfg-rescale" type="number" step="0.01" min="0" max="1" value="0" placeholder="0" /></div>
-        <div class="nai-adv-row nai-adv-ctrl"><span>Auto SMEA</span><select id="nai-auto-smea"><option value="false">Off</option><option value="true">On</option></select></div>
-      </details>
-
-      <div class="nai-bottom">
-        <div id="nai-cost" class="nai-cost unknown"><span>Opus 本地预估</span><strong>正在读取参数</strong></div>
-        <div class="nai-run-actions">
-          <button id="nai-gen" class="nai-generate" disabled>Generate</button>
-          <button id="nai-cancel" class="nai-cancel" type="button" disabled title="停止尚未发送的图片请求">取消</button>
-        </div>
-        <div id="nai-job" class="nai-job">Ready</div>
-      </div>
     </section>
 
+    <!-- 中：Image Viewer（中心画布 + 缩放 / Pin / 恢复 / 图生图） -->
     <section class="panel nai-center">
       <div class="nai-viewer-toolbar">
         <span id="nai-navi" class="nai-navi"></span>
@@ -202,9 +137,110 @@
       <div id="nai-viewer-meta" class="nai-viewer-footer"></div>
     </section>
 
+    <!-- 右：Generation Settings（基础常显 / Advanced 折叠）+ History（可隐藏） -->
     <section class="panel nai-right">
-      <div class="nai-section-title">History <button id="nai-history-refresh" class="nai-btn-sm" style="margin-left:auto">刷新</button></div>
-      <div id="nai-history" class="nai-history"><div class="empty">暂无生成历史</div></div>
+      <div class="nai-panel-head">
+        <span class="nai-panel-kicker">Generation Settings</span>
+      </div>
+      <div class="nai-settings-body">
+        <div class="nai-quick-toggles">
+          <label class="nai-toggle-item" title="Prompt 追加 transparent background，API 使用 straight_alpha">
+            <input type="checkbox" id="nai-transparent" /><span>透明背景</span>
+          </label>
+        </div>
+
+        <div class="nai-mode-switch" role="group" aria-label="生成模式">
+          <button type="button" class="active" data-nai-mode="txt2img">文生图</button>
+          <button type="button" data-nai-mode="img2img">图生图</button>
+        </div>
+
+        <div class="nai-control-strip">
+          <label class="nai-strip-field"><span>Model</span><select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 Full</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 Curated</option><option value="nai-diffusion-4-5-full">NAI Diffusion V4.5 Full</option><option value="nai-diffusion-4-full">NAI Diffusion V4 Full</option></select></label>
+          <label class="nai-strip-field"><span>尺寸档位</span><select id="nai-resolution-category" class="nai-select">
+            <option value="small_portrait">Small · 纵向 512×768</option>
+            <option value="small_square">Small · 方形 640×640</option>
+            <option value="small_landscape">Small · 横向 768×512</option>
+            <option value="normal_portrait" selected>Normal · 纵向 832×1216</option>
+            <option value="normal_square">Normal · 方形 1024×1024</option>
+            <option value="normal_landscape">Normal · 横向 1216×832</option>
+            <option value="large_portrait">Large · 纵向 1024×1536</option>
+            <option value="large_square">Large · 方形 1472×1472</option>
+            <option value="large_landscape">Large · 横向 1536×1024</option>
+            <option value="custom">自定义宽高</option>
+          </select></label>
+          <label class="nai-strip-field"><span>批次</span><input id="nai-count" class="nai-select" type="number" min="1" max="6" step="1" value="1" inputmode="numeric" /></label>
+        </div>
+
+        <div class="nai-seed-row">
+          <select id="nai-seed-mode" class="nai-select nai-seed-mode">
+            <option value="random">Random：每张随机</option>
+            <option value="fixed">Fixed：批次内固定</option>
+            <option value="increment">Increment：逐张递增</option>
+          </select>
+          <input id="nai-seed" class="nai-seed-input" placeholder="Random 模式无需填写" autocomplete="off" />
+          <button id="nai-seed-random" class="nai-icon-btn" title="生成基础 Seed">随机</button>
+        </div>
+        <div id="nai-custom-resolution" class="nai-resolution-row" hidden>
+          <input id="nai-width" type="number" min="64" step="64" aria-label="宽度" value="832" placeholder="W" />
+          <span>×</span>
+          <input id="nai-height" type="number" min="64" step="64" aria-label="高度" value="1216" placeholder="H" />
+        </div>
+
+        <div class="nai-tier-grid">
+          <label><span>正面提示词档位</span><select id="nai-positive-tier" class="nai-select">
+            <option value="off">关闭</option>
+            <option value="standard" selected>Standard</option>
+            <option value="light">Light</option>
+          </select></label>
+          <label><span>负面提示词档位</span><select id="nai-negative-tier" class="nai-select">
+            <option value="off">关闭</option>
+            <option value="light">Light</option>
+            <option value="heavy" selected>Heavy</option>
+            <option value="furry_focus">Furry Focus</option>
+            <option value="human_focus">Human Focus</option>
+          </select></label>
+        </div>
+        <div id="nai-tier-hint" class="nai-tier-hint"></div>
+
+        <section id="nai-img2img-panel" class="nai-img2img-panel" hidden>
+          <input id="nai-img2img-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+          <button id="nai-img2img-pick" type="button" class="nai-source-picker">选择基础图</button>
+          <div id="nai-img2img-preview" class="nai-source-preview"><span>尚未选择图片</span></div>
+          <div class="nai-range-grid">
+            <label><span>Strength <output id="nai-strength-value">0.70</output></span><input id="nai-strength" type="range" min="0.01" max="0.99" step="0.01" value="0.70" /></label>
+            <label><span>Noise <output id="nai-noise-value">0.00</output></span><input id="nai-noise" type="range" min="0" max="0.99" step="0.01" value="0" /></label>
+          </div>
+        </section>
+
+        <details class="nai-advanced" id="nai-advanced-section">
+          <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value"></span></summary>
+          <div class="nai-adv-row nai-adv-ctrl"><span>Sampler</span><select id="nai-sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option><option value="k_dpmpp_2m">DPM++ 2M</option></select></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>Scheduler</span><select id="nai-scheduler"><option value="karras">Karras</option><option value="normal">Normal</option><option value="exponential">Exponential</option></select></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" value="23" placeholder="NovelAI 默认" /></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>Guidance (CFG)</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="7" placeholder="NovelAI 默认" /></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>CFG Rescale</span><input id="nai-cfg-rescale" type="number" step="0.01" min="0" max="1" value="0" placeholder="0" /></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>Auto SMEA</span><select id="nai-auto-smea"><option value="false">Off</option><option value="true">On</option></select></div>
+        </details>
+      </div>
+
+      <div class="nai-bottom">
+        <div id="nai-cost" class="nai-cost unknown"><span>Opus 本地预估</span><strong>正在读取参数</strong></div>
+        <div class="nai-run-actions">
+          <button id="nai-gen" class="nai-generate" disabled>Generate</button>
+          <button id="nai-cancel" class="nai-cancel" type="button" disabled title="停止尚未发送的图片请求">取消</button>
+        </div>
+        <div id="nai-job" class="nai-job">Ready</div>
+      </div>
+
+      <!-- History：右侧可折叠（纯 CSS 开关，点击标题隐藏/显示） -->
+      <div class="nai-history-box">
+        <input type="checkbox" id="nai-history-check" class="nai-history-check" checked />
+        <div class="nai-history-head">
+          <label for="nai-history-check" class="nai-history-toggle" title="显示 / 隐藏 History"><span>History</span><span class="nai-history-caret">▾</span></label>
+          <button id="nai-history-refresh" class="nai-btn-sm">刷新</button>
+        </div>
+        <div id="nai-history" class="nai-history"><div class="empty">暂无生成历史</div></div>
+      </div>
     </section>
   </main>
 
@@ -452,6 +488,7 @@
         <label><input type="radio" name="import-mode" value="replace" checked /> 替换</label>
         <label><input type="radio" name="import-mode" value="append" /> 追加到目标</label>
         <div class="spacer"></div>
+        <button id="import-auto-split" title="按语义自动整理 Base / 角色（多角色身份）">自动整理角色</button>
         <button id="import-preview" class="primary">解析预览</button>
       </div>
       <div id="import-preview-box" class="import-preview-box" style="display:none"></div>
@@ -488,6 +525,8 @@
   <div id="nai-autocomplete" class="nai-autocomplete" role="listbox" hidden></div>
 
   <script type="module" src="/static/prompt-compiler.js"></script>
+  <script type="module" src="/static/nai-structured.js"></script>
+  <script type="module" src="/static/nai-input-keys.js"></script>
   <script defer src="/static/app.js"></script>
 </body>
 </html>

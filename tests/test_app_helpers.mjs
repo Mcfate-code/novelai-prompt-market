@@ -1,17 +1,22 @@
 /**
- * app.js 纯函数回归测试（P1 修复：结构化 Base 标签、购物车角色删除目标重映射、模态导入 seq）
+ * app.js 纯函数回归测试（P0 结构化边界 + P1/P2 既有修复）
  * 运行方式: env -u NODE_OPTIONS node --test tests/test_app_helpers.mjs
  *
  * app.js 依赖浏览器全局（顶层 DOM 事件绑定、init() 调用），无法在 Node 中直接 import。
  * 因此沿用 tests/test_prompt_compiler.mjs 的既有约定：
  *   1) 用「balanced-brace 源码提取」把 app.js 中无 DOM 依赖的纯函数
- *      remapNaiTagTarget / insertTagIntoString / naiStructuredDisplayText / naiStructuredRequest
+ *      remapNaiTagTarget / insertTagIntoString / naiStructuredBaseLine 等
  *      原样取出并求值，直接测试真实实现；
- *   2) 依赖 DOM/async 的 addTagToTarget / doImportFromModal / pollInbox 分支，
- *      用与 app.js 逐行一致的纯逻辑模拟，断言修复后的行为。
+ *   2) 依赖 DOM/async 的 naiFillFromCart / naiGenerate / doImportFromModal / pollInbox 分支，
+ *      用与 app.js 逐行一致的纯逻辑模拟 + 源码契约断言，验证修复后的行为。
  *
- * 覆盖（本次 P1 修复）：
- * - 结构化 Base 点击 -> naiStructuredRequest 保持有效，编译出的 effective Base 无 Base:/Character: 标记
+ * 覆盖（P0 结构化边界）：
+ * - #nai-prompt 只存 Base（base + free_text），#nai-neg 只存 Global UC，角色只存 naiCharacters
+ * - 编辑角色 1 后生成 payload：prompt 干净、角色逐项精确、Base / 未编辑角色不受影响
+ * - 结构化 legacy rawPrompt 恢复用 parseStructuredRawPrompt 拆解分发，绝不整串写回 Base
+ * - 源码契约：naiStructuredDraft / naiStructuredRequest 判定门已移除，快照持久化 state.prompt
+ *
+ * 覆盖（P1 修复）：
  * - 非结构化 Base / 角色目标行为保持不变
  * - 购物车角色删除前 state.target 重映射：char:1 删 0 / char:2 删 0 / char:0 删 0 / char:1 删 2
  * - 模态导入立即应用后 inboxSeq 推进到响应 seq，同一 seq 不再被 pollInbox 重复应用
@@ -26,12 +31,14 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { compileGenerationPrompts } from "../static/prompt-compiler.js";
+import * as NaiStructured from "../static/nai-structured.js";
+// app.js 的 naiStructuredBaseLine 已收敛为对 window.NaiStructured 的薄委托
+// （实现收敛在 static/nai-structured.js 纯模块）。
+// Node 无浏览器 window，这里用真实模块补上同一实现，让被提取的委托函数可运行。
+globalThis.window = { NaiStructured };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_JS = readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
-
-const V5_FULL = "nai-diffusion-5-full";
 
 // ---- 源码提取：把 app.js 中指定顶层函数原样取出（balanced-brace，容忍 ${...} 模板字面量） ----
 function extractFunction(name) {
@@ -65,9 +72,6 @@ function loadFunctionBound(name, freeVars) {
 
 const insertTagIntoString = loadFunction("insertTagIntoString");
 const remapNaiTagTarget = loadFunction("remapNaiTagTarget");
-const naiStructuredDisplayText = loadFunction("naiStructuredDisplayText");
-// naiStructuredRequest 的自由变量 naiStructuredDraft 通过函数参数注入
-const naiStructuredRequest = loadFunctionBound("naiStructuredRequest", ["naiStructuredDraft"]);
 
 // ---- P2 翻译一致性纯函数（无自由变量） ----
 const shouldAcceptTranslation = loadFunction("shouldAcceptTranslation");
@@ -137,55 +141,93 @@ test("structured Base manual edit in multi-character display keeps recognized ba
   assert.deepEqual(desired.filter((key) => !current.includes(key)), ["blue eyes"], "新 Base 标签被识别");
 });
 
-// ---- 5. P3 修复：结构化 char/global UC 购物车变更 -> 重建 display（用活 naiCharacters） ----
-// 与 app.js setGenerationTargetText 的 char:N / global_uc 分支逐行一致的纯逻辑模拟（DOM 跳过）
-function simulateStructuredTargetSync(draft, naiCharacters, target, text) {
-  const synced = true; // display 与 displayPrompt 同步（本测试焦点）
-  const promptEl = { value: draft.displayPrompt };
-  const negEl = { value: draft.displayNegative };
-  const rebuild = () => {
-    draft.displayPrompt = naiStructuredDisplayText(draft.basePrompt, naiCharacters, draft.globalUc);
-    promptEl.value = draft.displayPrompt;
-  };
-  if (target === "global_uc") {
-    negEl.value = text;
-    draft.globalUc = text;
-    draft.displayNegative = text;
-    if (synced) rebuild();
-  } else {
-    const m = String(target).match(/^char:(\d+)(:uc)?$/);
-    const c = m && naiCharacters[Number(m[1])];
-    if (c) {
-      c[m[2] ? "negative_prompt" : "prompt"] = text;
-      if (synced) rebuild();
-    }
-  }
-  return { promptEl, negEl };
+// ---- 5. P0 结构化边界：fill + 编辑角色 + 生成 payload 必须从权威槽位构造 ----
+// 与 app.js naiFillFromCart / naiGenerate 的 P0 逻辑逐行一致的纯逻辑模拟（DOM/异步跳过）。
+// 证明：#nai-prompt 只存 Base，角色只存 naiCharacters，生成 payload 的 prompt 干净、
+// characters 逐项精确（编辑角色 1 不影响角色 2 / Base）。
+function simulateFillPayload({ r, edits = [] }) {
+  // naiFillFromCart：Base（base + free_text）-> #nai-prompt；global_uc -> #nai-neg；角色 -> naiCharacters
+  const basePrompt = [r.base, r.free_text].filter((part) => part?.trim()).join(", ");
+  const naiCharacters = (r.characters || [])
+    .filter((character) => character.prompt?.trim())
+    .map((character) => ({ prompt: character.prompt, negative_prompt: character.uc || "", position: character.position === "auto" ? null : character.position }));
+  const promptEl = { value: basePrompt };
+  const negEl = { value: r.global_uc || "" };
+  // 编辑角色 textarea：更新活 naiCharacters（与 #nai-character-list 的 input 处理器一致）
+  for (const [index, text] of edits) naiCharacters[index].prompt = text;
+  // naiGenerate：prompt=Base trim、negative=Global UC、characters=naiCollectCharacters()
+  const collectCharacters = () => naiCharacters.map((c) => ({
+    prompt: String(c.prompt || "").trim(),
+    negative_prompt: String(c.negative_prompt || "").trim(),
+    position: c.position ? { x: Number(c.position.x), y: Number(c.position.y) } : null,
+  })).filter((c) => c.prompt);
+  return { promptEl, negEl, payload: { prompt: promptEl.value.trim(), negative_prompt: negEl.value, characters: collectCharacters() } };
 }
 
-test("structured char/global UC cart sync rebuilds display from live naiCharacters (P3-A)", () => {
-  const draft = {
-    displayPrompt: "Base: 1girl\nCharacter 1: nahida\nGlobal UC: lowres",
-    displayNegative: "lowres",
-    basePrompt: "1girl",
-    globalUc: "lowres",
+test("P0 fill + character edit yields clean payload with exact per-character prompts", () => {
+  const r = {
+    base: "bedroom, night",
+    free_text: "",
+    global_uc: "lowres, bad anatomy",
+    characters: [
+      { prompt: "citlali", uc: "lowres", position: null },
+      { prompt: "nahida, green hair", uc: "", position: null },
+    ],
   };
-  const naiCharacters = [{ prompt: "nahida", negative_prompt: "", position: null }];
+  const { promptEl, negEl, payload } = simulateFillPayload({ r, edits: [[0, "citlali, blue eyes"]] });
 
-  // 购物车 char:0 变更 -> 更新活角色 + 用活 naiCharacters 重建 displayPrompt
-  const afterChar = simulateStructuredTargetSync(draft, naiCharacters, "char:0", "nahida, blue eyes");
-  assert.equal(naiCharacters[0].prompt, "nahida, blue eyes");
-  assert.equal(afterChar.promptEl.value, "Base: 1girl\nCharacter 1: nahida, blue eyes\nGlobal UC: lowres");
-  assert.equal(draft.displayPrompt, afterChar.promptEl.value, "displayPrompt 与 textarea 保持一致");
-  assert.ok(naiStructuredRequest(draft)(afterChar.promptEl.value, draft.displayNegative), "char 同步后 structured request 仍有效");
+  // #nai-prompt 只存干净 Base（绝不带 Base:/Character N:/Global UC: 标记）
+  assert.equal(promptEl.value, "bedroom, night");
+  assert.equal(negEl.value, "lowres, bad anatomy");
 
-  // 购物车 global_uc 变更 -> 更新 #nai-neg + displayNegative + globalUc + 重建 display
-  const afterUc = simulateStructuredTargetSync(draft, naiCharacters, "global_uc", "lowres, bad anatomy");
-  assert.equal(draft.globalUc, "lowres, bad anatomy");
-  assert.equal(draft.displayNegative, "lowres, bad anatomy");
-  assert.equal(afterUc.negEl.value, "lowres, bad anatomy", "#nai-neg 与 displayNegative 一致");
-  assert.equal(afterUc.promptEl.value, "Base: 1girl\nCharacter 1: nahida, blue eyes\nGlobal UC: lowres, bad anatomy");
-  assert.ok(naiStructuredRequest(draft)(afterUc.promptEl.value, afterUc.negEl.value), "global UC 同步后 structured request 仍有效");
+  // 生成 payload：prompt 干净、Global UC 独立、角色逐项精确
+  assert.equal(payload.prompt, "bedroom, night");
+  assert.ok(!/Base:|Character\s+\d+:|Global UC:/.test(payload.prompt), `prompt must be clean (got: ${payload.prompt})`);
+  assert.equal(payload.negative_prompt, "lowres, bad anatomy");
+  assert.equal(payload.characters.length, 2);
+  assert.equal(payload.characters[0].prompt, "citlali, blue eyes", "edited character 1 only in characters[0].prompt");
+  assert.equal(payload.characters[1].prompt, "nahida, green hair", "untouched character 2 preserved");
+  assert.equal(payload.characters[0].negative_prompt, "lowres");
+});
+
+test("P0 single-character and free-text cases stay valid", () => {
+  // 单角色 + free text 折叠进 Base，不丢 tag
+  const single = simulateFillPayload({ r: { base: "1girl", free_text: "sitting on bed", global_uc: "", characters: [{ prompt: "citlali", uc: "lowres", position: null }] } });
+  assert.equal(single.promptEl.value, "1girl, sitting on bed");
+  assert.equal(single.payload.characters.length, 1);
+  assert.equal(single.payload.characters[0].prompt, "citlali");
+  // 无角色：payload.characters 为空，prompt 干净
+  const none = simulateFillPayload({ r: { base: "1girl, solo", free_text: "", global_uc: "blurry", characters: [] } });
+  assert.equal(none.payload.prompt, "1girl, solo");
+  assert.equal(none.payload.negative_prompt, "blurry");
+  assert.deepEqual(none.payload.characters, []);
+});
+
+// P0 结构化边界：结构化 legacy rawPrompt 恢复必须拆解分发，绝不整串写回 Base。
+test("P0 legacy structured rawPrompt restore distributes fields via parseStructuredRawPrompt", () => {
+  const rawPrompt = "Base: bedroom, night\nCharacter 1: citlali\nCharacter 1 UC: lowres\nCharacter 2: nahida, green hair\nGlobal UC: bad anatomy";
+  const parsed = NaiStructured.parseStructuredRawPrompt(rawPrompt, "bad anatomy");
+  assert.ok(parsed, "structured legacy rawPrompt parses");
+  assert.equal(parsed.basePrompt, "bedroom, night");
+  assert.ok(!/Character\s+\d+:|Global UC:/.test(parsed.basePrompt), "base must not carry character/UC markers");
+  assert.equal(parsed.globalUc, "bad anatomy");
+  assert.equal(parsed.characters.length, 2);
+  assert.equal(parsed.characters[0].prompt, "citlali");
+  assert.equal(parsed.characters[0].negative_prompt, "lowres");
+  assert.equal(parsed.characters[1].prompt, "nahida, green hair");
+});
+
+// P0 结构化边界源码契约：Base 干净、无 display 判定门、快照始终持久化 state.prompt。
+test("P0 app.js contract: no structured display in #nai-prompt, snapshot keeps state.prompt", () => {
+  // naiFillFromCart 把 Base 写入 #nai-prompt（不再是 structured/flat 混合串）
+  assert.match(APP_JS, /\$\("#nai-prompt"\)\.value = basePrompt/);
+  // 结构化 draft / request 判定门已移除
+  assert.doesNotMatch(APP_JS, /naiStructuredDraft/);
+  assert.doesNotMatch(APP_JS, /function naiStructuredRequest/);
+  // naiGenerate 的 payload 直接取 prompt.trim()，不再经 naiStructuredRequest
+  assert.match(APP_JS, /naiCompileGeneration\(prompt\.trim\(\), negativePrompt\)/);
+  // 快照始终持久化当前结构化状态，绝不用 emptyPromptState() 顶替
+  assert.match(APP_JS, /structured_state: state\.prompt/);
 });
 
 // ---- 6. P3 修复：接受 autocomplete 建议不再立即重开弹窗 ----
@@ -245,27 +287,6 @@ test("workspaceTabToTarget maps workspace tab to state.target (BUG 2)", () => {
   assert.equal(workspaceTabToTarget(2), "char:2", "数字下标也映射为 char:N");
 });
 
-// ---- 与 app.js addTagToTarget 的 base 分支逐行一致的纯逻辑模拟（DOM 部分跳过） ----
-function simulateStructuredBaseClick(draft, naiCharacters, tag) {
-  // app.js: if (state.target === "base") { ... promptEl.value = ... }
-  const promptEl = { value: draft ? draft.displayPrompt : "" };
-  if (draft) {
-    draft.basePrompt = insertTagIntoString(draft.basePrompt, tag);
-    draft.displayPrompt = naiStructuredDisplayText(draft.basePrompt, naiCharacters, draft.globalUc);
-    promptEl.value = draft.displayPrompt;
-  } else {
-    promptEl.value = insertTagIntoString(promptEl.value, tag);
-  }
-  return promptEl;
-}
-
-// ---- 与 app.js 角色目标分支一致的纯逻辑模拟 ----
-function simulateCharacterClick(naiCharacters, index, tag) {
-  const character = naiCharacters[index];
-  character.prompt = insertTagIntoString(character.prompt, tag);
-  return character;
-}
-
 // ---- 与 app.js doImportFromModal / pollInbox 一致的纯逻辑模拟 ----
 function simulateImportFlow({ initialSeq = 0, importResponse }) {
   let inboxSeq = initialSeq;
@@ -287,87 +308,20 @@ function simulateImportFlow({ initialSeq = 0, importResponse }) {
   return { doImportFromModal, pollInbox, getSeq: () => inboxSeq, applied };
 }
 
-// ---- 1. 结构化 Base 点击（P1-A）----
-
-test("structured Base click updates basePrompt and keeps naiStructuredRequest valid", () => {
-  const draft = {
-    displayPrompt: "Base: 1girl, forest\nCharacter 1: nahida",
-    displayNegative: "lowres",
-    basePrompt: "1girl, forest",
-    globalUc: "lowres",
-    characters: [{ prompt: "nahida" }],
-  };
-  const naiCharacters = [{ prompt: "nahida", negative_prompt: "", position: null }];
-
-  const promptEl = simulateStructuredBaseClick(draft, naiCharacters, "blue eyes");
-
-  // 权威 Base 状态用既有插入语义更新
-  assert.equal(draft.basePrompt, "1girl, forest, blue eyes");
-  // displayPrompt 从更新的 Base + 现有 naiCharacters[] 重建，并回写 textarea（globalUc 非空时保留 Global UC 行）
-  assert.equal(draft.displayPrompt, "Base: 1girl, forest, blue eyes\nCharacter 1: nahida\nGlobal UC: lowres");
-  assert.equal(promptEl.value, draft.displayPrompt);
-  // naiStructuredRequest 仍与 textarea 匹配（非 null），解析回干净的 basePrompt
-  const structured = naiStructuredRequest(draft)(promptEl.value, draft.displayNegative);
-  assert.ok(structured, "structured request must stay valid after Base tag click");
-  assert.equal(structured.prompt, "1girl, forest, blue eyes");
-  assert.equal(structured.negative_prompt, "lowres");
-
-  // 编译出的 effective Base 不得混入 Base:/Character: 结构化标记
-  const compiled = compileGenerationPrompts(structured.prompt, structured.negative_prompt, V5_FULL, { positiveTier: "standard", negativeTier: "heavy" });
-  assert.equal(compiled.effectivePositive, "1girl, forest, blue eyes, very aesthetic, masterpiece, no text");
-  assert.ok(!compiled.effectivePositive.includes("Base:"), "no Base: marker leaks into effective positive");
-  assert.ok(!compiled.effectivePositive.includes("Character:"), "no Character: marker leaks into effective positive");
-});
-
-test("structured Base click with empty basePrompt inserts Base line and stays valid", () => {
-  const draft = {
-    displayPrompt: "Character 1: nahida",
-    displayNegative: "",
-    basePrompt: "",
-    globalUc: "",
-    characters: [{ prompt: "nahida" }],
-  };
-  const naiCharacters = [{ prompt: "nahida", negative_prompt: "", position: null }];
-
-  const promptEl = simulateStructuredBaseClick(draft, naiCharacters, "solo");
-
-  assert.equal(draft.basePrompt, "solo");
-  assert.equal(draft.displayPrompt, "Base: solo\nCharacter 1: nahida");
-  assert.equal(promptEl.value, draft.displayPrompt);
-  const structured = naiStructuredRequest(draft)(promptEl.value, draft.displayNegative);
-  assert.ok(structured, "structured request must stay valid (empty base before click)");
-  assert.equal(structured.prompt, "solo");
-  const compiled = compileGenerationPrompts(structured.prompt, structured.negative_prompt, V5_FULL, { positiveTier: "standard", negativeTier: "heavy" });
-  assert.ok(!compiled.effectivePositive.includes("Base:"));
-  assert.ok(!compiled.effectivePositive.includes("Character:"));
-});
+// ---- 1. 非结构化 Base 点击（P1-A，纯 flat 行为不变）----
 
 test("non-structured Base behavior unchanged: tag appended straight to textarea", () => {
-  const promptEl = simulateStructuredBaseClick(null, [], "blue eyes");
-  assert.equal(promptEl.value, "blue eyes");
-  const again = simulateStructuredBaseClick(null, [], "blue eyes");
-  assert.equal(again.value, "blue eyes", "duplicate tag must not be re-added (insertTagIntoString dedup)");
+  let value = "";
+  value = insertTagIntoString(value, "blue eyes");
+  assert.equal(value, "blue eyes");
+  value = insertTagIntoString(value, "blue eyes");
+  assert.equal(value, "blue eyes", "duplicate tag must not be re-added (insertTagIntoString dedup)");
 });
 
-test("character target behavior unchanged: character prompt updated, structured draft untouched", () => {
-  const draft = {
-    displayPrompt: "Base: 1girl\nCharacter 1: nahida",
-    displayNegative: "lowres",
-    basePrompt: "1girl",
-    globalUc: "lowres",
-    characters: [{ prompt: "nahida" }],
-  };
+test("character target behavior unchanged: character prompt updated, base untouched", () => {
   const naiCharacters = [{ prompt: "nahida", negative_prompt: "", position: null }];
-  const before = { ...draft };
-
-  const character = simulateCharacterClick(naiCharacters, 0, "blue eyes");
-
-  assert.equal(character.prompt, "nahida, blue eyes");
-  // 角色目标分支不得改动结构化草稿的 Base / displayPrompt
-  assert.equal(draft.basePrompt, before.basePrompt);
-  assert.equal(draft.displayPrompt, before.displayPrompt);
-  // naiStructuredRequest 仍匹配原 textarea
-  assert.ok(naiStructuredRequest(draft)(before.displayPrompt, draft.displayNegative), "character path must not invalidate structured request");
+  naiCharacters[0].prompt = insertTagIntoString(naiCharacters[0].prompt, "blue eyes");
+  assert.equal(naiCharacters[0].prompt, "nahida, blue eyes");
 });
 
 // ---- 2. 购物车角色删除目标重映射（P1-B）----
