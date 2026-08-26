@@ -37,14 +37,15 @@ test("runs requests strictly in sequence and stores a recipe per image", async (
   assert.deepEqual(saved.map((item) => item.recipe.settings.seed), [10, 11, 12]);
 });
 
-test("enforces the configured local batch ceiling", () => {
+test("enforces the configured local batch ceiling (hard-capped at 6)", () => {
   const runner = new ApiBatchController({
     provider: { generateOne: async () => ({ images: [], correlationId: "unused" }) },
     saveImage: async () => ({}),
-    getMaxCount: () => 12,
+    getMaxCount: () => 12, // 配置即使超过 6，也被硬钳制到 6
   });
-  assert.equal(runner.validateCount(12), 12);
-  assert.throws(() => runner.validateCount(13), /1-12/);
+  assert.equal(runner.validateCount(6), 6);
+  assert.throws(() => runner.validateCount(7), /1-6/);
+  assert.throws(() => runner.validateCount(12), /1-6/, "配置上限 12 也会被钳制到 6");
 });
 
 test("cancel stops requests after the current image", async () => {

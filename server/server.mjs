@@ -58,9 +58,7 @@ const apiBatches = new ApiBatchController({
       parameters_json: JSON.stringify(meta.recipe), batch_id: meta.batch_id, batch_index: meta.batch_index,
       batch_total: meta.batch_total, correlation_id: meta.correlation_id,
     });
-    if (!saved.duplicate) {
-      broadcast({ type: "asset.created", assetId: saved.id, filePath: saved.file_path, duplicate: false, batchId: meta.batch_id, snapshotId: meta.snapshot_id ?? null, gallerySync: "pending" });
-    }
+    broadcast({ type: "asset.created", assetId: saved.id, filePath: saved.file_path, batchId: meta.batch_id, snapshotId: meta.snapshot_id ?? null, gallerySync: "pending" });
     try {
       await pushToPythonGallery({ assetId: saved.id });
       broadcast({ type: "asset.sync", assetId: saved.id, batchId: meta.batch_id, snapshotId: meta.snapshot_id ?? null, gallerySync: "succeeded" });
@@ -315,7 +313,7 @@ const server = createServer((req, res) => {
         const { mime, buffer } = decodeImg2ImgSource(input.source_image);
         const saved = store.saveImage(buffer, { mime, source: "img2img-source" });
         res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, source_image_path: `/library/${saved.file_path}`, source_image_name: String(input.source_image_name || "基础图"), duplicate: saved.duplicate }));
+        res.end(JSON.stringify({ ok: true, source_image_path: `/library/${saved.file_path}`, source_image_name: String(input.source_image_name || "基础图") }));
       } catch (cause) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, code: "INVALID_IMG2IMG_SOURCE", error: cause.message }));

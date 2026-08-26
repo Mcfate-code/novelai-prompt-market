@@ -389,8 +389,8 @@
       <section class="settings-section">
         <h4>NovelAI 生图</h4>
         <label class="setting-field"><span>批处理上限</span><output id="setting-novelai-batch-max-value">6 张</output></label>
-        <input id="setting-novelai-batch-max" type="range" min="1" max="100" step="1" value="6" aria-label="NovelAI 批处理上限" />
-        <p class="setting-help">单个批次最多可排队 100 张；请求会严格串行发送。数值越大，潜在 Anlas 消耗越高。</p>
+        <input id="setting-novelai-batch-max" type="range" min="1" max="6" step="1" value="6" aria-label="NovelAI 批处理上限" />
+        <p class="setting-help">单个批次最多可排队 6 张；请求会严格串行发送。数值越大，潜在 Anlas 消耗越高。</p>
         <label class="setting-toggle"><input id="setting-novelai-example-credit-warning" type="checkbox" checked /><span>生成 NovelAI 标签例图前提示可能使用积分</span></label>
         <label class="setting-field-stack"><span>NovelAI 例图提示词模板</span><input id="setting-novelai-example-prompt" type="text" autocomplete="off" placeholder="{tag}, {rating}, masterpiece, best quality, very aesthetic, absurdres" /></label>
         <p class="setting-help">生成标签例图时使用的默认提示词。{tag} 会被替换为目标标签（自动加双花括号强调），{rating} 替换为 safe / nsfw。必须保留 {tag} 占位符。</p>

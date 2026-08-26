@@ -137,6 +137,7 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 python -m pip install -r requirements.txt
+npm install                          # Node 层运行时依赖（undici、jszip）
 python app.py
 ```
 
@@ -145,8 +146,11 @@ Windows（PowerShell）：
 ```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
+npm install
 .venv\Scripts\python app.py
 ```
+
+> `npm install` 只安装源码真实用到的两个运行时依赖（`undici` 代理支持、`jszip` 官方响应解压），不涉及任何前端构建。安装产物落在仓库根目录 `node_modules/`（已 gitignore）。
 
 ### 访问
 
@@ -164,6 +168,8 @@ python -m venv .venv
 ```
 
 脚本使用 `$HOME/.workbuddy` 作为默认本机目录（可用 `WORKBUDDY_HOME` 覆盖），Node 可用 `NODE_BIN` 指定。生图走官方 API，无需 Edge / CDP / 浏览器登录。
+
+Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici")` / `require("jszip")` 加载，按标准 Node 解析从 `server/` 向上找到仓库根目录的 `node_modules/`——即 `npm install` 后的产物。为兼容本机 WorkBuddy 托管环境，`start-nai.sh` 与 `app.py` 会额外把 `NODE_PATH` 指向 `$WORKBUDDY_HOME/binaries/node/workspace/node_modules` 作为**可选 fallback**；这不是运行前提，`npm install` 后使用任意系统 Node 22+ 即可独立运行。
 
 ### macOS 常驻运行（可选）
 

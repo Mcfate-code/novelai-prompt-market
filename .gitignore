@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 venv/
 
+# Node
+node_modules/
+
 # Data files (DB, user data)
 data/
 *.sqlite

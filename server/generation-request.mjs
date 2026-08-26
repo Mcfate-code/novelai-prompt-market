@@ -38,7 +38,8 @@ const MAX_EDGE = 1536;
 const MAX_PIXELS = MAX_EDGE * MAX_EDGE;
 const MAX_SEED = 0xFFFFFFFF;
 const MIN_SEED = 0;
-const MAX_LOCAL_BATCH_COUNT = 100;
+// 本地串行队列总数的硬上限（与 README 契约 1-6 一致），超过即拒绝。
+const MAX_LOCAL_BATCH_COUNT = 6;
 
 export const RESOLUTION_PRESETS = Object.freeze({
   small_portrait: { width: 512, height: 768, category: "small", maxCount: 6 },

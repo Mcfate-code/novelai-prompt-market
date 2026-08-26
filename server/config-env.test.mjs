@@ -38,15 +38,27 @@ test("honors WORKBUDDY_HOME for token, batch limit and settings-file proxy", asy
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeSettings(dir, {
     novelai_api_token: "file-token-abc",
-    novelai_batch_max_count: 12,
+    novelai_batch_max_count: 6,
     proxy_enabled: true,
     proxy_url: "http://file-proxy:1234",
   });
 
   const result = await probeProviderEnv({ workbuddyHome: dir });
   assert.equal(result.configured, true, "token 应从 $WORKBUDDY_HOME/tags-market-settings.json 读取");
-  assert.equal(result.batchLimit, 12, "batch limit 应从 $WORKBUDDY_HOME 读取");
+  assert.equal(result.batchLimit, 6, "batch limit 应从 $WORKBUDDY_HOME 读取");
   assert.equal(result.network, "http://file-proxy:1234", "无 NAI_PROXY_URL 时使用设置文件里的代理");
+});
+
+test("clamps settings-file batch limit above 6 down to the hard cap", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "tags-market-env-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeSettings(dir, {
+    novelai_api_token: "file-token-abc",
+    novelai_batch_max_count: 42, // 历史值可能超过 6，读取时钳制到硬上限
+  });
+
+  const result = await probeProviderEnv({ workbuddyHome: dir });
+  assert.equal(result.batchLimit, 6, ">6 的 batch limit 应被钳制到 6");
 });
 
 test("NAI_PROXY_URL environment variable takes priority over the settings-file proxy", async (t) => {

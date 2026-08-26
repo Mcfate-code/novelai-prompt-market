@@ -109,7 +109,7 @@ export function readNovelAIBatchLimit() {
   if (!existsSync(TOKEN_FILE)) return 6;
   try {
     const value = Number(JSON.parse(readFileSync(TOKEN_FILE, "utf8"))?.novelai_batch_max_count);
-    return Number.isInteger(value) ? Math.max(1, Math.min(100, value)) : 6;
+    return Number.isInteger(value) ? Math.max(1, Math.min(6, value)) : 6;
   } catch {
     return 6;
   }

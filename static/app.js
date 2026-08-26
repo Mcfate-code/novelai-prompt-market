@@ -228,8 +228,8 @@ async function saveUserSettings() {
     if (!Number.isFinite(payload.cache_limit_mb) || payload.cache_limit_mb < 0) {
       throw new Error("缓存上限必须是 0 或更大的数字");
     }
-    if (!Number.isInteger(payload.novelai_batch_max_count) || payload.novelai_batch_max_count < 1 || payload.novelai_batch_max_count > 100) {
-      throw new Error("批处理上限必须是 1-100");
+    if (!Number.isInteger(payload.novelai_batch_max_count) || payload.novelai_batch_max_count < 1 || payload.novelai_batch_max_count > 6) {
+      throw new Error("批处理上限必须是 1-6");
     }
     if (payload.novelai_example_prompt_template && !payload.novelai_example_prompt_template.includes("{tag}")) {
       throw new Error("例图提示词模板必须包含 {tag} 占位符");
@@ -3197,7 +3197,7 @@ function naiResolutionPresetForSize(width, height) {
 
 function naiBatchMaxCount() {
   const configured = Number(userSettings.novelai_batch_max_count);
-  return Number.isInteger(configured) ? Math.max(1, Math.min(100, configured)) : 6;
+  return Number.isInteger(configured) ? Math.max(1, Math.min(6, configured)) : 6;
 }
 
 function naiSyncCountOptions() {

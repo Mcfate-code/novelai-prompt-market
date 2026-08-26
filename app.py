@@ -289,7 +289,7 @@ def _load_user_settings() -> dict:
     data["baidu_translate_appid"] = str(os.environ.get("BAIDU_TRANSLATE_APPID") or data.get("baidu_translate_appid") or "").strip()
     data["baidu_translate_secret"] = str(os.environ.get("BAIDU_TRANSLATE_SECRET") or data.get("baidu_translate_secret") or "").strip()
     try:
-        data["novelai_batch_max_count"] = max(1, min(100, int(data.get("novelai_batch_max_count", 6))))
+        data["novelai_batch_max_count"] = max(1, min(6, int(data.get("novelai_batch_max_count", 6))))
     except (TypeError, ValueError):
         data["novelai_batch_max_count"] = 6
     data["novelai_example_credit_warning"] = _parse_bool(data.get("novelai_example_credit_warning"), True)
@@ -1750,7 +1750,7 @@ def save_settings(body: UserSettingsBody):
     incoming["baidu_translate_secret"] = incoming["baidu_translate_secret"].strip()
     incoming["proxy_url"] = incoming["proxy_url"].strip()
     if "novelai_batch_max_count" in incoming:
-        incoming["novelai_batch_max_count"] = max(1, min(100, int(incoming["novelai_batch_max_count"])))
+        incoming["novelai_batch_max_count"] = max(1, min(6, int(incoming["novelai_batch_max_count"])))
     if "novelai_example_prompt_template" in incoming:
         tpl = incoming["novelai_example_prompt_template"]
         if not isinstance(tpl, str) or "{tag}" not in tpl:

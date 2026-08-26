@@ -25,7 +25,7 @@ export class ApiBatchController {
   validateCount(count) {
     const n = Number(count);
     const configuredMax = Number(this.getMaxCount());
-    const maxCount = Number.isInteger(configuredMax) ? Math.max(1, Math.min(100, configuredMax)) : 6;
+    const maxCount = Number.isInteger(configuredMax) ? Math.max(1, Math.min(6, configuredMax)) : 6;
     if (!Number.isInteger(n) || n < 1 || n > maxCount) throw new Error(`生成数量必须是 1-${maxCount}`);
     return n;
   }

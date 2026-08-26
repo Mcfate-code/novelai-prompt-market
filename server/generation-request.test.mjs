@@ -81,10 +81,18 @@ test("maps official resolution categories and permits a local serial batch", () 
   assert.equal(small.count, 6);
   const normal = normalizeGenerationRequest({ prompt: "x", resolution_category: "normal_portrait", count: 4 });
   assert.deepEqual([normal.settings.width, normal.settings.height], [832, 1216]);
-  assert.equal(normalizeGenerationRequest({ prompt: "x", resolution_category: "normal_portrait", count: 100 }).count, 100);
-  assert.throws(() => normalizeGenerationRequest({ prompt: "x", resolution_category: "normal_portrait", count: 101 }), /1-100/);
+  assert.equal(normalizeGenerationRequest({ prompt: "x", resolution_category: "normal_portrait", count: 6 }).count, 6);
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", resolution_category: "normal_portrait", count: 7 }), /1-6/);
   const custom = normalizeGenerationRequest({ prompt: "x", settings: { width: 512, height: 512 }, count: 6 });
   assert.equal(custom.count, 6);
+});
+
+test("enforces the 1-6 batch hard cap: 6 passes, 7 is rejected", () => {
+  assert.equal(normalizeGenerationRequest({ prompt: "x", count: 6 }).count, 6, "批次上限 6 应通过");
+  assert.equal(normalizeGenerationRequest({ prompt: "x", count: 1 }).count, 1, "下限 1 应通过");
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", count: 7 }), /1-6/, "7 应被拒绝");
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", count: 100 }), /1-6/, "历史 100 也应被拒绝");
+  assert.throws(() => normalizeGenerationRequest({ prompt: "x", count: 0 }), /1-6/, "0 应被拒绝");
 });
 
 test("keeps snapshot_id through normalization, one-image requests and recipes", () => {

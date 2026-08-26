@@ -1,0 +1,16 @@
+{
+  "name": "novelai-prompt-market",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NovelAI 提示词标签超市 —— Node.js 生图联动层（官方 API-only）",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --experimental-sqlite --test server/*.test.mjs"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "undici": "^7.29.0"
+  }
+}

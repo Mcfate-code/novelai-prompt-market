@@ -69,7 +69,7 @@ class SettingsAndVisibilityTest(unittest.TestCase):
                 danbooru_login="tester",
                 danbooru_api_key="first-secret",
                 novelai_api_token="novelai-secret",
-                novelai_batch_max_count=42,
+                novelai_batch_max_count=6,
                 novelai_example_credit_warning=False,
             )
         )
@@ -78,7 +78,7 @@ class SettingsAndVisibilityTest(unittest.TestCase):
         self.assertEqual(saved["danbooru_login"], "tester")
         self.assertTrue(saved["has_danbooru_api_key"])
         self.assertTrue(saved["novelai_configured"])
-        self.assertEqual(saved["novelai_batch_max_count"], 42)
+        self.assertEqual(saved["novelai_batch_max_count"], 6)
         self.assertFalse(saved["novelai_example_credit_warning"])
         self.assertNotIn("novelai_api_token", saved)
         self.assertEqual(stat.S_IMODE(self.settings_path.stat().st_mode), 0o600)
@@ -98,6 +98,32 @@ class SettingsAndVisibilityTest(unittest.TestCase):
         self.assertEqual(raw["danbooru_api_key"], "first-secret")
         self.assertEqual(raw["novelai_api_token"], "novelai-secret")
         self.assertTrue(app.get_settings()["adolescent_mode"])
+
+    def test_batch_max_count_is_clamped_to_hard_cap_6(self):
+        # 保存超过 6 的批处理上限应被钳制到 6；6 及以下原样保留。
+        app.save_settings(
+            app.UserSettingsBody(
+                adolescent_mode=True,
+                cache_limit_mb=1024,
+                proxy_enabled=False,
+                proxy_url="",
+                novelai_batch_max_count=42,
+                novelai_example_credit_warning=True,
+            )
+        )
+        self.assertEqual(app.get_settings()["novelai_batch_max_count"], 6)
+
+        app.save_settings(
+            app.UserSettingsBody(
+                adolescent_mode=True,
+                cache_limit_mb=1024,
+                proxy_enabled=False,
+                proxy_url="",
+                novelai_batch_max_count=3,
+                novelai_example_credit_warning=True,
+            )
+        )
+        self.assertEqual(app.get_settings()["novelai_batch_max_count"], 3)
 
     def test_string_boolean_settings_are_parsed_strictly(self):
         self.settings_path.write_text(
