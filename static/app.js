@@ -1,5 +1,6 @@
 "use strict";
-import { splitPromptTokens, joinPromptTokens } from "./prompt-tokenizer.js";
+import { splitPromptTokens, joinPromptTokens, serializePromptToken } from "./prompt-tokenizer.js";
+import { rerankResults } from "./gallery-rerank.js";
 
 // ===== 状态 =====
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
@@ -173,9 +174,7 @@ function negativePromptEntries() {
   return out;
 }
 function weightText(entry) {
-  const tag = entry.tag;
-  const weight = Number(entry.weight ?? 1);
-  return weight === 1 ? tag : `${Number(weight.toFixed(2))}::${tag}::`;
+  return serializePromptToken(entry);
 }
 function abbreviateCount(n) {
   const v = Number(n) || 0;
@@ -522,6 +521,7 @@ function replacePromptTokenWithCaret(text, caret, replacement) {
 }
 let naiAutocompleteState = { input: null, target: "base", range: null, results: [], selected: 0, request: 0 };
 let naiAutocompleteSuppress = null; // 一次性抑制：接受建议后若光标仍停在刚插入的完整 tag 内，抑制搜索，避免弹窗立即重开
+let naiPreferences = null; // 缓存 /api/gallery/preferences 聚合（图库变化时失效重载），供 autocomplete 个性化重排
 // 接受建议后判断：query 是否等于刚接受的 tag（等于则跳过搜索，不重开弹窗）。
 function naiAutocompleteSkipSearch(acceptedTag, query) {
   return !!acceptedTag && String(query ?? "").trim().toLocaleLowerCase() === String(acceptedTag).toLocaleLowerCase();
@@ -536,7 +536,8 @@ const naiAutocompleteSearch = debounce(async (input) => {
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(range.query)}`);
     if (request !== naiAutocompleteState.request || document.activeElement !== input) return;
-    naiAutocompleteState = { ...naiAutocompleteState, input, range, results: (data.results || []).slice(0, 8), selected: 0 };
+    const reranked = naiRerankResults(data.results || [], naiAutocompleteState.target);
+    naiAutocompleteState = { ...naiAutocompleteState, input, range, results: reranked.slice(0, 8), selected: 0 };
     renderNaiAutocomplete();
   } catch { closeNaiAutocomplete(); }
 }, 180);
@@ -549,7 +550,9 @@ function renderNaiAutocomplete() {
     const zh = item.zh || "";
     const count = abbreviateCount(item.post_count);
     const viaAlias = /别名/.test(item.match_reason || "");
-    const second = [zh, count, viaAlias ? "via 别名" : ""].filter(Boolean).join(" · ");
+    const pref = naiPreferences?.global_tags?.[naiTagKey(item.tag)];
+    const common = pref && pref.strong > 0 ? "常用" : "";
+    const second = [zh, count, viaAlias ? "via 别名" : "", common].filter(Boolean).join(" · ");
     return `<div role="option" data-autocomplete-index="${i}" aria-selected="${i === selected}"><span class="ac-tag">${esc(item.tag)}</span><small>${esc(second)}</small></div>`;
   }).join("");
   const hint = (typeof window !== "undefined" && window.NaiInputKeys) ? window.NaiInputKeys.buildHintHtml() : "";
@@ -578,6 +581,38 @@ function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
   naiAutocompleteSuppress = item.tag; // 抑制合成 input 触发的搜索，避免弹窗立即重开
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
+
+// ===== Gallery Preference Memory：autocomplete 个性化重排（只在近等搜索相关度内生效） =====
+function naiTagKey(tag) { return String(tag ?? "").toLocaleLowerCase().trim(); }
+// 当前目标上下文：角色身份（与偏好聚合的 character_tags 键对齐）+ 当前 prompt 已选标签（用于共现）。
+function naiRerankContext(target) {
+  const charIdentities = new Set();
+  const promptTags = new Set();
+  const m = String(target || "").match(/^char:(\d+)(:uc)?$/);
+  if (m && naiPreferences) {
+    const ch = naiCharacters[Number(m[1])];
+    if (ch) {
+      for (const t of splitPromptTokens(ch.prompt || "")) {
+        const k = naiTagKey(t);
+        promptTags.add(k);
+        if (naiPreferences.character_tags && naiPreferences.character_tags[k]) charIdentities.add(k);
+      }
+    }
+  } else {
+    for (const t of splitPromptTokens(generationTargetText(target || "base"))) promptTags.add(naiTagKey(t));
+  }
+  return { charIdentities, promptTags };
+}
+// 稳定排序委托给纯模块 static/gallery-rerank.js（可单测）；这里只算当前目标上下文。
+function naiRerankResults(results, target) {
+  if (!naiPreferences || !results || results.length < 2) return results || [];
+  return rerankResults(results, naiPreferences, naiRerankContext(target));
+}
+async function loadNaiPreferences() {
+  try { naiPreferences = await api("/api/gallery/preferences"); }
+  catch { naiPreferences = null; }
+}
+
 function bindNaiAutocomplete(input, target, opts = {}) {
   let keys = null; // 惰性初始化：首次 keydown 时读取 window.NaiInputKeys（模块脚本已加载）
   const ensureKeys = () => {
@@ -683,6 +718,7 @@ async function init() {
   loadDraft();
   await loadUserSettings();
   await mountWorkbenchComponents();
+  loadNaiPreferences(); // 预热偏好聚合（不阻塞初始化）
   const m = await api("/api/models");
   state.models = m.models;
   if (!state.model || !m.models.some((x) => x.id === state.model)) state.model = m.default;
@@ -2745,6 +2781,7 @@ $("#gallery-open-cleanup").addEventListener("click", openGalleryCleanupFolder);
 
 // ===== 图库 =====
 let activeGalleryDir = null;
+let activeGalleryCollection = null; // {kind, value} 或 null（null 表示按目录浏览）
 let galleryItems = [];
 let selectedGalleryFiles = new Set();
 let galleryReviewMode = false;
@@ -2757,6 +2794,20 @@ const GALLERY_ZOOM_LEVELS = ["small", "medium", "large"];
 let galleryZoom = GALLERY_ZOOM_LEVELS.includes(localStorage.getItem(GALLERY_ZOOM_KEY)) ? localStorage.getItem(GALLERY_ZOOM_KEY) : "medium";
 
 function galleryFileKey(dirName, fileName) { return `${dirName}\u0000${fileName}`; }
+// 当前条目所在目录：优先条目自带 dir_name（合集模式跨目录），否则当前目录。
+function galleryDirOf(item) { return (item && item.dir_name) || activeGalleryDir; }
+// 显式动作事件：收藏/取消在服务端由 favorite 端点写；continue/restore 由前端显式上报一次。
+async function sendGalleryEvent(item, type) {
+  if (!item) return;
+  try {
+    await api("/api/gallery/events", { method: "POST", body: JSON.stringify({ dir_name: galleryDirOf(item), file_name: item.file_name, source_asset_id: item.source_asset_id ?? null, event_type: type }) });
+  } catch { /* 事件上报失败不阻断主流程 */ }
+}
+// 设置生成血缘父级：继续生成 / 恢复时写入，随下一次生成进入 meta.parent。
+function setGenerationParent(item) {
+  if (!item) { naiGenerationParent = null; return; }
+  naiGenerationParent = { dir_name: galleryDirOf(item), file_name: item.file_name, source_asset_id: item.source_asset_id ?? null };
+}
 function applyGalleryZoom() {
   const grid = $("#gallery-grid");
   if (!grid) return;
@@ -2776,7 +2827,7 @@ function updateGallerySelectionUi() {
   $("#gallery-selection-status").textContent = count ? `已选择 ${count} 张图片，可批量移入待清理` : "";
   $("#gallery-cleanup-btn").disabled = !count;
   const total = galleryItems.length;
-  const selected = galleryItems.filter((it) => selectedGalleryFiles.has(galleryFileKey(activeGalleryDir, it.file_name))).length;
+  const selected = galleryItems.filter((it) => selectedGalleryFiles.has(galleryFileKey(galleryDirOf(it), it.file_name))).length;
   $("#gallery-select-all").textContent = total && selected === total ? "取消全选" : "全选";
 }
 function setGalleryReviewMode(enabled) {
@@ -2846,7 +2897,7 @@ function selectGalleryReviewItem(index) {
   galleryReviewIndex = Math.max(0, Math.min(galleryItems.length - 1, index));
   const item = galleryItems[galleryReviewIndex];
   document.querySelectorAll(".gallery-card").forEach((card) =>
-    card.classList.toggle("review-selected", card.dataset.file === item.file_name)
+    card.classList.toggle("review-selected", card.dataset.file === item.file_name && card.dataset.dir === galleryDirOf(item))
   );
   renderGalleryReview();
 }
@@ -2867,7 +2918,7 @@ function renderGalleryReview() {
     [prevBtn, nextBtn, favBtn, delBtn].forEach((b) => b && (b.disabled = true));
     return;
   }
-  const imgPath = `/gallery/${encodeURIComponent(activeGalleryDir)}/${encodeURIComponent(item.file_path.split("/").pop())}`;
+  const imgPath = `/gallery/${encodeURIComponent(galleryDirOf(item))}/${encodeURIComponent(item.file_path.split("/").pop())}`;
   const img = document.createElement("img");
   img.className = "gallery-review-img";
   img.alt = "";
@@ -2932,6 +2983,7 @@ async function loadGalleryList() {
   try {
     const data = await api("/api/gallery");
     const el = $("#gallery-dir-list");
+    loadNaiPreferences(); // 图库变化 → 偏好聚合失效，异步重载（不阻塞列表渲染）
     if (!data.dirs.length) {
       activeGalleryDir = null;
       galleryItems = [];
@@ -2941,6 +2993,7 @@ async function loadGalleryList() {
       $("#gallery-grid").innerHTML = `<div class="empty">点击左上「导入图包」上传 zip，或选择左侧目录查看。</div>`;
       updateGallerySelectionUi();
       pendingScroll = null;
+      renderSmartCollections();
       return;
     }
     el.innerHTML = data.dirs.map((d) =>
@@ -2959,8 +3012,43 @@ async function loadGalleryList() {
       updateGallerySelectionUi();
     }
     if (activeGalleryDir) openGalleryDir(activeGalleryDir);
+    else if (activeGalleryCollection) openGalleryCollection(activeGalleryCollection.kind, activeGalleryCollection.value);
     else pendingScroll = null;
+    renderSmartCollections();
   } catch (e) { toast("图库加载失败：" + e.message); }
+}
+
+// ===== Smart Collections（虚拟合集，只过滤索引，绝不移动/复制文件） =====
+async function renderSmartCollections() {
+  const box = $("#gallery-collection-list");
+  if (!box) return;
+  let meta = null;
+  try { meta = await api("/api/gallery/collections"); } catch { box.innerHTML = ""; return; }
+  const fixed = [
+    { kind: "favorites", label: "收藏", count: meta.favorites || 0 },
+    { kind: "continue_generate", label: "继续生成过", count: meta.continued || 0 },
+    { kind: "restore", label: "恢复过", count: meta.restored || 0 },
+  ];
+  const rows = fixed.map((c) =>
+    `<div class="tree-item gallery-collection ${activeGalleryCollection?.kind === c.kind && !activeGalleryCollection.value ? "active" : ""}" data-kind="${c.kind}" data-value="">` +
+    `☆ ${esc(c.label)} <span class="gallery-dir-meta">${c.count}</span></div>`
+  );
+  for (const ch of (meta.characters || []).slice(0, 24)) {
+    rows.push(
+      `<div class="tree-item gallery-collection ${activeGalleryCollection?.kind === "character" && activeGalleryCollection.value === ch.identity ? "active" : ""}" data-kind="character" data-value="${esc(ch.identity)}">` +
+      `👤 ${esc(ch.identity)} <span class="gallery-dir-meta">${ch.count}</span></div>`
+    );
+  }
+  for (const t of (meta.tags || []).slice(0, 24)) {
+    rows.push(
+      `<div class="tree-item gallery-collection ${activeGalleryCollection?.kind === "tag" && activeGalleryCollection.value === t.tag ? "active" : ""}" data-kind="tag" data-value="${esc(t.tag)}">` +
+      `# ${esc(t.tag)} <span class="gallery-dir-meta">${t.count}</span></div>`
+    );
+  }
+  box.innerHTML = rows.join("");
+  box.querySelectorAll(".gallery-collection").forEach((n) =>
+    n.addEventListener("click", () => openGalleryCollection(n.dataset.kind, n.dataset.value))
+  );
 }
 
 // ===== 图库日期分组（仅 nai_generated）：按 item.created_at 本地日期分组，组标题为网格内整行，不嵌套包裹卡片 =====
@@ -2977,17 +3065,19 @@ function galleryDateGroupOf(it) {
   return { key, label: `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日` };
 }
 function galleryCardHtml(it, dirName) {
-  return `<div class="gallery-card ${it.favorite ? "fav" : ""}" data-file="${esc(it.file_name)}">` +
-    `<input class="gallery-select" type="checkbox" aria-label="选择图片" ${selectedGalleryFiles.has(galleryFileKey(dirName, it.file_name)) ? "checked" : ""} />` +
-    `<img src="/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}" loading="lazy" alt="" />` +
+  const dir = it.dir_name || dirName;
+  return `<div class="gallery-card ${it.favorite ? "fav" : ""}" data-file="${esc(it.file_name)}" data-dir="${esc(dir)}">` +
+    `<input class="gallery-select" type="checkbox" aria-label="选择图片" ${selectedGalleryFiles.has(galleryFileKey(dir, it.file_name)) ? "checked" : ""} />` +
+    `<img src="/gallery/${encodeURIComponent(dir)}/${encodeURIComponent(it.file_path.split("/").pop())}" loading="lazy" alt="" />` +
     `<button class="gallery-fav ${it.favorite ? "on" : ""}" title="${it.favorite ? "取消收藏" : "收藏"}">★</button>` +
     `<div class="gallery-card-prompt">${esc(it.prompt)}</div>` +
     `</div>`;
 }
 // 生成 #gallery-grid 的内部 HTML：非 nai_generated 保持原平铺；nai_generated 按日期顺序插标题。
 // 不复制/拆分 galleryItems，卡片仍为网格直接子元素、DOM 顺序与 galleryItems 一致（审阅索引不受影响）。
+// 合集模式跨目录时按条目自身 dir 分组日期；普通目录仍按 dirName。
 function renderGalleryGridHtml(items, dirName) {
-  const grouped = dirName === "nai_generated";
+  const grouped = (activeGalleryCollection ? items.some((it) => (it.dir_name || dirName) === "nai_generated") : dirName === "nai_generated");
   let counts = null;
   if (grouped) {
     counts = new Map();
@@ -3027,8 +3117,51 @@ function refreshGalleryGroupTitles() {
   });
 }
 
+// 渲染 + 绑定当前 galleryItems 到网格。dirName 仅作日期分组/回退用；每张卡片用条目自身 dir。
+function renderGalleryGrid(dirName) {
+  const grid = $("#gallery-grid");
+  applyGalleryZoom();
+  if (!galleryItems.length) {
+    galleryReviewIndex = -1;
+    grid.innerHTML = `<div class="empty">暂无图片</div>`;
+    updateGallerySelectionUi();
+    pendingScroll = null;
+    return;
+  }
+  grid.innerHTML = renderGalleryGridHtml(galleryItems, dirName);
+  updateGallerySelectionUi();
+  if (pendingScroll != null) {
+    const st = pendingScroll; pendingScroll = null;
+    requestAnimationFrame(() => { grid.scrollTop = st; });
+  }
+  grid.querySelectorAll(".gallery-card").forEach((card) => {
+    const itemDir = card.dataset.dir || dirName;
+    const findIndex = () => galleryItems.findIndex((x) => x.file_name === card.dataset.file && (x.dir_name || dirName) === itemDir);
+    const checkbox = card.querySelector(".gallery-select");
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => toggleGalleryFile(itemDir, card.dataset.file, checkbox.checked));
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
+      lastGalleryCardIndex = findIndex();
+      showGalleryPreview(itemDir, card.dataset.file);
+      if (galleryReviewMode) selectGalleryReviewItem(findIndex());
+    });
+    card.addEventListener("dblclick", (e) => {
+      if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
+      openReview(findIndex());
+    });
+    card.querySelector(".gallery-fav").addEventListener("click", (e) => {
+      e.stopPropagation();
+      const fav = !card.classList.contains("fav");
+      toggleGalleryFav(itemDir, card.dataset.file, fav);
+    });
+  });
+  if (galleryReviewMode) selectGalleryReviewItem(Math.max(0, galleryReviewIndex));
+}
+
 async function openGalleryDir(dirName) {
   activeGalleryDir = dirName;
+  activeGalleryCollection = null;
   selectedGalleryFiles.clear();
   $("#gallery-dir-list").querySelectorAll(".gallery-dir").forEach((n) =>
     n.classList.toggle("active", n.dataset.dir === dirName)
@@ -3039,37 +3172,35 @@ async function openGalleryDir(dirName) {
     const data = await api(`/api/gallery/${encodeURIComponent(dirName)}`);
     galleryItems = data.items;
     lastGalleryCardIndex = -1;
-    const grid = $("#gallery-grid");
-    applyGalleryZoom();
-    if (!data.items.length) { galleryReviewIndex = -1; grid.innerHTML = `<div class="empty">该目录暂无图片</div>`; updateGallerySelectionUi(); pendingScroll = null; return; }
-    grid.innerHTML = renderGalleryGridHtml(data.items, dirName);
-    updateGallerySelectionUi();
-    if (pendingScroll != null) {
-      const st = pendingScroll; pendingScroll = null;
-      requestAnimationFrame(() => { grid.scrollTop = st; });
-    }
-    grid.querySelectorAll(".gallery-card").forEach((card) => {
-      const checkbox = card.querySelector(".gallery-select");
-      checkbox.addEventListener("click", (e) => e.stopPropagation());
-      checkbox.addEventListener("change", () => toggleGalleryFile(dirName, card.dataset.file, checkbox.checked));
-      card.addEventListener("click", (e) => {
-        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
-        lastGalleryCardIndex = galleryItems.findIndex((x) => x.file_name === card.dataset.file);
-        showGalleryPreview(dirName, card.dataset.file);
-        if (galleryReviewMode) selectGalleryReviewItem(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
-      });
-      card.addEventListener("dblclick", (e) => {
-        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
-        openReview(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
-      });
-      card.querySelector(".gallery-fav").addEventListener("click", (e) => {
-        e.stopPropagation();
-        const fav = !card.classList.contains("fav");
-        toggleGalleryFav(dirName, card.dataset.file, fav);
-      });
-    });
-    if (galleryReviewMode) selectGalleryReviewItem(Math.max(0, galleryReviewIndex));
+    renderGalleryGrid(dirName);
   } catch (e) { toast("目录加载失败：" + e.message); }
+}
+
+async function openGalleryCollection(kind, value) {
+  activeGalleryCollection = { kind, value: value || "" };
+  activeGalleryDir = null;
+  selectedGalleryFiles.clear();
+  $("#gallery-dir-list").querySelectorAll(".gallery-dir, .gallery-collection").forEach((n) =>
+    n.classList.toggle("active", n.dataset.kind === kind && (n.dataset.value || "") === (value || ""))
+  );
+  $("#gallery-del-btn").style.display = "none";
+  try {
+    const query = value ? `?q=${encodeURIComponent(value)}` : "";
+    const data = await api(`/api/gallery/collections/${encodeURIComponent(kind)}${query}`);
+    galleryItems = data.items;
+    lastGalleryCardIndex = -1;
+    $("#gallery-title").textContent = galleryCollectionLabel(kind, value);
+    renderGalleryGrid(null);
+  } catch (e) { toast("合集加载失败：" + e.message); }
+}
+
+function galleryCollectionLabel(kind, value) {
+  if (kind === "favorites") return "收藏";
+  if (kind === "continue_generate") return "继续生成过";
+  if (kind === "restore") return "恢复过";
+  if (kind === "character") return `角色 · ${value || ""}`;
+  if (kind === "tag") return `标签 · ${value || ""}`;
+  return "合集";
 }
 
 $("#gallery-review-btn").addEventListener("click", () => {
@@ -3102,7 +3233,7 @@ document.addEventListener("keydown", () => { if (galleryReviewMode) resetReviewI
 
 async function showGalleryPreview(dirName, fileName) {
   const seq = ++galleryPreviewSeq;
-  let it = activeGalleryDir === dirName ? galleryItems.find((x) => x.file_name === fileName) : null;
+  let it = galleryItems.find((x) => x.file_name === fileName && (x.dir_name || "") === dirName);
   if (!it) {
     try {
       const data = await api(`/api/gallery/${encodeURIComponent(dirName)}`);
@@ -3112,24 +3243,29 @@ async function showGalleryPreview(dirName, fileName) {
     } catch (e) { toast("预览失败：" + e.message); return; }
   }
   try {
+    const dir = galleryDirOf(it);
     const body = $("#gallery-preview-body");
-    const imgPath = `/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}`;
+    const imgPath = `/gallery/${encodeURIComponent(dir)}/${encodeURIComponent(it.file_path.split("/").pop())}`;
+    const parentLine = it.parent ? `<div class="gallery-parent">来源：${it.parent.available ? `<a href="#" data-parent-dir="${esc(it.parent.dir_name)}" data-parent-file="${esc(it.parent.file_name)}">${esc(it.parent.prompt || it.parent.file_name)}</a>` : `<span class="gallery-parent-missing">已不可用</span>`}</div>` : "";
     body.innerHTML =
       `<img src="${imgPath}" class="gallery-preview-img" alt="" />` +
+      parentLine +
       (() => { const recipe = naiRecipeFromItem(it), settings = recipe.settings || recipe; return `<dl class="gallery-meta"><dt>Prompt</dt><dd>${esc(it.prompt || "")}</dd><dt>Negative</dt><dd>${esc(it.negative_prompt || "")}</dd><dt>Seed</dt><dd>${esc(settings.seed ?? it.seed ?? "-")}</dd><dt>Model</dt><dd>${esc(settings.model ?? it.model ?? "-")}</dd></dl>`; })() +
       `<div class="gallery-preview-actions"><button class="primary" id="gallery-continue-btn">继续生成</button><button class="ghost" id="gallery-fav-btn">${it.favorite ? "取消收藏 ★" : "收藏 ☆"}</button></div>` +
       `<div class="gallery-recipe-actions"><button id="gallery-recipe-seed">复用 Seed</button><button id="gallery-recipe-img2img">用作图生图</button><button id="gallery-recipe-copy-prompt">复制 Prompt</button></div>` +
       (it.snapshot_id ? `<details class="gallery-partial-restore"><summary>部分恢复 ▾</summary><div class="gallery-restore-actions"><button data-restore-sections="">全部加载</button><button data-restore-sections="character,appearance,clothing,expression,action">加载角色</button><button data-restore-sections="style,quality">加载画风</button><button data-restore-sections="composition,scene">加载构图</button></div></details>` : "");
-    // 主按钮：恢复完整生成配置 + 跳转生图 + 聚焦 Prompt
+    // 主按钮：恢复完整生成配置 + 跳转生图 + 聚焦 Prompt；记录 continue 事件并带父级血缘。
     $("#gallery-continue-btn").addEventListener("click", async () => {
       const meta = extractMetaFromGalleryItem(it);
+      sendGalleryEvent(it, "continue_generate");
+      setGenerationParent(it);
       await showView("generate");
       applyGenerationConfig(meta);
       $("#nai-prompt").focus();
     });
     $("#gallery-fav-btn").addEventListener("click", () => {
-      toggleGalleryFav(dirName, it.file_name, !it.favorite);
-      showGalleryPreview(dirName, it.file_name);
+      toggleGalleryFav(dir, it.file_name, !it.favorite);
+      showGalleryPreview(dir, it.file_name);
     });
     $("#gallery-recipe-seed").addEventListener("click", async () => {
       const meta = extractMetaFromGalleryItem(it);
@@ -3147,7 +3283,15 @@ async function showGalleryPreview(dirName, fileName) {
       catch { const restored = naiResolveRestoredPrompt(meta.rawPrompt, meta.rawNegative, meta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); updateNaiPromptMeta(); naiUpdateEffectivePreview(); commitPromptChange(); toast("已填入 Prompt 框"); }
     });
     $("#gallery-recipe-img2img").addEventListener("click", async () => { await showView("generate"); await naiUseImageSource(imgPath, it.file_name || "图库图片"); toast("已设为图生图基础图"); });
-    body.querySelectorAll("[data-restore-sections]").forEach((b) => b.addEventListener("click", () => restoreSnapshot(it.snapshot_id, b.dataset.restoreSections)));
+    body.querySelectorAll("[data-restore-sections]").forEach((b) => b.addEventListener("click", () => {
+      sendGalleryEvent(it, "restore");
+      setGenerationParent(it);
+      restoreSnapshot(it.snapshot_id, b.dataset.restoreSections);
+    }));
+    body.querySelector("[data-parent-dir]")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      openGalleryDir(it.parent.dir_name);
+    });
   } catch (e) { toast("预览失败：" + e.message); }
 }
 
@@ -3155,7 +3299,7 @@ async function toggleGalleryFav(dirName, fileName, fav) {
   try {
     await api("/api/gallery/favorite", { method: "POST", body: JSON.stringify({ dir_name: dirName, file_name: fileName, favorite: fav }) });
     // 更新卡片状态
-    const card = document.querySelector(`.gallery-card[data-file="${CSS.escape(fileName)}"]`);
+    const card = document.querySelector(`.gallery-card[data-file="${CSS.escape(fileName)}"][data-dir="${CSS.escape(dirName)}"]`) || document.querySelector(`.gallery-card[data-file="${CSS.escape(fileName)}"]`);
     if (card) { card.classList.toggle("fav", fav); card.querySelector(".gallery-fav").classList.toggle("on", fav); }
     toast(fav ? "已收藏" : "已取消收藏");
     loadGalleryList();
@@ -3164,12 +3308,13 @@ async function toggleGalleryFav(dirName, fileName, fav) {
 
 async function toggleGalleryReviewFav() {
   const item = galleryItems[galleryReviewIndex];
-  if (!item || !activeGalleryDir) return;
+  if (!item || !galleryDirOf(item)) return;
+  const dir = galleryDirOf(item);
   const fav = !item.favorite;
   try {
-    await api("/api/gallery/favorite", { method: "POST", body: JSON.stringify({ dir_name: activeGalleryDir, file_name: item.file_name, favorite: fav }) });
+    await api("/api/gallery/favorite", { method: "POST", body: JSON.stringify({ dir_name: dir, file_name: item.file_name, favorite: fav }) });
     item.favorite = fav;
-    const card = document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`);
+    const card = document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"][data-dir="${CSS.escape(dir)}"]`) || document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`);
     if (card) { card.classList.toggle("fav", fav); card.querySelector(".gallery-fav")?.classList.toggle("on", fav); }
     updateReviewFavButton(item);
     toast(fav ? "已收藏" : "已取消收藏");
@@ -3178,26 +3323,27 @@ async function toggleGalleryReviewFav() {
 
 async function deleteGalleryReviewItem() {
   const item = galleryItems[galleryReviewIndex];
-  if (!item || !activeGalleryDir) return;
+  if (!item || !galleryDirOf(item)) return;
+  const dir = galleryDirOf(item);
   if (!confirm(`确定删除当前图片「${item.file_name}」？图片会移入项目「待清理」文件夹，图库索引将移除。`)) return;
   const oldIndex = galleryReviewIndex;
   const remaining = galleryItems.length - 1;
   try {
-    await api("/api/gallery/item/delete", { method: "POST", body: JSON.stringify({ dir_name: activeGalleryDir, file_name: item.file_name }) });
+    await api("/api/gallery/item/delete", { method: "POST", body: JSON.stringify({ dir_name: dir, file_name: item.file_name }) });
     if (remaining <= 0) {
       // 目录清空：退出审阅并显示空状态
       galleryItems = [];
       galleryReviewIndex = -1;
       setGalleryReviewMode(false);
-      $("#gallery-grid").innerHTML = `<div class="empty">该目录暂无图片</div>`;
+      $("#gallery-grid").innerHTML = `<div class="empty">暂无图片</div>`;
       $("#gallery-preview-body").innerHTML = `<div class="empty">点击图片查看大图与提示词</div>`;
       updateGallerySelectionUi();
     } else {
       // 删除当前项后，翻到「下一张」；若删的是最后一张则回退到上一张
       galleryReviewIndex = Math.min(oldIndex, remaining - 1);
       galleryItems = galleryItems.filter((x) => x.file_name !== item.file_name);
-      selectedGalleryFiles.delete(galleryFileKey(activeGalleryDir, item.file_name));
-      document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"]`)?.remove();
+      selectedGalleryFiles.delete(galleryFileKey(dir, item.file_name));
+      document.querySelector(`.gallery-card[data-file="${CSS.escape(item.file_name)}"][data-dir="${CSS.escape(dir)}"]`)?.remove();
       refreshGalleryGroupTitles();
       updateGallerySelectionUi();
       renderGalleryReview();
@@ -3264,6 +3410,9 @@ let naiCharacters = [];
 let naiPositiveTier = "standard";
 let naiNegativeTier = "heavy";
 let naiTransparentBg = false;
+// 生成血缘：显式「继续生成 / 恢复」后设置，随下一次 naiGenerate 写入 meta.parent，随后立即清空，
+// 避免无关的空白工作区生图误带父级。
+let naiGenerationParent = null;
 
 // 档位值规范化：正面档位旧值 v5_standard 兼容映射为 standard；未知值回退默认。
 function naiNormalizePositiveTier(value) {
@@ -3774,7 +3923,10 @@ async function naiGenerate() {
       qualityTags: naiPositiveTier !== "off",
       heavyUc: naiNegativeTier !== "off",
       ...(characters.length ? { characterPrompts: characters } : {}),
+      // 生成血缘：继续生成 / 恢复时带入父级身份；空白工作区生成为 null。
+      parent: naiGenerationParent,
     };
+    naiGenerationParent = null; // 用后即清，避免无关的空白生图误带父级
     const res = await fetch(`${NAI_SERVER}/api/novelai/generate`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3887,6 +4039,7 @@ async function naiFillFromCart() {
         position: character.position || "auto",
       }));
     if (!basePrompt.trim() && !(r.global_uc || "").trim() && !characters.length) { toast("购物车为空"); return; }
+    naiGenerationParent = null; // 从购物车填入属全新生成，清掉可能残留的父级血缘
     // P0 结构化边界：#nai-prompt 只写 Base（base + free_text），#nai-neg 只写 Global UC，
     // 角色只写入 naiCharacters[]；绝不把 Base:/Character N:/Global UC: 混合串写进 Base。
     $("#nai-prompt").value = basePrompt;
@@ -3928,10 +4081,14 @@ function renderViewer() {
   meta.innerHTML = `<div><strong>Prompt</strong> ${esc(it.prompt || "-")}</div><div><strong>Negative</strong> ${esc(it.negative_prompt || "-")}</div><div><strong>Seed</strong> ${esc(settings.seed ?? it.seed ?? "-")} · <strong>Model</strong> ${esc(settings.model ?? it.model ?? "-")} · <strong>Mode</strong> ${esc(recipe.mode || "txt2img")}</div>` +
     `<div class="viewer-meta-actions"><button data-meta-action="restore">恢复参数</button><button data-meta-action="seed">复用 Seed</button><button data-meta-action="copy">复制 Prompt</button></div>` +
     (it.snapshot_id ? `<div class="viewer-restore-actions"><button data-viewer-restore="">全部加载</button><button data-viewer-restore="character,appearance,clothing,expression,action">加载角色</button><button data-viewer-restore="style,quality">加载画风</button><button data-viewer-restore="composition,scene">加载构图</button></div>` : "");
-  meta.querySelectorAll("[data-viewer-restore]").forEach((b) => b.addEventListener("click", () => restoreSnapshot(it.snapshot_id, b.dataset.viewerRestore)));
+  meta.querySelectorAll("[data-viewer-restore]").forEach((b) => b.addEventListener("click", () => {
+    sendGalleryEvent(it, "restore");
+    setGenerationParent(it);
+    restoreSnapshot(it.snapshot_id, b.dataset.viewerRestore);
+  }));
   meta.querySelectorAll("[data-meta-action]").forEach((b) => b.addEventListener("click", () => {
     const itemMeta = extractMetaFromGalleryItem(it);
-    if (b.dataset.metaAction === "restore") { applyGenerationConfig(itemMeta); }
+    if (b.dataset.metaAction === "restore") { sendGalleryEvent(it, "restore"); setGenerationParent(it); applyGenerationConfig(itemMeta); }
     else if (b.dataset.metaAction === "seed" && itemMeta.seed != null) { $("#nai-seed").value = String(itemMeta.seed); $("#nai-seed-mode").value = "fixed"; toast(`Seed ${itemMeta.seed} 已填入`); }
     else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt, itemMeta.rawNegative, itemMeta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); updateNaiPromptMeta(); naiUpdateEffectivePreview(); commitPromptChange(); toast("已填入 Prompt 框"); }); }
   }));
@@ -4037,6 +4194,8 @@ function naiApplyRestoredPrompt(basePrompt, globalUc, characters) {
 // 只有明确点击恢复按钮时才写入编辑表单；点击历史缩略图只切换预览。
 async function naiRestoreItem(it) {
   if (!it) { toast("没有可恢复的图片"); return; }
+  sendGalleryEvent(it, "restore");
+  setGenerationParent(it);
   const recipe = naiRecipeFromItem(it);
   const p = recipe.settings || recipe;
   // P0 结构化边界：与 applyGenerationConfig 共用 naiResolveRestoredPrompt 拆分，

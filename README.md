@@ -633,6 +633,18 @@ node --check server/server.mjs
 
 当前回归基线（非付费）：Python 163 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node `npm test` 258 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
 
+### Prompt 语法 Codec（`static/prompt-tokenizer.js`）
+
+前端唯一规范的 NovelAI Prompt 语法编解码器，语义与 Python 参考实现 `prompt/import_parser.py`（`split_tags` / `parse_entry`）与 `prompt/novelai_export.py`（`format_entry` / `format_number`）一致。`static/prompt-document.js` 与 `static/prompt-compiler.js` 均通过它完成 token 拆分 / 解析 / 序列化。
+
+- `splitPromptTokens(text)`：按逗号拆分，`::…::` 权重包裹内的逗号不拆（成对切换 `inWeight`），trim 后丢弃空 token。
+- `parsePromptToken(token)`：解析为 `{ raw, tag, weight, weighted, relation, brackets, strength }`；支持负数权重 `-1::hat::`、关系前缀 `source#/target#/mutual#`、强调层级 `{{}}`/`[[]]`。
+- `serializePromptToken(entry)`：反向序列化（关系前缀 → 权重包裹 → 括号层级 → 原样 tag），与 `format_entry` 一致；`.8` 归一化为 `0.8`，`weight === 1` 不写包裹。
+- `tokenRangeAtCaret(text, caret)`：返回光标所在 token 的 `{ index, start, end, token, raw, parsed }`（逗号归左侧 token）。
+- `joinPromptTokens(tokens)`：以 `", "` 连接 token。
+
+测试：`tests/test_prompt_tokenizer.mjs`（拆分 / 解析 / 序列化 / 往返 / 光标范围 / 编译集成）。
+
 ### 本地工作流提示
 
 - 开发期默认热重载（Python + Node 文件监听），稳定运行设 `TAGS_MARKET_RELOAD=0`。

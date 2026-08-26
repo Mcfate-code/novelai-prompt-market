@@ -4,13 +4,15 @@
  */
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
 const TARGET_RE = /^char:(\d+)(:uc)?$/;
-import { splitPromptTokens, parsePromptToken } from "./prompt-tokenizer.js";
+import { splitPromptTokens, parsePromptToken, serializePromptToken } from "./prompt-tokenizer.js";
 
 function emptySections() { return Object.fromEntries(SECTION_IDS.map((id) => [id, []])); }
 function idFor(raw, section, extra = {}) { return String(raw.id || extra.id || `tag-${section}-${raw.sort_order ?? extra.sort_order ?? 0}-${String(raw.tag ?? raw.raw ?? "").trim()}`); }
 function normalizeEntry(value, section = "other", extra = {}) {
   const raw = typeof value === "string" ? { tag: value } : (value || {});
-  const weight = Number(raw.weight ?? raw.strength ?? 1);
+  const weight = Number(raw.weight != null ? raw.weight : raw.strength != null ? raw.strength : 1);
+  const relation = ["source", "target", "mutual"].includes(raw.relation) ? raw.relation : null;
+  const brackets = Number.isFinite(Number(raw.brackets)) ? Number(raw.brackets) : 0;
   return {
     id: idFor(raw, section, extra), tag: String(raw.tag ?? raw.raw ?? "").trim(),
     weight: Number.isFinite(weight) ? weight : 1,
@@ -18,6 +20,7 @@ function normalizeEntry(value, section = "other", extra = {}) {
     custom: !!raw.custom, source: raw.source || extra.source || "tag",
     bundle_id: raw.bundle_id ?? extra.bundle_id ?? null, bundle_name: raw.bundle_name ?? extra.bundle_name ?? null,
     sort_order: Number.isFinite(Number(raw.sort_order)) ? Number(raw.sort_order) : Number(extra.sort_order ?? 0),
+    relation, brackets,
   };
 }
 function normalizeSections(source) {
@@ -67,7 +70,50 @@ function getTargetEntries(document, target) {
   const sections = getSections(normalize(document), target);
   return sections ? SECTION_IDS.flatMap((id) => sections[id].map((entry) => ({ ...entry, section: id }))) : [];
 }
-function weightText(entry) { const weight = Number(entry.weight ?? 1); return weight === 1 ? entry.tag : `${Number(weight.toFixed(2))}::${entry.tag}::`; }
+/**
+ * 推荐上下文的正向标签（target-local）。规则：
+ *   base            -> Base positive 仅
+ *   char:N          -> Base positive + Character N positive
+ *   global_uc       -> 无正向推荐（返回 []）
+ *   char:N:uc       -> 无正向推荐（返回 []）
+ */
+function recommendationContextTags(document, target) {
+  const doc = normalize(document);
+  const t = String(target || "").trim();
+  if (t === "global_uc" || /:uc$/.test(t)) return [];
+  const seen = new Set();
+  const out = [];
+  const push = (entry) => {
+    const tag = String(entry?.tag ?? "").trim();
+    if (!tag) return;
+    const key = tag.toLocaleLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(tag);
+  };
+  for (const entry of getTargetEntries(doc, "base")) push(entry);
+  const m = String(t).match(TARGET_RE);
+  if (m && !m[2]) {
+    for (const entry of getTargetEntries(doc, `char:${m[1]}`)) push(entry);
+  }
+  return out;
+}
+
+/**
+ * 当前 target 已选标签集合（target-local，用于推荐去重）。
+ * 只排除当前 target 自身已有的 tag，不跨界污染其他角色。
+ */
+function selectedTagKeysForTarget(document, target) {
+  const doc = normalize(document);
+  const t = String(target || "").trim();
+  const keys = new Set();
+  for (const entry of getTargetEntries(doc, t)) {
+    const tag = String(entry?.tag ?? "").trim();
+    if (tag) keys.add(tag.toLocaleLowerCase());
+  }
+  return keys;
+}
+function weightText(entry) { return serializePromptToken(entry); }
 function serializeTarget(document, target) { return getTargetEntries(document, target).filter((e) => e.tag).map(weightText).join(", "); }
 function knownMap(knownTags) {
   if (knownTags instanceof Map) return knownTags;
@@ -79,10 +125,12 @@ function knownMap(knownTags) {
 function parseTargetText(text, knownTags = new Map()) {
   const known = knownMap(knownTags);
   return splitPromptTokens(text).map((token) => {
-    const parsed = parsePromptToken(token); const raw = parsed.raw; const tag = parsed.tag;
-    const canonical = known.get(tag.toLocaleLowerCase());
-    if (!canonical && !parsed.weighted && /[{}\[\]<>]/.test(tag)) return null;
-    return { tag: canonical || tag, weight: parsed.weight, weighted: parsed.weighted };
+    const parsed = parsePromptToken(token);
+    if (!parsed.tag) return null;
+    const canonical = known.get(parsed.tag.toLocaleLowerCase());
+    // 只丢弃真正的尖括号噪声 token；{} / [] 强调与关系前缀 token 永不静默清除。
+    if (!canonical && !parsed.weighted && !parsed.relation && parsed.brackets === 0 && /[<>]/.test(parsed.tag)) return null;
+    return { tag: canonical || parsed.tag, weight: parsed.weight, weighted: parsed.weighted, relation: parsed.relation, brackets: parsed.brackets };
   }).filter(Boolean);
 }
 function replaceSections(sections, entries) {
@@ -97,7 +145,7 @@ function reconcileTargetText(document, target, text, knownTags = new Map()) {
   const known = knownMap(knownTags);
   const entries = parsed.map((item, index) => {
     const existing = byTag.get(item.tag.toLocaleLowerCase());
-    return { ...(existing || {}), tag: item.tag, weight: item.weight, custom: existing?.custom ?? !known.has(item.tag.toLocaleLowerCase()), source: existing?.source || (known.has(item.tag.toLocaleLowerCase()) ? "tag" : "raw"), sort_order: index };
+    return { ...(existing || {}), tag: item.tag, weight: item.weight, custom: existing?.custom ?? !known.has(item.tag.toLocaleLowerCase()), source: existing?.source || (known.has(item.tag.toLocaleLowerCase()) ? "tag" : "raw"), sort_order: index, relation: item.relation, brackets: item.brackets };
   });
   if (target === "base") doc.sections = replaceSections(sections, entries);
   else if (target === "global_uc") doc.global_uc_sections = replaceSections(sections, entries);
@@ -153,7 +201,7 @@ function proposalListToSections(list) {
     if (!tag) continue;
     const section = SECTION_IDS.includes(raw.section) ? raw.section : "other";
     const weight = Number.isFinite(Number(raw.weight ?? raw.strength)) ? Number(raw.weight ?? raw.strength) : 1;
-    out[section].push(normalizeEntry({ tag, weight, section, custom: false, source: raw.source || "auto_split" }, section));
+    out[section].push(normalizeEntry({ tag, weight, section, custom: false, source: raw.source || "auto_split", relation: ["source", "target", "mutual"].includes(raw.relation) ? raw.relation : null, brackets: Number.isFinite(Number(raw.brackets)) ? Number(raw.brackets) : 0 }, section));
   }
   return out;
 }
@@ -232,4 +280,4 @@ function applyExclusiveGroup(document, payload = {}) {
   return doc;
 }
 
-export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
+export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
