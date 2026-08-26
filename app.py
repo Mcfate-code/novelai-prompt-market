@@ -56,7 +56,8 @@ NOVELAI_EXAMPLE_COOLDOWN_SECONDS = 8
 NOVELAI_EXAMPLE_PROMPT_TEMPLATE = "{tag}, {rating}, masterpiece, best quality, very aesthetic, absurdres"
 GALLERY_DIR = BASE_DIR / "data" / "gallery"
 GALLERY_TRASH_DIR = BASE_DIR / "待清理" / "图库"
-SETTINGS = db.load_json(BASE_DIR / "config" / "app_settings.json")
+APP_SETTINGS_PATH = BASE_DIR / "config" / "app_settings.json"
+SETTINGS = db.load_json(APP_SETTINGS_PATH) if APP_SETTINGS_PATH.is_file() else {}
 # 语义导航：创作概念骨架（Base/Character），供导航树与推荐上下文使用（不含 embedding/LLM/向量库）。
 PROMPT_NAVIGATION_PATH = BASE_DIR / "config" / "prompt_navigation.json"
 # WorkBuddy 本机目录：默认 ~/.workbuddy，可用环境变量 WORKBUDDY_HOME 覆盖（与 server/start-nai.sh 一致）。
@@ -108,7 +109,7 @@ def _node_executable() -> str:
     discovered = shutil.which("node")
     if discovered:
         return discovered
-    raise RuntimeError("未找到 Node.js 22+，无法自动启动 NovelAI 本地服务")
+    raise RuntimeError("未找到 Node.js 22.5+，无法自动启动 NovelAI 本地服务")
 
 
 def _novelai_pidfile_path() -> Path:
@@ -435,7 +436,7 @@ def ensure_seeded() -> None:
         n_zh = conn.execute("SELECT COUNT(*) c FROM tag_aliases WHERE lang='zh'").fetchone()["c"]
         n_restricted = conn.execute("SELECT COUNT(*) c FROM restricted_taxonomy_map").fetchone()["c"]
         n_cat = conn.execute("SELECT COUNT(*) c FROM tag_catalog").fetchone()["c"]
-        if n_tax == 0:
+        if n_tax == 0 and import_taxonomy.SEED_PATH.is_file():
             import_taxonomy.import_taxonomy(conn)
         if n_zh == 0:
             import_aliases.import_zh(conn)

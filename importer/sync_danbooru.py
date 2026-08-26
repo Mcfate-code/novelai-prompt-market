@@ -29,7 +29,15 @@ SETTINGS_PATH = db.BASE_DIR / "config" / "app_settings.json"
 
 
 def _settings() -> dict:
-    return db.load_json(SETTINGS_PATH)
+    if SETTINGS_PATH.is_file():
+        return db.load_json(SETTINGS_PATH)
+    return {
+        "danbooru": {
+            "base_url": "https://danbooru.donmai.us",
+            "user_agent": "novelai-prompt-builder/1.0",
+        },
+        "proxy": {"enabled": False, "url": ""},
+    }
 
 
 def _user_settings() -> dict:

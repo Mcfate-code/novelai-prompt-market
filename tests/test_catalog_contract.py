@@ -18,8 +18,10 @@ class CatalogTagContractTest(unittest.TestCase):
         self.db_path = Path(self.tmp) / "t.sqlite"
         db.init_db(self.db_path)
         conn = db.get_conn(self.db_path)
-        import_taxonomy.import_taxonomy(conn)
-        import_aliases.import_zh(conn)
+        fixture_dir = Path(__file__).resolve().parent / "fixtures"
+        seed = import_taxonomy.load_seed(fixture_dir / "taxonomy_seed.json")
+        import_taxonomy.import_taxonomy(conn, seed=seed)
+        import_aliases.import_zh(conn, db.load_json(fixture_dir / "zh_aliases.json"))
         conn.close()
 
     def conn(self):

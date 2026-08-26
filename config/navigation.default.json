@@ -1,0 +1,27 @@
+{
+  "nav": [
+    {
+      "id": "danbooru",
+      "label": "Danbooru 标签",
+      "icon": "🏷️",
+      "collapsed": false,
+      "children": [
+        {"id": "general", "kind": "danbooru_category", "label": "通用", "category": 0},
+        {"id": "artist", "kind": "danbooru_category", "label": "画师", "category": 1},
+        {"id": "copyright", "kind": "danbooru_category", "label": "作品", "category": 3},
+        {"id": "character", "kind": "danbooru_category", "label": "角色", "category": 4},
+        {"id": "meta", "kind": "danbooru_category", "label": "元数据", "category": 5}
+      ]
+    },
+    {
+      "id": "personal",
+      "label": "我的标签",
+      "icon": "★",
+      "collapsed": false,
+      "children": [
+        {"id": "favorites", "kind": "favorites", "label": "收藏"},
+        {"id": "recent", "kind": "recent", "label": "最近使用"}
+      ]
+    }
+  ]
+}

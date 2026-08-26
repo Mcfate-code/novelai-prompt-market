@@ -28,6 +28,12 @@ class GallerySafetyTest(unittest.TestCase):
             headers = sync_danbooru._auth_headers()
         self.assertTrue(headers["Authorization"].startswith("Basic "))
 
+    def test_sync_uses_default_danbooru_config_without_project_settings(self):
+        with patch.object(sync_danbooru, "_http_json", return_value=[]) as request:
+            self.assertEqual(sync_danbooru.fetch_tags_page(1), [])
+        url = request.call_args.args[0]
+        self.assertTrue(url.startswith("https://danbooru.donmai.us/tags.json?"), url)
+
     def test_gallery_companion_files_same_dir_only(self):
         with tempfile.TemporaryDirectory() as d:
             main = Path(d) / "abc.png"

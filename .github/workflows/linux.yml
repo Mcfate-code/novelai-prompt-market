@@ -1,0 +1,81 @@
+name: Linux
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          npm ci
+
+      - name: Linux shell 与语法检查
+        run: |
+          sh -n server/start-nai.sh
+          python -m py_compile app.py importer/build_catalog.py importer/import_restricted.py tests/test_linux_bootstrap.py
+          node --check static/app.js
+          node --check server/server.mjs
+
+      - name: Fresh clone 双服务启动烟测
+        shell: bash
+        env:
+          TAGS_MARKET_RELOAD: "0"
+        run: |
+          test ! -e config/app_settings.json
+          test ! -e data
+          python app.py >/tmp/novelai-app.log 2>&1 &
+          APP_PID=$!
+          cleanup() {
+            kill "$APP_PID" 2>/dev/null || true
+            wait "$APP_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          ready=0
+          for _ in {1..80}; do
+            if curl -fsS http://127.0.0.1:8123/api/catalog >/tmp/catalog.json               && curl -fsS 'http://127.0.0.1:8787/api/novelai/status?probe=0' >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/novelai-app.log
+            cat .workbuddy/runtime/novelai-service.log 2>/dev/null || true
+            exit 1
+          fi
+          test -f data/tags.sqlite
+          python - <<'PY'
+          import json
+          with open('/tmp/catalog.json', encoding='utf-8') as f:
+              data = json.load(f)
+          ids = {c['id'] for g in data['groups'] for c in g['children']}
+          assert {'general', 'favorites', 'recent'} <= ids, ids
+          PY
+          cleanup
+          trap - EXIT
+          rm -rf data .workbuddy library
+
+      - name: Python 测试
+        run: python -m unittest discover -s tests
+
+      - name: Node 测试
+        run: npm test

@@ -18,10 +18,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import db  # noqa: E402
 
 NAV_PATH = db.BASE_DIR / "data" / "navigation.json"
+DEFAULT_NAV_PATH = db.BASE_DIR / "config" / "navigation.default.json"
 
 
 def load_navigation() -> dict:
-    return db.load_json(NAV_PATH)
+    path = NAV_PATH if NAV_PATH.is_file() else DEFAULT_NAV_PATH
+    return db.load_json(path)
 
 
 def build_catalog(conn) -> dict:
