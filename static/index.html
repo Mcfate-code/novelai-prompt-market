@@ -66,9 +66,10 @@
     <section class="panel nai-left">
       <div class="nai-panel-head">
         <span class="nai-panel-kicker">Prompt Editor</span>
-        <div id="prompt-mode-switch" class="nai-prompt-mode" role="group" aria-label="提示词模式（Text / Visual）">
+        <div id="prompt-mode-switch" class="nai-prompt-mode" role="group" aria-label="提示词模式（Text / Visual / Scene）">
           <button type="button" class="active" data-prompt-mode="text">Text</button>
           <button type="button" data-prompt-mode="visual">Visual</button>
+          <button type="button" data-prompt-mode="scene" data-adult-only hidden>Scene</button>
         </div>
       </div>
       <div id="nai-api-status" class="nai-live" title="NovelAI 官方 API 连接状态"><span class="nai-live-dot"></span><span>正在检查官方 API…</span></div>
@@ -94,7 +95,7 @@
       <div id="tag-assistant-root"></div>
       <div id="visual-prompt-root"></div>
       <!-- NSFW Scene Builder（成人模式启用；青少年模式禁用空态）。 -->
-      <div id="nsfw-builder-root"></div>
+       <div id="nsfw-builder-root" hidden></div>
 
       <details class="nai-effective-preview">
         <summary id="nai-effective-toggle"><span>实际发送内容 ▸</span></summary>
@@ -488,7 +489,7 @@
         <label><input type="radio" name="import-mode" value="replace" checked /> 替换</label>
         <label><input type="radio" name="import-mode" value="append" /> 追加到目标</label>
         <div class="spacer"></div>
-        <button id="import-auto-split" title="按语义自动整理 Base / 角色（多角色身份）">自动整理角色</button>
+         <button id="import-auto-split" title="先生成 proposal，确认后再整理 Base / 角色（多角色身份）">自动拆分角色</button>
         <button id="import-preview" class="primary">解析预览</button>
       </div>
       <div id="import-preview-box" class="import-preview-box" style="display:none"></div>

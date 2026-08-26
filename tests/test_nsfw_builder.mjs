@@ -183,6 +183,19 @@ test("participants 计数档为 1/2/3/4+（非 canonical tag），选择只走 S
   assert.equal(builder.selections.participants, "2");
 });
 
+test("注入 canonical subject-count options 时，人数选择携带同组 tag 且不误删普通人标签", () => {
+  const dispatched = [];
+  const bridge = makeBridge(addTag(addTag(createEmpty(), "base", "1girl", "character"), "base", "Citlali", "character"));
+  const original = bridge.dispatch;
+  bridge.dispatch = (action) => { dispatched.push(action); original(action); };
+  const builder = new NsfwBuilder({ bridge, ...OPTIONS, participants: [
+    { key: "1", label: "1", tag: "1girl" }, { key: "2", label: "2", tag: "2girls" },
+  ] });
+  builder.selectExclusive("participants", "2");
+  assert.equal(dispatched[0].payload.newTag, "2girls");
+  assert.equal(getTargetEntries(bridge.getDocument(), "base").some((entry) => entry.tag === "Citlali"), true);
+});
+
 test("participantNumber 映射 1/2/3 -> 数值，4+ -> 4，非法 -> null", () => {
   assert.equal(participantNumber("1"), 1);
   assert.equal(participantNumber("3"), 3);
@@ -308,6 +321,11 @@ test("位置候选按 participant 过滤（minParticipants）", () => {
   assert.deepEqual(filterPositions(positions, { participantCount: "2" }).map((p) => p.key), ["missionary", "standing"]);
   assert.deepEqual(filterPositions(positions, { participantCount: "4+" }).map((p) => p.key), ["missionary", "standing", "threesome"]);
   assert.deepEqual(filterPositions(positions, {}).map((p) => p.key), ["missionary", "standing", "threesome"], "未选人数不过滤");
+});
+
+test("4+ participant 位置过滤与 participantNumber 归一化一致", () => {
+  const positions = normalizeOptions([{ key: "four", minParticipants: 4 }, { key: "five", minParticipants: 5 }]);
+  assert.deepEqual(filterPositions(positions, { participantCount: "4+" }).map((p) => p.key), ["four"]);
 });
 
 test("位置候选按 scene 过滤（requiresScenes），未选 scene 不过滤", () => {

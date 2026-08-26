@@ -148,7 +148,15 @@ PromptBridge 与 Tag Assistant 同源（`getDocument()` / `getActiveTarget()` / 
 
 组件导出纯函数（`chipLabel` / `adjustWeight` / `workspaceForTarget` / `workspaceTabs` / `buildWorkspaceChips` / `semanticCards` / `normalizeSemanticNode` / `buildRemoveTagAction` / `buildSetWeightAction` / `buildMoveSectionAction` / `buildAddCharacterAction` / `buildRemoveCharacterAction` / `buildRenameCharacterAction` / `dispatchAction` 等）供测试与集成方复用。
 
-### NSFW Scene Builder（Phase 2，独立前端组件，待 Integrator wiring）
+### Scene Composer（Phase 3）
+
+Workbench now exposes **Text / Visual / Scene** through one target bar. Scene is hidden entirely when `adolescent_mode=true`; in adult mode it productizes Participants, Characters, Primary Scene, Stage, per-character Clothing State, Position, Additional Activities, Body Focus, and Recommendation. Strict selections flow through `PromptBridge`; participant count also maintains the canonical subject-count tag and creates missing character slots without deleting authored non-empty characters.
+
+The import dialog keeps Auto-Split proposals non-mutating: use **自动拆分角色** to see Base/Character/unresolved counts, then explicitly choose **应用自动拆分** or cancel. Recommendation V2 has deterministic fixture cases and top-5/top-10 contract gates in `tests/test_recommendation_cases.py`.
+
+Browser automation dependencies and a usable local browser/CDP were not available in this environment, so Phase 3 verification uses deterministic full-stack-shaped API tests against the real FastAPI route functions and component bridge tests. No NovelAI paid endpoint is called.
+
+### NSFW Scene Builder compatibility contract
 
 `static/nsfw-builder.js` + `static/nsfw-builder.css` 提供挂载到 `#nsfw-builder-root` 的原生 JS 组件（无框架 / 零依赖），为成人内容场景搭建提供独立的 UI 数据模型。已由 Workbench 接入：`app.js` 在 `mountWorkbenchComponents()` 中挂载，`adolescentMode` 从 `/api/settings` 注入，候选从 `GET /api/nsfw-builder/options` 派生（受限分类的真实 canonical tag，不整面铺成人词库）。组件遵守后端 adolescent / NSFW 内容策略，不绕过：
 

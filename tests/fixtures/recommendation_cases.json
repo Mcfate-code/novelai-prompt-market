@@ -1,0 +1,22 @@
+[
+  {"name":"base bedroom","tags":["bedroom"],"target":"base","expected_top5":["bed","lamp"]},
+  {"name":"base weather","tags":["night"],"target":"base","expected_top5":["moon","stars"]},
+  {"name":"character appearance","tags":["blue eyes"],"target":"character","expected_top5":["long hair","freckles"]},
+  {"name":"character action","tags":["standing"],"target":"character","expected_top5":["waving","smile"]},
+  {"name":"target isolation","tags":["blue eyes"],"target":"base","forbidden":["long hair"],"candidates":[{"tag":"long hair","sections":["appearance"],"target":"character"},{"tag":"night","sections":["scene"],"target":"base"}]},
+  {"name":"adult participant two","tags":["seed"],"mode":"adult","participant_count":2,"expected_top5":["pair_pose"]},
+  {"name":"adult participant one","tags":["seed"],"mode":"adult","participant_count":1,"forbidden":["pair_pose"]},
+  {"name":"adult main stage","tags":["seed"],"mode":"adult","stage":"MAIN_ACT","expected_top5":["main_action"]},
+  {"name":"adult scene","tags":["seed"],"mode":"adult","primary_scene_type":"indoor","expected_top5":["bedroom_action"]},
+  {"name":"adult position","tags":["seed"],"mode":"adult","position":"standing","expected_top5":["standing_action"]},
+  {"name":"selected excluded","tags":["blue eyes","long hair"],"target":"character","forbidden":["blue eyes","long hair"]},
+  {"name":"strict conflict","tags":["open eyes"],"target":"character","forbidden":["closed eyes"],"candidates":[{"tag":"closed eyes","incompatible_tags":["open eyes"],"sections":["expression"],"target":"character"},{"tag":"smile","sections":["expression"],"target":"character"}]},
+  {"name":"generic noise","tags":["blue eyes"],"target":"character","forbidden":["masterpiece","best quality"],"candidates":[{"tag":"masterpiece","sections":["quality"],"target":"base"},{"tag":"best quality","sections":["quality"],"target":"base"},{"tag":"freckles","sections":["appearance"],"target":"character"}]},
+  {"name":"duplicate inputs","tags":["blue eyes","blue eyes"],"target":"character"},
+  {"name":"active char zero","tags":["scar"],"active_target":"char:0","target":"character"},
+  {"name":"active char one","tags":["blue eyes"],"active_target":"char:1","target":"character"},
+  {"name":"adult activities","tags":["seed"],"mode":"adult","additional_activities":["kissing"],"expected_top5":["kissing_related"]},
+  {"name":"body focus","tags":["seed"],"mode":"adult","body_focus":"face","expected_top5":["face_focus"]},
+  {"name":"limit five","tags":["bedroom"],"target":"base","limit":5},
+  {"name":"empty compatible","tags":[],"target":"base","expected_top5":[]}
+]

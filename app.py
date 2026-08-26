@@ -2673,7 +2673,7 @@ def nsfw_builder_options():
     conn = _conn()
     try:
         if _load_user_settings()["adolescent_mode"]:
-            return {group: [] for group in NSFW_BUILDER_SECTIONS}
+            return {"participants": [], **{group: [] for group in NSFW_BUILDER_SECTIONS}}
         options: dict[str, list[dict]] = {}
         for group, labels in NSFW_BUILDER_SECTIONS.items():
             seen: set[str] = set()
@@ -2691,6 +2691,14 @@ def nsfw_builder_options():
                     seen.add(tag)
                     out.append({"key": tag, "label": tag, "tag": tag})
             options[group] = out
+        # Subject-count tags are a small, explicit strict group.  They never
+        # represent or remove ordinary person tags selected by the author.
+        options["participants"] = [
+            {"key": "1", "label": "1", "tag": "1girl"},
+            {"key": "2", "label": "2", "tag": "2girls"},
+            {"key": "3", "label": "3", "tag": "3girls"},
+            {"key": "4+", "label": "4+", "tag": "4girls"},
+        ]
         return options
     finally:
         conn.close()

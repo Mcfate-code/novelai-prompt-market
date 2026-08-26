@@ -73,12 +73,18 @@ function dispatchPromptAction(action = {}) {
       break;
     }
     case "SET_ASSISTANT_CONTEXT": state.prompt = promptDocument.setAssistantContext(state.prompt, payload.context || {}); break;
-    case "SET_EXCLUSIVE_GROUP": state.prompt = promptDocument.applyExclusiveGroup(state.prompt, payload); break;
+    case "SET_EXCLUSIVE_GROUP": {
+      state.prompt = promptDocument.applyExclusiveGroup(state.prompt, payload);
+      if (payload.group === "participant_count") {
+        state.prompt = applyParticipantCountProjection(state.prompt, payload.key);
+      }
+      break;
+    }
   }
   if (action.type === "REMOVE_CHARACTER") state.target = remapTarget(state.target, "remove", Number(payload.index));
   if (action.type === "MOVE_CHARACTER") state.target = remapTarget(state.target, "move", Number(payload.fromIndex), Number(payload.toIndex));
   commitPromptChange({ refresh: true });
-  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT"].includes(action.type)) {
+  if (needsCharacterProjectionRefresh(action)) {
     rebuildTargetSelect();
     if (typeof naiRenderCharacters === "function") {
       syncNaiCharactersFromState();
@@ -86,6 +92,25 @@ function dispatchPromptAction(action = {}) {
     }
   }
   return state.prompt;
+}
+function applyParticipantCountProjection(document, key) {
+  const count = Number(String(key || "").match(/^\d+/)?.[0] || 0);
+  let next = document;
+  while (next.characters.length < Math.max(0, count - 1)) {
+    next = promptDocument.addCharacter(next, { name: `Character ${next.characters.length + 1}` });
+  }
+  for (let i = next.characters.length - 1; i >= Math.max(0, count - 1); i -= 1) {
+    const character = next.characters[i];
+    const named = character.name !== `Character ${i + 1}`;
+    const populated = promptDocument.SECTION_IDS.some((section) => (character.prompt_sections?.[section] || []).length || (character.uc_sections?.[section] || []).length);
+    if (!named && !populated && next.characters.length > 1) next = promptDocument.removeCharacter(next, i);
+  }
+  return next;
+}
+function needsCharacterProjectionRefresh(action) {
+  action = action || {};
+  return ["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT"].includes(action.type)
+    || (action.type === "SET_EXCLUSIVE_GROUP" && action.payload?.group === "participant_count");
 }
 window.PromptBridge = {
   getDocument: () => state.prompt,
@@ -710,7 +735,11 @@ async function mountWorkbenchComponents() {
       bridge: window.PromptBridge,
       adolescentMode: !!userSettings.adolescent_mode,
       mode: "adult",
-      scenes: options.scenes || [],
+       participants: options.participants?.length ? options.participants : [
+         { key: "1", label: "1", tag: "1girl" }, { key: "2", label: "2", tag: "2girls" },
+         { key: "3", label: "3", tag: "3girls" }, { key: "4+", label: "4+", tag: "4girls" },
+       ],
+       scenes: options.scenes || [],
       positions: options.positions || [],
       clothingStates: options.clothingStates || [],
       activities: options.activities || [],
@@ -725,16 +754,24 @@ async function mountWorkbenchComponents() {
   window.WorkbenchComponents = { assistant, builder, nsfwBuilder };
   const switcher = $("#prompt-mode-switch");
   const setMode = (mode) => {
+    if (mode === "scene" && userSettings.adolescent_mode) mode = "text";
     const visual = mode === "visual";
+    const scene = mode === "scene";
+    const sceneButton = switcher?.querySelector('[data-prompt-mode="scene"]');
+    if (sceneButton) sceneButton.hidden = !!userSettings.adolescent_mode;
     switcher?.querySelectorAll("[data-prompt-mode]").forEach((button) => button.classList.toggle("active", button.dataset.promptMode === mode));
-    $("#tag-assistant-root").hidden = visual;
+    $("#tag-assistant-root").hidden = visual || scene;
     $("#visual-prompt-root").hidden = !visual;
-    $("#nai-prompt").hidden = visual;
-    $("#nai-neg").hidden = visual;
-    $(".nai-prompt-meta")?.toggleAttribute("hidden", visual);
+    $("#nsfw-builder-root").hidden = !scene;
+    $("#nai-prompt").hidden = visual || scene;
+    $("#nai-neg").hidden = visual || scene;
+    // The global target bar remains available in Scene mode. Scene itself
+    // renders no replacement target tabs; clothing scope follows this bar.
+    $(".nai-prompt-meta")?.toggleAttribute("hidden", visual || scene);
   };
   switcher?.addEventListener("click", (event) => { const button = event.target.closest("[data-prompt-mode]"); if (button) setMode(button.dataset.promptMode); });
   setMode("text");
+  window.WorkbenchComponents.setMode = setMode;
 }
 
 async function loadPromptSections() {
@@ -2144,6 +2181,7 @@ async function pollInbox(initial) {
 }
 
 function openImportModal() {
+  importPreviewData = null;
   $("#import-modal").style.display = "flex";
   $("#import-text").value = "";
   $("#import-preview-box").style.display = "none";
@@ -2153,8 +2191,8 @@ function openImportModal() {
 }
 function closeImportModal() { $("#import-modal").style.display = "none"; }
 
-// 手动「自动整理角色」：一次 proposal -> PromptDocument 替换（APPLY_AUTO_SPLIT），
-// 不在 keypress 上重拆；已有 structured metadata 直接恢复（auto_split 返回 resplit=false）。
+// 手动「自动拆分角色」：先取得 proposal 并展示预览；只有用户明确 Apply
+// 才通过 PromptBridge 替换 PromptDocument。
 async function doAutoSplitFromImport() {
   const text = $("#import-text").value.trim();
   if (!text) { toast("请先粘贴提示词"); return; }
@@ -2163,14 +2201,59 @@ async function doAutoSplitFromImport() {
   try {
     const r = await api("/api/prompt/auto-split", { method: "POST", body: JSON.stringify({ text }) });
     const proposal = r.proposal || r;
-    window.PromptBridge.dispatch({ type: "APPLY_AUTO_SPLIT", payload: { proposal } });
-    closeImportModal();
-    toast(`已整理角色：${r.summary || proposal.summary || "完成"}`);
+    if (!isAutoSplitProposal(proposal)) throw new Error("返回的自动拆分 proposal 无效");
+    importPreviewData = { autoSplitProposal: proposal, autoSplitSummary: r.summary || proposal.summary || "" };
+    renderAutoSplitProposal(importPreviewData);
   } catch (e) {
-    toast("自动整理失败：" + e.message);
+    renderAutoSplitError(`自动拆分失败：${e.message}`);
   } finally {
     btn.disabled = false;
   }
+}
+
+function isAutoSplitProposal(proposal) {
+  return !!proposal && typeof proposal === "object" && (
+    Array.isArray(proposal.base) || Array.isArray(proposal.characters) || Array.isArray(proposal.global_uc)
+  );
+}
+
+function autoSplitProposalStats(proposal) {
+  const tagCount = (items) => (Array.isArray(items) ? items : []).filter((entry) => entry && entry.tag).length;
+  const characters = Array.isArray(proposal?.characters) ? proposal.characters : [];
+  return {
+    base: tagCount(proposal?.base),
+    characters: characters.map((character, index) => ({
+      index: index + 1,
+      identity: tagCount(character?.prompt),
+      tags: tagCount(character?.prompt) + tagCount(character?.uc),
+    })),
+    unresolved: (Array.isArray(proposal?.base) ? proposal.base : []).filter((entry) => entry?.kind === "free_text" || (!entry?.tag && entry?.text)).length,
+  };
+}
+
+function renderAutoSplitProposal(data) {
+  const box = $("#import-preview-box");
+  if (!box) return;
+  const stats = autoSplitProposalStats(data.autoSplitProposal);
+  box.style.display = "block";
+  box.innerHTML = `<div class="import-seg import-auto-proposal"><div class="imp-seg-head">自动拆分角色 · 解析预览</div><p>${esc(data.autoSplitSummary || "建议尚未应用到当前 Prompt")}</p><div class="imp-auto-stats"><span>Base 标签：${stats.base}</span>${stats.characters.map((character) => `<span>Character ${character.index}：身份 ${character.identity} · 共 ${character.tags} 标签</span>`).join("")}<span>未解析：${stats.unresolved}</span></div><div class="modal-actions"><button type="button" data-auto-split-cancel>取消</button><button type="button" class="primary" data-auto-split-apply>应用自动拆分</button></div></div>`;
+}
+
+function renderAutoSplitError(message) {
+  const box = $("#import-preview-box");
+  if (!box) return;
+  box.style.display = "block";
+  box.innerHTML = `<div class="import-seg import-auto-error" role="alert">${esc(message)}</div>`;
+}
+
+function applyAutoSplitProposal() {
+  const proposal = importPreviewData?.autoSplitProposal;
+  if (!isAutoSplitProposal(proposal)) return false;
+  window.PromptBridge.dispatch({ type: "APPLY_AUTO_SPLIT", payload: { proposal } });
+  importPreviewData = null;
+  closeImportModal();
+  toast("已应用自动拆分");
+  return true;
 }
 
 function rebuildImportTargetSelect() {
@@ -2682,7 +2765,12 @@ $("#settings-modal").addEventListener("click", (e) => { if (e.target.id === "set
 $("#import-btn").addEventListener("click", openImportModal);
 $("#import-preview").addEventListener("click", doImportPreview);
 $("#import-auto-split").addEventListener("click", doAutoSplitFromImport);
+$("#import-preview-box").addEventListener("click", (event) => {
+  if (event.target.closest("[data-auto-split-apply]")) applyAutoSplitProposal();
+  if (event.target.closest("[data-auto-split-cancel]")) { importPreviewData = null; $("#import-preview-box").innerHTML = ""; }
+});
 $("#import-ok").addEventListener("click", async () => {
+  if (importPreviewData?.autoSplitProposal) return;
   if (importPreviewData) await applyImportedPreview();
   else await doImportFromModal();
 });

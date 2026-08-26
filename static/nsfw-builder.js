@@ -117,8 +117,8 @@ export function normalizeOptions(rawList) {
 //  - requiresScenes：仅在 primary_scene_type 命中列出的 scene key 时保留；
 //    未选 scene（sceneKey 为空）时不过滤 requiresScenes（交给用户自主）。
 export function filterPositions(positions, { participantCount = null, sceneKey = "" } = {}) {
-  const count = Number(participantCount);
-  const hasCount = Number.isFinite(count) && count > 0;
+  const count = participantNumber(participantCount);
+  const hasCount = count != null && count > 0;
   const scene = String(sceneKey || "");
   return (positions || []).filter((p) => {
     if (p.minParticipants != null && hasCount && count < p.minParticipants) return false;
@@ -446,6 +446,16 @@ export class NsfwBuilder {
       target, characterIndex, members,
     });
     const ok = dispatchAction(this.bridge, action);
+    if (ok && group === "participants") {
+      const wanted = participantNumber(key);
+      const characters = this.bridge?.getDocument?.()?.characters || [];
+      const firstExtra = Math.max(0, wanted == null ? 0 : wanted - 1);
+      const hasAuthoredExtra = characters.slice(firstExtra).some((character, index) => {
+        const absolute = firstExtra + index;
+        return character?.name !== `Character ${absolute + 1}` || Object.values(character?.prompt_sections || {}).some((entries) => entries.length) || Object.values(character?.uc_sections || {}).some((entries) => entries.length);
+      });
+      if (hasAuthoredExtra) this.flashStatus("人数已更新；已有内容的多余角色已保留，请手动处理。");
+    }
     return ok;
   }
 
@@ -649,7 +659,16 @@ export class NsfwBuilder {
     if (this.options.clothingStates.length) {
       parts.push(this.radioGroupHtml("clothing", `服装状态（角色 ${this._activeCharIndex() + 1}）`, this.options.clothingStates, this.context.clothing_state?.[this._activeCharIndex()] || null));
     }
-    return `<section class="nb-group" aria-label="严格互斥选择">${parts.join("")}</section>`;
+    return `<section class="nb-group" aria-label="角色与严格互斥选择">
+      ${this.charactersHtml()}
+      ${parts.join("")}
+    </section>`;
+  }
+
+  charactersHtml() {
+    const characters = this.bridge?.getDocument?.()?.characters || [];
+    if (!characters.length) return `<div class="nb-character-summary"><strong>Characters</strong><span>选择人数后可添加角色</span></div>`;
+    return `<div class="nb-character-summary"><strong>Characters</strong><span>${characters.map((character, index) => `${esc(character.name || `Character ${index + 1}`)}`).join(" · ")}</span></div>`;
   }
 
   radioGroupHtml(group, label, options, current, { disabled = false, hint = "", action = "exclusive" } = {}) {

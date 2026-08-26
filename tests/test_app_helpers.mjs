@@ -61,6 +61,62 @@ function extractFunction(name) {
   return APP_JS.slice(start, i + 1);
 }
 
+function extractAsyncFunction(name) {
+  const start = APP_JS.indexOf(`async function ${name}(`);
+  assert.ok(start >= 0, `async function ${name} not found in app.js`);
+  const open = APP_JS.indexOf("{", start);
+  let depth = 0;
+  let i = open;
+  for (; i < APP_JS.length; i += 1) {
+    if (APP_JS[i] === "{") depth += 1;
+    else if (APP_JS[i] === "}") { depth -= 1; if (depth === 0) break; }
+  }
+  assert.equal(depth, 0, `unbalanced braces in ${name}`);
+  return APP_JS.slice(start, i + 1);
+}
+
+test("participant_count strict action refreshes target and generation projections only", () => {
+  const needsRefresh = new Function(`${extractFunction("needsCharacterProjectionRefresh")}; return needsCharacterProjectionRefresh;`)();
+  assert.equal(needsRefresh({ type: "SET_EXCLUSIVE_GROUP", payload: { group: "participant_count" } }), true);
+  assert.equal(needsRefresh({ type: "SET_EXCLUSIVE_GROUP", payload: { group: "primary_scene_type" } }), false);
+  assert.equal(needsRefresh({ type: "SET_ASSISTANT_CONTEXT" }), false);
+});
+
+test("Auto-Split request is proposal-first and proposal summary is non-mutating", () => {
+  const requestSource = extractAsyncFunction("doAutoSplitFromImport");
+  const responseHandling = requestSource.slice(requestSource.indexOf("const r ="), requestSource.indexOf("} catch"));
+  assert.doesNotMatch(responseHandling, /PromptBridge\.dispatch|closeImportModal/);
+  assert.match(responseHandling, /importPreviewData\s*=\s*\{/);
+  const isProposal = new Function(`${extractFunction("isAutoSplitProposal")}; return isAutoSplitProposal;`)();
+  const stats = new Function(`${extractFunction("autoSplitProposalStats")}; return autoSplitProposalStats;`)();
+  const proposal = { base: [{ tag: "2girls" }, { kind: "free_text", text: "unclear" }], characters: [{ prompt: [{ tag: "Citlali" }], uc: [{ tag: "hat" }] }, { prompt: [{ tag: "Furina" }], uc: [] }] };
+  assert.equal(isProposal(proposal), true);
+  assert.deepEqual(stats(proposal), { base: 1, characters: [{ index: 1, identity: 1, tags: 2 }, { index: 2, identity: 1, tags: 1 }], unresolved: 1 });
+  assert.equal(isProposal({}), false);
+});
+
+test("Auto-Split Apply is the only proposal path that dispatches APPLY_AUTO_SPLIT; Cancel does not", () => {
+  const applySource = extractFunction("applyAutoSplitProposal");
+  assert.equal((applySource.match(/PromptBridge\.dispatch/g) || []).length, 1);
+  assert.match(applySource, /type: "APPLY_AUTO_SPLIT"/);
+  const eventStart = APP_JS.indexOf('$("#import-preview-box").addEventListener');
+  const eventSource = APP_JS.slice(eventStart, APP_JS.indexOf('$("#import-ok")', eventStart));
+  assert.match(eventSource, /data-auto-split-apply/);
+  assert.match(eventSource, /data-auto-split-cancel/);
+  assert.doesNotMatch(eventSource.slice(eventSource.indexOf("data-auto-split-cancel")), /PromptBridge\.dispatch/);
+});
+
+test("participant_count projection helper updates character slots and preserves authored extras", () => {
+  const applyProjection = new Function("promptDocument", `${extractFunction("applyParticipantCountProjection")}; return applyParticipantCountProjection;`)(promptDocument);
+  let document = promptDocument.createEmpty();
+  document = applyProjection(document, "4+");
+  assert.equal(document.characters.length, 3, "four participants require three character slots beside Base");
+  document = promptDocument.addTag(document, "char:2", { tag: "authored identity", section: "character" }, "character");
+  document = applyProjection(document, "2");
+  assert.equal(document.characters.length, 2, "empty intermediate slot is removed while authored extra remains");
+  assert.deepEqual(promptDocument.getTargetEntries(document, "char:1").map((entry) => entry.tag), ["authored identity"]);
+});
+
 // 无自由变量的纯函数：求值 wrapper 得到真实函数
 function loadFunction(name) {
   const wrapper = new Function(`${extractFunction(name)}; return ${name};`);

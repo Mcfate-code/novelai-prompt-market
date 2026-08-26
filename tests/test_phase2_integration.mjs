@@ -81,6 +81,17 @@ test("assistant_context is preserved in document but never compiled into prompt"
   assert.equal(getAssistantContext(doc2).participant_count, 2);
 });
 
+test("participant strict group replaces only count tags and preserves ordinary person tags", () => {
+  let doc = addTag(addTag(createEmpty(), "base", { tag: "1girl", section: "character" }, "character"), "base", { tag: "Citlali", section: "character" }, "character");
+  doc = applyExclusiveGroup(doc, {
+    group: "participant_count", key: "3", newTag: "3girls", target: "base",
+    characterIndex: null, members: ["1girl", "2girls", "3girls", "4girls"],
+  });
+  const tags = getTargetEntries(doc, "base").map((entry) => entry.tag);
+  assert.deepEqual(tags, ["Citlali", "3girls"]);
+  assert.equal(getAssistantContext(doc).participant_count, "3");
+});
+
 // ---- keyboard（double Enter 只生成一次 / IME 不生成 / Tab 追加分隔符） ----
 
 test("keyboard double Enter triggers generate exactly once, IME never generates", () => {
