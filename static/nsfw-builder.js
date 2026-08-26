@@ -334,8 +334,13 @@ export class NsfwBuilder {
       bodyFocus: normalizeOptions(options.bodyFocus),
     };
     this.recommendImpl = typeof options.recommend === "function" ? options.recommend : null;
-    // UI 数据模型（视图状态，非 PromptDocument 副本）。
-    this.selections = { participants: null, scene: null, stage: null, position: null, bodyFocus: null, activities: [], clothing: {} };
+    this.openState = {};
+    this.context = {};
+    Object.defineProperty(this, "selections", { configurable: true, get: () => ({
+      participants: this.context.participant_count == null ? null : String(this.context.participant_count), scene: this.context.primary_scene_type || null,
+      stage: this.context.stage || null, position: this.context.position || null, bodyFocus: this.context.body_focus || null,
+      activities: [...(this.context.additional_activities || [])], clothing: { ...(this.context.clothing_state || {}) },
+    }) });
     this.view = emptyView();
     this._destroyed = false;
     this._unsubscribe = null;
@@ -384,18 +389,15 @@ export class NsfwBuilder {
     if (!this._destroyed) this.refresh();
   }
 
-  // 组件自身上下文快照（当前 UI 选择模型 -> assistant_context）。
+  _hydrateContext() {
+    const doc = this.bridge?.getDocument?.() || {};
+    const raw = doc.assistant_context || {};
+    this.context = { ...raw, clothing_state: { ...(raw.clothing_state || {}) }, additional_activities: [...(raw.additional_activities || [])] };
+    return this.context;
+  }
+
   currentContext() {
-    return buildContext({
-      participants: this.selections.participants,
-      scene: this.selections.scene,
-      stage: this.selections.stage,
-      position: this.selections.position,
-      bodyFocus: this.selections.bodyFocus,
-      activities: this.selections.activities,
-      clothingState: this.selections.clothing,
-      mode: this.mode,
-    });
+    return { ...this._hydrateContext(), mode: this.mode };
   }
 
   // 桥变化 -> 刷新（组件 UI 选择模型是自身状态，无需重读文档；这里仅维护空态与目标）。
@@ -413,7 +415,8 @@ export class NsfwBuilder {
       if (this.root) this.render();
       return;
     }
-    this.view = { ...this.view, status: "ok" };
+    this._hydrateContext();
+    this.view = { ...this.view, status: "ok", context: this.context };
     if (this.root) this.render();
   }
 
@@ -443,10 +446,6 @@ export class NsfwBuilder {
       target, characterIndex, members,
     });
     const ok = dispatchAction(this.bridge, action);
-    if (ok) {
-      if (group === "clothing") this.selections.clothing[characterIndex] = String(key || "");
-      else this.selections[group] = String(key || "");
-    }
     return ok;
   }
 
@@ -463,8 +462,7 @@ export class NsfwBuilder {
   // ---- 非互斥上下文（body_focus）：dispatch SET_ASSISTANT_CONTEXT ----
   selectBodyFocus(key) {
     if (this.isDisabled()) return false;
-    this.selections.bodyFocus = String(key || "");
-    const context = this.currentContext();
+    const context = { ...this.currentContext(), body_focus: String(key || "") };
     const action = buildSetAssistantContextAction(context);
     return dispatchAction(this.bridge, action);
   }
@@ -474,16 +472,21 @@ export class NsfwBuilder {
   toggleActivity(key) {
     if (this.isDisabled()) return false;
     const option = this._findOption("activities", key);
-    const idx = this.selections.activities.indexOf(String(key || ""));
+    const current = this._hydrateContext();
+    const activities = [...(current.additional_activities || [])];
+    const idx = activities.indexOf(String(key || ""));
     const added = idx < 0;
-    if (added) this.selections.activities.push(String(key || ""));
-    else this.selections.activities.splice(idx, 1);
-    const context = this.currentContext();
+    if (added) activities.push(String(key || ""));
+    else activities.splice(idx, 1);
+    const context = { ...current, additional_activities: activities };
     const ctxAction = buildSetAssistantContextAction(context);
     const ctxOk = dispatchAction(this.bridge, ctxAction);
-    if (added && option && option.tag) {
+    if (option && option.tag) {
       const target = this._activeTarget();
-      dispatchAction(this.bridge, buildAddTagAction(option.tag, target, "other"));
+      const entries = getTargetEntries(this.bridge?.getDocument?.(), target);
+      const existing = entries.find((entry) => String(entry.tag).toLowerCase() === option.tag.toLowerCase());
+      if (added && !existing) dispatchAction(this.bridge, buildAddTagAction(option.tag, target, "other"));
+      if (!added && existing) dispatchAction(this.bridge, { type: "REMOVE_TAG", payload: { target, entryId: existing.id } });
     }
     return ctxOk;
   }
@@ -623,28 +626,28 @@ export class NsfwBuilder {
 
   exclusiveHtml() {
     const visiblePositions = filterPositions(this.options.positions, {
-      participantCount: this.selections.participants,
-      sceneKey: this.selections.scene,
+      participantCount: this.context.participant_count,
+      sceneKey: this.context.primary_scene_type,
     });
-    const positionDisabled = this.selections.participants == null && this.options.positions.some((p) => p.minParticipants != null);
+    const positionDisabled = this.context.participant_count == null && this.options.positions.some((p) => p.minParticipants != null);
     const parts = [];
     if (this.options.participants.length) {
-      parts.push(this.radioGroupHtml("participants", "人数", this.options.participants, this.selections.participants));
+      parts.push(this.radioGroupHtml("participants", "人数", this.options.participants, this.context.participant_count));
     }
     if (this.options.scenes.length) {
-      parts.push(this.radioGroupHtml("scene", "主场景", this.options.scenes, this.selections.scene));
+      parts.push(this.radioGroupHtml("scene", "主场景", this.options.scenes, this.context.primary_scene_type));
     }
     if (this.options.stages.length) {
-      parts.push(this.radioGroupHtml("stage", "阶段", this.options.stages, this.selections.stage));
+      parts.push(this.radioGroupHtml("stage", "阶段", this.options.stages, this.context.stage));
     }
     if (visiblePositions.length || this.options.positions.length) {
-      parts.push(this.radioGroupHtml("position", "体位", visiblePositions, this.selections.position, {
+      parts.push(this.radioGroupHtml("position", "体位", visiblePositions, this.context.position, {
         disabled: positionDisabled,
         hint: positionDisabled ? "先选择人数以启用体位候选（存在人数下限选项）。" : "",
       }));
     }
     if (this.options.clothingStates.length) {
-      parts.push(this.radioGroupHtml("clothing", `服装状态（角色 ${this._activeCharIndex() + 1}）`, this.options.clothingStates, this.selections.clothing[this._activeCharIndex()] || null));
+      parts.push(this.radioGroupHtml("clothing", `服装状态（角色 ${this._activeCharIndex() + 1}）`, this.options.clothingStates, this.context.clothing_state?.[this._activeCharIndex()] || null));
     }
     return `<section class="nb-group" aria-label="严格互斥选择">${parts.join("")}</section>`;
   }
@@ -669,10 +672,10 @@ export class NsfwBuilder {
   contextHtml() {
     const parts = [];
     if (this.options.bodyFocus.length) {
-      parts.push(this.radioGroupHtml("bodyfocus", "身体聚焦", this.options.bodyFocus, this.selections.bodyFocus, { action: "body-focus" }));
+      parts.push(this.radioGroupHtml("bodyfocus", "身体聚焦", this.options.bodyFocus, this.context.body_focus, { action: "body-focus" }));
     }
     if (this.options.activities.length) {
-      parts.push(this.multiHtml("activity", "附加活动", this.options.activities, this.selections.activities));
+      parts.push(this.multiHtml("activity", "附加活动", this.options.activities, this.context.additional_activities || []));
     }
     if (!parts.length) return "";
     return `<section class="nb-group" aria-label="上下文选择">${parts.join("")}</section>`;
