@@ -41,7 +41,8 @@ def _is_anomalous(seed: str) -> bool:
 
 def locate_seed() -> Path | None:
     """定位用户预置的受限 taxonomy 文件。不硬编码、不复制第二份数据。"""
-    settings = db.load_json(db.BASE_DIR / "config" / "app_settings.json")
+    settings_path = db.BASE_DIR / "config" / "app_settings.json"
+    settings = db.load_json(settings_path) if settings_path.is_file() else {}
     cfg = settings.get("restricted_taxonomy_path")
     candidates: list[Path] = []
     if cfg:

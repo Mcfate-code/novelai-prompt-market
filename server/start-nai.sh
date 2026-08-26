@@ -1,7 +1,7 @@
-#!/bin/zsh
+#!/usr/bin/env sh
 # start-nai.sh — 启动 NovelAI 官方 API 联动层（Node 8787）
 #   ./start-nai.sh   默认：启动 Node 服务（官方 API-only，无需 Edge / CDP / 浏览器登录）
-set -e
+set -eu
 cd "$(dirname "$0")"
 
 NODE="${NODE_BIN:-}"
@@ -13,7 +13,7 @@ if [ -z "$NODE" ]; then
   NODE="$(command -v node || true)"
 fi
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
-  echo "❌ 未找到 Node.js 22+。可通过 NODE_BIN 指定可执行文件。" >&2
+  echo "❌ 未找到 Node.js 22.5+。可通过 NODE_BIN 指定可执行文件。" >&2
   exit 1
 fi
 

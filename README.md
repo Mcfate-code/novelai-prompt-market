@@ -393,11 +393,11 @@ function apply(event, action) {
 | `static/visual-builder.js` + `static/visual-builder.css` | Visual Prompt Builder 独立组件（语义卡片 + chip 编辑，消费 PromptBridge 全量 action，见「Visual Prompt Builder 集成契约」） |
 | `static/nsfw-builder.js` + `static/nsfw-builder.css` | NSFW Scene Builder 独立组件（strict exclusive groups / 成人上下文，消费 PromptBridge，见「NSFW Scene Builder 集成契约」） |
 | `prompt/recommendation.py` + `prompt/related_client.py` + `prompt/auto_split.py` + `prompt/semantics.py` | Recommendation V2（多源 RRF）+ 远程 related adapter + 确定性 Auto-Split proposal + 语义 helper |
-| `data/` | 本地 SQLite 与种子数据（已 gitignore，首次启动自动生成） |
+| `data/` | 本地 SQLite、图库与可选用户种子（已 gitignore；运行目录与数据库首次启动自动创建） |
 
 ## 快速开始
 
-环境要求：**Python 3.10+**、**Node.js 22+**（生图依赖 Node 层；若本机没有，可用 `NODE_BIN` 指向可执行文件，或将 Node 放到 `$WORKBUDDY_HOME/binaries/node/` 下）。
+环境要求：**Python 3.10+**、**Node.js 22.5+**（生图依赖 Node 层；若本机没有，可用 `NODE_BIN` 指向可执行文件，或将 Node 放到 `$WORKBUDDY_HOME/binaries/node/` 下）。
 
 ### 安装依赖并启动
 
@@ -432,12 +432,57 @@ npm install
 ### 单独启动 Node 层（可选）
 
 ```bash
-./server/start-nai.sh          # 启动 Node 联动层（8787，官方 API-only）
+./server/start-nai.sh          # Linux / macOS：启动 Node 联动层（8787，官方 API-only）
 ```
 
-脚本使用 `$HOME/.workbuddy` 作为默认本机目录（可用 `WORKBUDDY_HOME` 覆盖），Node 可用 `NODE_BIN` 指定。生图走官方 API，无需 Edge / CDP / 浏览器登录。
+脚本使用 POSIX `sh`，不依赖 zsh、Edge、CDP 或图形桌面。它使用 `$HOME/.workbuddy` 作为默认本机目录（可用 `WORKBUDDY_HOME` 覆盖），Node 可用 `NODE_BIN` 指定。生图只走 NovelAI 官方 API。
 
-Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici")` / `require("jszip")` 加载，按标准 Node 解析从 `server/` 向上找到仓库根目录的 `node_modules/`——即 `npm install` 后的产物。为兼容本机 WorkBuddy 托管环境，`start-nai.sh` 与 `app.py` 会额外把 `NODE_PATH` 指向 `$WORKBUDDY_HOME/binaries/node/workspace/node_modules` 作为**可选 fallback**；这不是运行前提，`npm install` 后使用任意系统 Node 22+ 即可独立运行。
+Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici")` / `require("jszip")` 加载，按标准 Node 解析从 `server/` 向上找到仓库根目录的 `node_modules/`——即 `npm install` 后的产物。为兼容本机 WorkBuddy 托管环境，`start-nai.sh` 与 `app.py` 会额外把 `NODE_PATH` 指向 `$WORKBUDDY_HOME/binaries/node/workspace/node_modules` 作为**可选 fallback**；这不是运行前提，`npm install` 后使用任意系统 Node 22.5+ 即可独立运行。
+
+### Linux 服务器运行与部署
+
+推荐 Ubuntu / Debian 等常规 Linux 发行版。项目默认只监听 `127.0.0.1`，服务器部署时建议保留这一方式，通过 SSH 隧道访问，不直接暴露 8123 / 8787。
+
+首次部署：
+
+```bash
+git clone https://github.com/Mcfate-code/novelai-prompt-market.git
+cd novelai-prompt-market
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+npm ci
+TAGS_MARKET_RELOAD=0 python app.py
+```
+
+服务启动后，FastAPI 位于 `127.0.0.1:8123`，Node 统一入口位于 `127.0.0.1:8787`。从自己的电脑访问服务器时：
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 用户名@服务器地址
+```
+
+随后本机浏览器打开 `http://127.0.0.1:8787`。NovelAI Token 可在设置页保存，也可通过服务器环境变量 `NOVELAI_API_KEY` 提供。
+
+需要常驻运行时可建立 `/etc/systemd/system/novelai-prompt-market.service`：
+
+```ini
+[Unit]
+Description=NovelAI Prompt Market
+After=network-online.target
+
+[Service]
+Type=simple
+User=你的Linux用户名
+WorkingDirectory=/opt/novelai-prompt-market
+Environment=TAGS_MARKET_RELOAD=0
+ExecStart=/opt/novelai-prompt-market/.venv/bin/python app.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+如果 Node 不在 systemd 的 `PATH` 中，在 `[Service]` 增加 `Environment=NODE_BIN=/实际/node/路径`。仓库的 `.github/workflows/linux.yml` 会在 Ubuntu 上验证 fresh-clone 首次启动、POSIX shell、8123/8787 双服务和现有回归测试。
 
 ### macOS 常驻运行（可选）
 
@@ -448,7 +493,9 @@ Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici"
 1. 打开面板 → 设置页：
    - 填写 **NovelAI Persistent API Token**（生图与例图必需，只保存在本机，也可用环境变量 `NOVELAI_API_KEY`）。
    - 可选：Danbooru 账号 / API Key（更新标签库与抓取例图）、百度翻译凭据、代理。
-2. 标签库首次启动自动种子化（`data/`）；「更新标签库」可从 Danbooru 增量同步更多标签。
+2. 全新 clone 不要求私有 `config/app_settings.json` 或 `data/*.json`：SQLite 与基础目录会自动创建，目录使用仓库内 `config/navigation.default.json`。
+3. 若已有本地 `data/navigation.json`，它会覆盖默认导航；若放置 `data/taxonomy_seed.json`，首次启动会导入该人工 taxonomy。两者都不是启动必需项。
+4. 全新空库可在设置页点击「更新标签库」，从 Danbooru 同步实际标签数据。
 
 ## 配置
 
@@ -467,7 +514,7 @@ Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici"
 | --- | --- |
 | `NAI_PROXY_URL` | 出网代理地址（留空 = 不用代理） |
 | `WORKBUDDY_HOME` | 覆盖本机 WorkBuddy 目录（默认 `~/.workbuddy`） |
-| `NODE_BIN` | 指定 Node.js 22+ 可执行文件 |
+| `NODE_BIN` | 指定 Node.js 22.5+ 可执行文件 |
 | `NOVELAI_API_KEY` | NovelAI Persistent API Token |
 | `DANBOORU_API_KEY` | Danbooru API Key |
 | `BAIDU_TRANSLATE_APPID` / `BAIDU_TRANSLATE_SECRET` | 百度翻译凭据 |
@@ -476,7 +523,9 @@ Node 依赖加载方式：`server/novelai-provider.mjs` 通过 `require("undici"
 
 ### 项目级配置
 
-`config/app_settings.json`（端口 / 主机等，本机文件，已被 gitignore，不提交）与 `config/model_overlays.json`（模型能力语义，随仓库维护）。
+- `config/app_settings.json`：可选本机覆盖（端口 / 主机 / 受限 taxonomy 路径等），已被 gitignore；缺失时使用内建默认值，不阻塞启动。
+- `config/navigation.default.json`：随仓库维护的最小默认目录；本地存在 `data/navigation.json` 时优先使用本地版本。
+- `config/model_overlays.json`：模型能力语义，随仓库维护。
 
 ## 使用指南
 
@@ -563,7 +612,9 @@ node --check static/nai-input-keys.js
 node --check server/server.mjs
 ```
 
-当前回归基线（非付费）：Python 159 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node 服务端 53 项、前端组件与纯函数 197 项（app.js 纯函数 28、Prompt Document 10、Tag Assistant 22、Visual Builder 25、NSFW Scene Builder 43、Prompt Compiler 33、结构化恢复 6、Prompt Input 键盘契约 23、Phase 2 集成契约 7）全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
+测试中的 taxonomy / 中文别名使用 `tests/fixtures/` 内的最小固定数据，不依赖 `.gitignore` 的本机 `data/`。
+
+当前回归基线（非付费）：Python 163 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node `npm test` 258 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
 
 ### 本地工作流提示
 
