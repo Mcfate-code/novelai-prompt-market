@@ -514,7 +514,6 @@ function replacePromptTokenWithCaret(text, caret, replacement) {
 }
 let naiAutocompleteState = { input: null, target: "base", range: null, results: [], selected: 0, request: 0 };
 let naiAutocompleteSuppress = null; // 一次性抑制：接受建议后若光标仍停在刚插入的完整 tag 内，抑制搜索，避免弹窗立即重开
-let naiPreferences = null; // 缓存 /api/gallery/preferences 聚合（图库变化时失效重载），供 autocomplete 个性化重排
 // 接受建议后判断：query 是否等于刚接受的 tag（等于则跳过搜索，不重开弹窗）。
 function naiAutocompleteSkipSearch(acceptedTag, query) {
   return !!acceptedTag && String(query ?? "").trim().toLocaleLowerCase() === String(acceptedTag).toLocaleLowerCase();
@@ -531,8 +530,7 @@ const naiAutocompleteSearch = debounce(async (input) => {
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
     if (request !== naiAutocompleteState.request || document.activeElement !== input) return;
-    const reranked = naiRerankResults(data.results || [], naiAutocompleteState.target);
-    naiAutocompleteState = { ...naiAutocompleteState, input, range, results: reranked.slice(0, 8), selected: 0 };
+    naiAutocompleteState = { ...naiAutocompleteState, input, range, results: (data.results || []).slice(0, 8), selected: 0 };
     renderNaiAutocomplete();
   } catch { closeNaiAutocomplete(); }
 }, 180);
@@ -545,9 +543,7 @@ function renderNaiAutocomplete() {
     const zh = item.zh || "";
     const count = abbreviateCount(item.post_count);
     const viaAlias = /别名/.test(item.match_reason || "");
-    const pref = naiPreferences?.global_tags?.[naiTagKey(item.tag)];
-    const common = pref && pref.strong > 0 ? "常用" : "";
-    const second = [zh, count, viaAlias ? "via 别名" : "", common].filter(Boolean).join(" · ");
+    const second = [zh, count, viaAlias ? "via 别名" : ""].filter(Boolean).join(" · ");
     return `<div role="option" data-autocomplete-index="${i}" aria-selected="${i === selected}"><span class="ac-tag">${esc(item.tag)}</span><small>${esc(second)}</small></div>`;
   }).join("");
   const hint = (typeof window !== "undefined" && window.NaiInputKeys) ? window.NaiInputKeys.buildHintHtml() : "";
@@ -580,37 +576,6 @@ function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
   closeNaiAutocomplete();
   naiAutocompleteSuppress = item.tag; // 抑制合成 input 触发的搜索，避免弹窗立即重开
   input.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-// ===== Gallery Preference Memory：autocomplete 个性化重排（只在近等搜索相关度内生效） =====
-function naiTagKey(tag) { return String(tag ?? "").toLocaleLowerCase().trim(); }
-// 当前目标上下文：角色身份（与偏好聚合的 character_tags 键对齐）+ 当前 prompt 已选标签（用于共现）。
-function naiRerankContext(target) {
-  const charIdentities = new Set();
-  const promptTags = new Set();
-  const m = String(target || "").match(/^char:(\d+)(:uc)?$/);
-  if (m && naiPreferences) {
-    const ch = naiCharacters[Number(m[1])];
-    if (ch) {
-      for (const t of splitPromptTokens(ch.prompt || "")) {
-        const k = naiTagKey(t);
-        promptTags.add(k);
-        if (naiPreferences.character_tags && naiPreferences.character_tags[k]) charIdentities.add(k);
-      }
-    }
-  } else {
-    for (const t of splitPromptTokens(generationTargetText(target || "base"))) promptTags.add(naiTagKey(t));
-  }
-  return { charIdentities, promptTags };
-}
-// 稳定排序委托给纯模块 static/gallery-rerank.js（可单测）；这里只算当前目标上下文。
-function naiRerankResults(results, target) {
-  if (!naiPreferences || !results || results.length < 2) return results || [];
-  return rerankResults(results, naiPreferences, naiRerankContext(target));
-}
-async function loadNaiPreferences() {
-  try { naiPreferences = await api("/api/gallery/preferences"); }
-  catch { naiPreferences = null; }
 }
 
 function bindNaiAutocomplete(input, target, opts = {}) {
@@ -701,7 +666,6 @@ async function init() {
   loadDraft();
   await loadUserSettings();
   await mountWorkbenchComponents();
-  loadNaiPreferences(); // 预热偏好聚合（不阻塞初始化）
   const m = await api("/api/models");
   state.models = m.models;
   if (!state.model || !m.models.some((x) => x.id === state.model)) state.model = m.default;
@@ -3004,7 +2968,6 @@ async function loadGalleryList() {
   try {
     const data = await api("/api/gallery");
     const el = $("#gallery-dir-list");
-    loadNaiPreferences(); // 图库变化 → 偏好聚合失效，异步重载（不阻塞列表渲染）
     if (!data.dirs.length) {
       activeGalleryDir = null;
       galleryItems = [];
@@ -3423,7 +3386,7 @@ let naiApiConfigured = false;
 let naiSubscriptionTier = "unknown";
 let naiGenerationMode = "txt2img";
 let naiImg2ImgSource = null;
-let naiCharacters = [];
+let naiCharacters;
 // P0: Generation 档位 & Prompt Compiler state
 // positive tier: off | standard | light；negative tier: off | light | heavy | furry_focus | human_focus
 // 默认 standard + heavy 以保持当前 V5 Full 默认行为。

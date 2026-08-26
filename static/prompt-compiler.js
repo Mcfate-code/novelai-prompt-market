@@ -1,5 +1,4 @@
 import { splitPromptTokens, joinPromptTokens, parsePromptToken, serializePromptToken } from "./prompt-tokenizer.js";
-import presetConfig from "./prompt-presets.json" with { type: "json" };
 
 // 再导出共享 codec 的解析/序列化函数，便于从 compiler 一处 import 全部 Prompt 语法能力。
 export { parsePromptToken, serializePromptToken };
@@ -23,7 +22,7 @@ export { parsePromptToken, serializePromptToken };
 const V5_MODEL_PREFIX = "nai-diffusion-5-";
 
 /** 透明背景标签 */
-const TRANSPARENT_BACKGROUND_TAG = presetConfig.transparentBackgroundTag;
+const TRANSPARENT_BACKGROUND_TAG = "transparent background";
 
 /**
  * 官方 Quality 档位（用户提供并冻结的唯一事实源，2026-08 同步）。
@@ -31,7 +30,7 @@ const TRANSPARENT_BACKGROUND_TAG = presetConfig.transparentBackgroundTag;
  * Light 精确为 `very aesthetic, amazing quality, no text`。
  */
 const QUALITY_PRESETS = Object.freeze(Object.fromEntries(
-  Object.entries(presetConfig.quality).map(([name, tags]) => [name, Object.freeze([...tags])]),
+  Object.entries({ standard: ["very aesthetic", "masterpiece", "no text"], light: ["very aesthetic", "amazing quality", "no text"] }).map(([name, tags]) => [name, Object.freeze([...tags])]),
 ));
 export { QUALITY_PRESETS };
 

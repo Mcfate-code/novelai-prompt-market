@@ -307,6 +307,3 @@ function buildGenerationPromptState(document) {
 }
 
 export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup, effectiveFreeText, buildGenerationPromptState };
-=======
-export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
->>>>>>> fix/recommendation-target-isolation
