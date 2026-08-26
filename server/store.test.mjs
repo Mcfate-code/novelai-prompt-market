@@ -4,6 +4,7 @@ import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { AssetStore } from "./store.mjs";
+import { createGenerationRecipe, normalizeGenerationRequest } from "./generation-request.mjs";
 
 test("identical PNG bytes still produce independent assets and files", () => {
   const libDir = mkdtempSync(path.join(tmpdir(), "tags-market-store-"));
@@ -49,6 +50,33 @@ test("saveImage returns a fresh asset id on every call", () => {
     }
     assert.equal(ids.size, 5, "5 次调用必须得到 5 个不同 id");
     assert.equal(store.listAssets({ limit: 20 }).length, 5);
+  } finally {
+    store.close();
+    rmSync(libDir, { recursive: true, force: true });
+  }
+});
+
+test("persists cfg_rescale and auto_smea verbatim in saved image metadata", () => {
+  const libDir = mkdtempSync(path.join(tmpdir(), "tags-market-store-"));
+  const store = new AssetStore(libDir);
+  try {
+    // 走真实落库链路：normalize → recipe → saveImage(parameters_json) → getAsset 读回。
+    const request = normalizeGenerationRequest({
+      prompt: "1girl",
+      settings: { cfg_rescale: 0.7, auto_smea: true },
+    });
+    const recipe = createGenerationRecipe(request, 123);
+    const buffer = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+    const saved = store.saveImage(buffer, {
+      mime: "image/png",
+      prompt: request.prompt,
+      parameters_json: JSON.stringify(recipe),
+    });
+    const asset = store.getAsset(saved.id);
+    assert.ok(asset.parameters_json, "metadata 应已落库");
+    const meta = JSON.parse(asset.parameters_json);
+    assert.equal(meta.settings.cfg_rescale, 0.7, "cfg_rescale 应在保存后的 metadata 中保持输入值");
+    assert.equal(meta.settings.auto_smea, true, "auto_smea 应在保存后的 metadata 中保持输入值");
   } finally {
     store.close();
     rmSync(libDir, { recursive: true, force: true });
