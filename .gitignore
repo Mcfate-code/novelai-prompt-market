@@ -51,3 +51,10 @@ AGENTS.md
 # IDE
 .idea/
 .vscode/
+
+# Machine-local configuration (private values, never publish)
+.env
+.env.local
+config.local.json
+config.local.toml
+*.local.md

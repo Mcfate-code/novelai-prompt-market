@@ -213,6 +213,18 @@ button.primary:hover { background: var(--accent-ink); border-color: var(--accent
 .example-status.cached { color: #26734d; }
 .example-status.error { color: var(--danger); }
 .tag-card:hover { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.layout.cart-advanced-layout { grid-template-columns: minmax(150px, .7fr) minmax(420px, 1.8fr) minmax(260px, 1fr); grid-template-areas: "categories cart browse"; }
+.layout.cart-advanced-layout > .categories { grid-area: categories; }
+.layout.cart-advanced-layout > .cart { grid-area: cart; }
+.layout.cart-advanced-layout > .browse { grid-area: browse; }
+.layout.cart-advanced-layout .tag-thumb-wrap { display: none; }
+.nai-autocomplete { position: absolute; z-index: 55; max-width: min(520px, calc(100vw - 24px)); min-width: 220px; border: 1px solid var(--nai-border); border-radius: 6px; background: var(--nai-card); box-shadow: 0 8px 24px rgba(20, 28, 38, .18); overflow: hidden; }
+.nai-autocomplete[hidden] { display: none; }
+.nai-autocomplete [role="option"] { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; cursor: pointer; font-size: 12px; }
+.nai-autocomplete [role="option"][aria-selected="true"], .nai-autocomplete [role="option"]:hover { background: var(--accent-soft); }
+.nai-autocomplete small { color: var(--nai-muted); }
+@media (min-width: 760px) and (max-width: 1099px) { .layout.cart-advanced-layout { grid-template-columns: minmax(150px, .65fr) minmax(360px, 1.8fr) minmax(180px, .7fr); } }
+@media (max-width: 759px) { .layout.cart-advanced-layout { display: flex; flex-direction: column; } .layout.cart-advanced-layout > .categories { order: 1; } .layout.cart-advanced-layout > .cart { order: 2; } .layout.cart-advanced-layout > .browse { order: 3; } }
 .fav-toggle {
   position: absolute;
   top: 4px;

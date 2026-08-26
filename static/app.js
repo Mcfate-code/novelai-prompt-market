@@ -57,6 +57,8 @@ let cartAdvanced = false;
 let openWeightEntryId = null; // 当前打开的权重 popover 对应条目 id；renderCart 重建后据此保持打开
 let zhMap = {}; // prompt_tag -> 中文名
 let freeTextRawSync = null; // #free-text 输入防抖句柄；translateFreeText 取消 pending 防抖用
+const knownCatalogTags = new Map();
+let reconciliationBusy = false;
 
 // ===== 工具 =====
 const $ = (sel) => document.querySelector(sel);
@@ -136,6 +138,7 @@ const refreshPromptServices = debounce(() => { loadRecommendations(); loadConfli
 function commitPromptChange({ render = true, refresh = true } = {}) {
   persistDraft();
   if (render) renderCart();
+  reconcileGenerationFromCart();
   if (refresh) refreshPromptServices();
 }
 
@@ -292,6 +295,156 @@ function insertTagIntoString(text, tag) {
   if (existing.has(raw.toLowerCase())) return text;
   tokens.push(raw);
   return tokens.join(", ");
+}
+
+// Reconciliation deliberately understands only catalog identities in plain comma tokens
+// and NovelAI's weight::tag:: form. Braces, brackets, prose, and unknown syntax stay raw.
+function recognizedTagToken(token, knownTags) {
+  const raw = String(token || "").trim();
+  if (!raw) return null;
+  const weighted = raw.match(/^\s*(?:\d+(?:\.\d+)?|\.\d+)::([^,:]+?)::\s*$/);
+  const candidate = weighted ? weighted[1].trim() : raw;
+  const key = candidate.toLocaleLowerCase();
+  return knownTags.has(key) && (weighted || /^[^{}\[\]()<>]+$/.test(candidate)) ? { key, tag: knownTags.get(key), weighted } : null;
+}
+function extractRecognizedTagIdentities(text, knownTags = knownCatalogTags) {
+  return String(text || "").split(",").map((token) => recognizedTagToken(token, knownTags)).filter(Boolean).map((x) => x.key);
+}
+function applyRecognizedTagDiff(text, desiredKeys, knownTags = knownCatalogTags) {
+  const desired = new Set(desiredKeys || []);
+  const tokens = String(text || "").split(",");
+  const kept = [];
+  const seen = new Set();
+  tokens.forEach((token) => {
+    const recognized = recognizedTagToken(token, knownTags);
+    if (!recognized) { kept.push(token); return; }
+    if (desired.has(recognized.key) && !seen.has(recognized.key)) { kept.push(token); seen.add(recognized.key); }
+  });
+  const missing = [...desired].filter((key) => !seen.has(key)).map((key) => knownTags.get(key)).filter(Boolean);
+  let result = kept.join(",");
+  missing.forEach((tag) => { result = result.trim() ? `${result.trimEnd()}, ${tag}` : tag; });
+  return result;
+}
+function currentCartTargetKeys(target) { return new Set((getSlot(target) || []).map((entry) => String(entry.tag).toLocaleLowerCase())); }
+function generationTargetText(target) {
+  if (target === "base" && naiStructuredDraft) {
+    const display = $("#nai-prompt")?.value || "";
+    if (display.trim() === naiStructuredDraft.displayPrompt) {
+      const baseLine = display.split("\n").find((line) => /^Base:\s*/.test(line));
+      return baseLine ? baseLine.replace(/^Base:\s*/, "") : naiStructuredDraft.basePrompt || "";
+    }
+  }
+  if (target === "global_uc") return $("#nai-neg")?.value || "";
+  const m = String(target).match(/^char:(\d+)(:uc)?$/);
+  if (m) return naiCharacters[Number(m[1])]?.[m[2] ? "negative_prompt" : "prompt"] || "";
+  return $("#nai-prompt")?.value || "";
+}
+function setGenerationTargetText(target, text) {
+  if (target === "base") {
+    if (naiStructuredDraft && $("#nai-prompt")?.value.trim() === naiStructuredDraft.displayPrompt) {
+      naiStructuredDraft.basePrompt = text;
+      naiStructuredDraft.displayPrompt = naiStructuredDisplayText(text, naiCharacters, naiStructuredDraft.globalUc);
+      $("#nai-prompt").value = naiStructuredDraft.displayPrompt;
+    } else if ($("#nai-prompt")) $("#nai-prompt").value = text;
+  } else if (target === "global_uc") { if ($("#nai-neg")) $("#nai-neg").value = text; }
+  else {
+    const m = String(target).match(/^char:(\d+)(:uc)?$/), c = m && naiCharacters[Number(m[1])];
+    if (c) { c[m[2] ? "negative_prompt" : "prompt"] = text; naiRenderCharacters(); }
+  }
+}
+function reconcileGenerationFromCart() {
+  if (reconciliationBusy || typeof naiCharacters === "undefined" || !$("#nai-prompt")) return;
+  reconciliationBusy = true;
+  try {
+    ["base", "global_uc", ...state.prompt.characters.flatMap((_, i) => [`char:${i}`, `char:${i}:uc`])].forEach((target) => {
+      const known = new Map(knownCatalogTags);
+      (getSlot(target) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
+      const desired = new Set([...currentCartTargetKeys(target)].filter((key) => known.has(key)));
+      const next = applyRecognizedTagDiff(generationTargetText(target), desired, known);
+      if (next !== generationTargetText(target)) setGenerationTargetText(target, next);
+    });
+  } finally { reconciliationBusy = false; }
+  updateNaiPromptMeta();
+  if (typeof naiUpdateEffectivePreview === "function") naiUpdateEffectivePreview();
+}
+function reconcileCartFromGeneration(target, text) {
+  if (reconciliationBusy) return;
+  const known = new Map(knownCatalogTags);
+  (getSlot(target) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
+  const desired = new Set(extractRecognizedTagIdentities(text, known));
+  const current = new Set([...currentCartTargetKeys(target)].filter((key) => known.has(key)));
+  if (desired.size === current.size && [...desired].every((key) => current.has(key))) return;
+  const sections = getSectionMap(target); if (!sections) return;
+  reconciliationBusy = true;
+  try {
+    SECTION_IDS.forEach((id) => { sections[id] = sections[id].filter((e) => !known.has(String(e.tag).toLocaleLowerCase()) || desired.has(String(e.tag).toLocaleLowerCase())); });
+    const present = currentCartTargetKeys(target);
+    [...desired].filter((key) => !present.has(key)).forEach((key) => sections.other.push(normalizeEntry({ tag: known.get(key), section: "other" }, "other")));
+    commitPromptChange({ render: true, refresh: false });
+  } finally { reconciliationBusy = false; }
+}
+const reconcileGenerationInput = debounce((target, text) => reconcileCartFromGeneration(target, text), 200);
+
+function promptTokenRange(text, caret) {
+  const value = String(text || "");
+  const at = Math.max(0, Math.min(Number(caret) || 0, value.length));
+  let start = value.lastIndexOf(",", at - 1) + 1;
+  let end = value.indexOf(",", at);
+  if (end < 0) end = value.length;
+  return { start, end, token: value.slice(start, end), query: value.slice(start, at).trim() };
+}
+function replacePromptToken(text, caret, replacement) {
+  const range = promptTokenRange(text, caret);
+  const left = text.slice(range.start, caret).match(/^\s*/)?.[0] || "";
+  const right = text.slice(caret, range.end).match(/\s*$/)?.[0] || "";
+  return text.slice(0, range.start) + left + replacement + right + text.slice(range.end);
+}
+let naiAutocompleteState = { input: null, target: "base", range: null, results: [], selected: 0, request: 0 };
+const naiAutocompleteSearch = debounce(async (input) => {
+  const range = promptTokenRange(input.value, input.selectionStart);
+  if (range.query.length < 2 || /[{}\[\]()<>]/.test(range.query)) { closeNaiAutocomplete(); return; }
+  const request = ++naiAutocompleteState.request;
+  try {
+    const data = await api(`/api/search?q=${encodeURIComponent(range.query)}`);
+    if (request !== naiAutocompleteState.request || document.activeElement !== input) return;
+    naiAutocompleteState = { ...naiAutocompleteState, input, range, results: (data.results || []).slice(0, 8), selected: 0 };
+    renderNaiAutocomplete();
+  } catch { closeNaiAutocomplete(); }
+}, 180);
+function closeNaiAutocomplete() { const box = $("#nai-autocomplete"); if (box) box.hidden = true; naiAutocompleteState.results = []; }
+function renderNaiAutocomplete() {
+  const box = $("#nai-autocomplete");
+  const { results, selected } = naiAutocompleteState;
+  if (!box || !results.length) { closeNaiAutocomplete(); return; }
+  box.innerHTML = results.map((item, i) => `<div role="option" data-autocomplete-index="${i}" aria-selected="${i === selected}"><span>${esc(item.tag)}</span><small>${esc(item.zh || "")}</small></div>`).join("");
+  const input = naiAutocompleteState.input;
+  const rect = input.getBoundingClientRect();
+  box.style.left = `${Math.max(8, rect.left)}px`;
+  box.style.top = `${rect.bottom + 4}px`;
+  box.style.width = `${Math.min(Math.max(rect.width, 260), 520)}px`;
+  box.hidden = false;
+  box.querySelectorAll("[data-autocomplete-index]").forEach((node) => node.addEventListener("mousedown", (event) => { event.preventDefault(); acceptNaiAutocomplete(Number(node.dataset.autocompleteIndex)); }));
+}
+function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
+  const { input, results } = naiAutocompleteState;
+  const item = results[index]; if (!input || !item) return;
+  knownCatalogTags.set(String(item.tag).toLocaleLowerCase(), item.tag);
+  const caret = input.selectionStart;
+  input.value = replacePromptToken(input.value, caret, item.tag);
+  const nextCaret = input.value.indexOf(item.tag, Math.max(0, caret - 1)) + item.tag.length;
+  input.setSelectionRange(nextCaret, nextCaret);
+  closeNaiAutocomplete();
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+function bindNaiAutocomplete(input, target) {
+  input.addEventListener("input", () => { naiAutocompleteState.target = target; naiAutocompleteSearch(input); });
+  input.addEventListener("keydown", (event) => {
+    if (!$("#nai-autocomplete") || $("#nai-autocomplete").hidden) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); naiAutocompleteState.selected = (naiAutocompleteState.selected + (event.key === "ArrowDown" ? 1 : -1) + naiAutocompleteState.results.length) % naiAutocompleteState.results.length; renderNaiAutocomplete(); }
+    else if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); acceptNaiAutocomplete(); }
+    else if (event.key === "Escape") { event.preventDefault(); closeNaiAutocomplete(); }
+  });
+  input.addEventListener("blur", () => setTimeout(closeNaiAutocomplete, 120));
 }
 
 function remapNaiTagTarget(target, op, a, b) {
@@ -590,6 +743,7 @@ function goBack() {
 
 function renderTagCards(tags) {
   const el = $("#tag-list");
+  tags.forEach((t) => { if (t?.tag) knownCatalogTags.set(String(t.tag).toLocaleLowerCase(), String(t.tag)); });
   if (!tags.length) { el.innerHTML = `<div class="empty">暂无标签</div>`; return; }
   el.innerHTML = tags.map(tagCardHtml).join("");
   el.querySelectorAll(".tag-card").forEach((n) =>
@@ -925,10 +1079,12 @@ function applyThumbs(seq = thumbLoadSeq) {
 // ===== hover 大图浮层 =====
 let previewTimer = null;
 
-function showThumbPreview(tag, anchor) {
+function showThumbPreview(tag, anchor, delayed = false) {
   const url = cardLargeUrl(tag);
   if (!url) return;
   clearTimeout(previewTimer);
+  const delay = cartAdvanced ? 130 : 0;
+  if (delay && !delayed) { previewTimer = setTimeout(() => showThumbPreview(tag, anchor, true), delay); return; }
   const box = $("#thumb-preview");
   const img = $("#thumb-preview-img");
   const label = $("#thumb-preview-tag");
@@ -960,13 +1116,13 @@ function hideThumbPreview() {
 function bindThumbPreview() {
   const list = $("#tag-list");
   list.addEventListener("mouseover", (e) => {
-    const img = e.target.closest("img[data-thumb]");
     const card = e.target.closest(".tag-card");
-    if (img && card) showThumbPreview(img.dataset.thumb, card);
+    const img = e.target.closest("img[data-thumb]");
+    if (card && (cartAdvanced || img)) showThumbPreview(card.dataset.tag || img?.dataset.thumb, card);
   });
   list.addEventListener("mouseout", (e) => {
-    const img = e.target.closest("img[data-thumb]");
-    if (img) hideThumbPreview();
+    const card = e.target.closest(".tag-card");
+    if (card) hideThumbPreview();
   });
   const box = $("#thumb-preview");
   box.addEventListener("mouseenter", () => clearTimeout(previewTimer));
@@ -1072,6 +1228,7 @@ function renderCart() {
      `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><small class="setting-help">Raw 中文始终保留；英文译文仅在勾选后作为 Effective Prompt。</small><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></label></section>` +
     `<details class="cart-advanced" ${cartAdvanced ? "open" : ""}><summary>高级编辑：分区、权重与多角色</summary><div class="cart-advanced-body"><button type="button" class="cart-add-character" data-add-character>+ 添加角色</button>${advancedCartHtml()}</div></details>`;
   el.innerHTML = html;
+  document.querySelector("main.layout")?.classList.toggle("cart-advanced-layout", cartAdvanced);
   bindEntryControls(el);
   // 重建后恢复当前打开的权重面板（加减/手动输入会触发重渲染，不能因此关闭）
   if (openWeightEntryId) {
@@ -1101,6 +1258,7 @@ function renderCart() {
   $("#cart-custom-tag")?.addEventListener("click", openCustomTagModal);
   el.querySelector(".cart-advanced")?.addEventListener("toggle", (event) => {
     cartAdvanced = event.currentTarget.open;
+    document.querySelector("main.layout")?.classList.toggle("cart-advanced-layout", cartAdvanced);
     rebuildTargetSelect();
   });
   updatePromptPreview();
@@ -2837,6 +2995,16 @@ function naiRenderCharacters() {
       </div>
     </article>`;
   }).join("");
+  list.querySelectorAll('textarea[data-character-field="prompt"]').forEach((input) => {
+    const index = Number(input.closest("[data-character-index]").dataset.characterIndex);
+    bindNaiAutocomplete(input, `char:${index}`);
+    input.addEventListener("input", (event) => { if (!reconciliationBusy) reconcileGenerationInput(`char:${index}`, event.target.value); });
+  });
+  list.querySelectorAll('textarea[data-character-field="negative_prompt"]').forEach((input) => {
+    const index = Number(input.closest("[data-character-index]").dataset.characterIndex);
+    bindNaiAutocomplete(input, `char:${index}:uc`);
+    input.addEventListener("input", (event) => { if (!reconciliationBusy) reconcileGenerationInput(`char:${index}:uc`, event.target.value); });
+  });
 }
 
 function naiAddCharacter(character = {}) {
@@ -3630,8 +3798,10 @@ $("#nai-character-list").addEventListener("click", (event) => {
 });
 $("#nai-fill-cart").addEventListener("click", naiFillFromCart);
 $("#nai-seed-random").addEventListener("click", () => { $("#nai-seed").value = Math.floor(Math.random() * 2147483647); });
-$("#nai-prompt").addEventListener("input", updateNaiPromptMeta);
-$("#nai-neg").addEventListener("input", updateNaiPromptMeta);
+bindNaiAutocomplete($("#nai-prompt"), "base");
+bindNaiAutocomplete($("#nai-neg"), "global_uc");
+$("#nai-prompt").addEventListener("input", (event) => { updateNaiPromptMeta(); if (!reconciliationBusy) reconcileGenerationInput("base", generationTargetText("base")); });
+$("#nai-neg").addEventListener("input", (event) => { updateNaiPromptMeta(); if (!reconciliationBusy) reconcileGenerationInput("global_uc", event.target.value); });
 $("#nai-resolution-category").addEventListener("change", () => { naiApplyResolutionPreset(); updateAdvSummary(naiCollectParameters()); naiRenderCost(); });
 $("#nai-width").addEventListener("change", () => { naiSyncResolutionFromInputs(); naiRenderCost(); });
 $("#nai-height").addEventListener("change", () => { naiSyncResolutionFromInputs(); naiRenderCost(); });

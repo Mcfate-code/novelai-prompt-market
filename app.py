@@ -56,7 +56,9 @@ NOVELAI_EXAMPLE_PROMPT_TEMPLATE = "{tag}, {rating}, masterpiece, best quality, v
 GALLERY_DIR = BASE_DIR / "data" / "gallery"
 GALLERY_TRASH_DIR = BASE_DIR / "待清理" / "图库"
 SETTINGS = db.load_json(BASE_DIR / "config" / "app_settings.json")
-USER_SETTINGS_PATH = Path.home() / ".workbuddy" / "tags-market-settings.json"
+# WorkBuddy 本机目录：默认 ~/.workbuddy，可用环境变量 WORKBUDDY_HOME 覆盖（与 server/start-nai.sh 一致）。
+WORKBUDDY_HOME = Path(os.path.expanduser(os.getenv("WORKBUDDY_HOME") or "~/.workbuddy"))
+USER_SETTINGS_PATH = WORKBUDDY_HOME / "tags-market-settings.json"
 DEFAULT_USER_SETTINGS = {
     "adolescent_mode": True,
     "cache_limit_mb": 1024,
@@ -77,8 +79,8 @@ _translate_lock = threading.Lock()
 _translate_last_request = 0.0
 NOVELAI_SERVICE_URL = "http://127.0.0.1:8787"
 NOVELAI_SERVICE_START_TIMEOUT = 12.0
-MANAGED_NODE_BIN = Path.home() / ".workbuddy" / "binaries" / "node" / "versions" / "22.12.0" / "bin" / "node"
-MANAGED_NODE_MODULES = Path.home() / ".workbuddy" / "binaries" / "node" / "workspace" / "node_modules"
+MANAGED_NODE_BIN = WORKBUDDY_HOME / "binaries" / "node" / "versions" / "22.12.0" / "bin" / "node"
+MANAGED_NODE_MODULES = WORKBUDDY_HOME / "binaries" / "node" / "workspace" / "node_modules"
 
 
 def _live_reload_enabled() -> bool:
@@ -280,7 +282,7 @@ def _load_user_settings() -> dict:
     except (TypeError, ValueError):
         data["cache_limit_mb"] = 1024
     data["proxy_enabled"] = _parse_bool(data.get("proxy_enabled"), True)
-    data["proxy_url"] = str(data.get("proxy_url") or DEFAULT_USER_SETTINGS["proxy_url"]).strip()
+    data["proxy_url"] = str(os.environ.get("NAI_PROXY_URL") or data.get("proxy_url") or DEFAULT_USER_SETTINGS["proxy_url"]).strip()
     data["danbooru_login"] = str(data.get("danbooru_login") or "").strip()
     data["danbooru_api_key"] = str(data.get("danbooru_api_key") or "").strip()
     data["novelai_api_token"] = str(os.environ.get("NOVELAI_API_KEY") or data.get("novelai_api_token") or "").strip()

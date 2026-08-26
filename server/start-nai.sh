@@ -7,8 +7,9 @@ cd "$(dirname "$0")"
 
 EDGE="${EDGE_BIN:-/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge}"
 NODE="${NODE_BIN:-}"
-if [ -z "$NODE" ] && [ -x "$HOME/.workbuddy/binaries/node/versions/22.12.0/bin/node" ]; then
-  NODE="$HOME/.workbuddy/binaries/node/versions/22.12.0/bin/node"
+WORKBUDDY="${WORKBUDDY_HOME:-$HOME/.workbuddy}"
+if [ -z "$NODE" ] && [ -x "$WORKBUDDY/binaries/node/versions/22.12.0/bin/node" ]; then
+  NODE="$WORKBUDDY/binaries/node/versions/22.12.0/bin/node"
 fi
 if [ -z "$NODE" ]; then
   NODE="$(command -v node || true)"
@@ -41,5 +42,5 @@ echo "🚀 启动无头 Edge（后台运行 NovelAI）…"
   "--user-data-dir=$PROFILE" https://novelai.net/image >/dev/null 2>&1 &
 
 echo "🚀 启动 NovelAI 联动层（8787）…"
-NODE_MODULES="$HOME/.workbuddy/binaries/node/workspace/node_modules"
+NODE_MODULES="$WORKBUDDY/binaries/node/workspace/node_modules"
 exec env NODE_OPTIONS= NODE_PATH="$NODE_MODULES" "$NODE" --experimental-sqlite server.mjs --port 8787 --cdp 9222

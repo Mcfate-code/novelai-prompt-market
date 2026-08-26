@@ -72,6 +72,39 @@ const naiStructuredRequest = loadFunctionBound("naiStructuredRequest", ["naiStru
 // ---- P2 翻译一致性纯函数（无自由变量） ----
 const shouldAcceptTranslation = loadFunction("shouldAcceptTranslation");
 const mergeImportedFreeText = loadFunction("mergeImportedFreeText");
+const recognizedTagToken = loadFunction("recognizedTagToken");
+const extractRecognizedTagIdentities = loadFunctionBound("extractRecognizedTagIdentities", ["recognizedTagToken"])(recognizedTagToken);
+const applyRecognizedTagDiff = loadFunctionBound("applyRecognizedTagDiff", ["recognizedTagToken"])(recognizedTagToken);
+const promptTokenRange = loadFunction("promptTokenRange");
+const replacePromptToken = loadFunctionBound("replacePromptToken", ["promptTokenRange"])(promptTokenRange);
+
+test("recognized cart diff patches only catalog tokens and preserves raw syntax", () => {
+  const known = new Map([["blue eyes", "blue eyes"], ["forest", "forest"], ["1girl", "1girl"]]);
+  const raw = "free text, 1girl, 1.2::blue eyes::, {unsupported: syntax}, forest";
+  const patched = applyRecognizedTagDiff(raw, ["1girl", "blue eyes"], known);
+  assert.equal(patched, "free text, 1girl, 1.2::blue eyes::, {unsupported: syntax}");
+  assert.deepEqual(extractRecognizedTagIdentities(patched, known), ["1girl", "blue eyes"]);
+});
+
+test("recognized identity extraction is target-local and excludes unsupported syntax", () => {
+  const known = new Map([["same", "same"], ["character tag", "character tag"]]);
+  assert.deepEqual(extractRecognizedTagIdentities("same, free prose, {same}, 0.8::character tag::", known), ["same", "character tag"]);
+});
+
+test("autocomplete token replacement preserves surrounding text", () => {
+  const raw = "1girl, blue e, masterpiece";
+  const range = promptTokenRange(raw, 13);
+  assert.equal(range.query, "blue e");
+  assert.equal(replacePromptToken(raw, 13, "blue eyes"), "1girl, blue eyes, masterpiece");
+  assert.equal(replacePromptToken("prefix, tag", 3, "new"), "new, tag");
+});
+
+test("advanced cart contract keeps target mapping and layout hooks explicit", () => {
+  assert.match(APP_JS, /\["base", "global_uc", \.\.\.state\.prompt\.characters\.flatMap/);
+  assert.match(APP_JS, /cart-advanced-layout/);
+  assert.match(APP_JS, /closest\("\.tag-card"\)/);
+  assert.match(APP_JS, /setTimeout\(\(\) => showThumbPreview/);
+});
 
 // ---- 与 app.js addTagToTarget 的 base 分支逐行一致的纯逻辑模拟（DOM 部分跳过） ----
 function simulateStructuredBaseClick(draft, naiCharacters, tag) {

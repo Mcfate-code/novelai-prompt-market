@@ -132,6 +132,7 @@
       </div>
       <textarea id="nai-prompt" class="nai-prompt" placeholder="1girl, masterpiece, …（也可从购物车填入）"></textarea>
       <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
+      <div id="nai-autocomplete" class="nai-autocomplete" role="listbox" hidden></div>
       <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
       <div class="nai-quick-toggles">
         <label class="nai-toggle-item" title="Prompt 追加 transparent background，API 使用 straight_alpha">
@@ -400,7 +401,7 @@
       <section class="settings-section">
         <h4>网络与账号</h4>
         <label class="setting-toggle"><input id="setting-proxy-enabled" type="checkbox" checked /><span>使用代理</span></label>
-        <label class="setting-field"><span>代理地址</span><input id="setting-proxy-url" type="url" placeholder="http://127.0.0.1:8080" /></label>
+        <label class="setting-field"><span>代理地址</span><input id="setting-proxy-url" type="url" placeholder="留空表示不使用代理，格式如 http://127.0.0.1:PORT" /></label>
         <label class="setting-field"><span>Danbooru 用户名</span><input id="setting-login" type="text" autocomplete="username" /></label>
         <label class="setting-field"><span>Danbooru API Key</span><input id="setting-api-key" type="password" autocomplete="new-password" placeholder="留空表示保持原 Key" /></label>
         <label class="setting-field"><span>NovelAI API Key</span><input id="setting-novelai-api-key" type="password" autocomplete="new-password" placeholder="留空表示保持原 Key" /></label>
