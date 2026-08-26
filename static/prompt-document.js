@@ -67,6 +67,49 @@ function getTargetEntries(document, target) {
   const sections = getSections(normalize(document), target);
   return sections ? SECTION_IDS.flatMap((id) => sections[id].map((entry) => ({ ...entry, section: id }))) : [];
 }
+/**
+ * 推荐上下文的正向标签（target-local）。规则：
+ *   base            -> Base positive 仅
+ *   char:N          -> Base positive + Character N positive
+ *   global_uc       -> 无正向推荐（返回 []）
+ *   char:N:uc       -> 无正向推荐（返回 []）
+ */
+function recommendationContextTags(document, target) {
+  const doc = normalize(document);
+  const t = String(target || "").trim();
+  if (t === "global_uc" || /:uc$/.test(t)) return [];
+  const seen = new Set();
+  const out = [];
+  const push = (entry) => {
+    const tag = String(entry?.tag ?? "").trim();
+    if (!tag) return;
+    const key = tag.toLocaleLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(tag);
+  };
+  for (const entry of getTargetEntries(doc, "base")) push(entry);
+  const m = String(t).match(TARGET_RE);
+  if (m && !m[2]) {
+    for (const entry of getTargetEntries(doc, `char:${m[1]}`)) push(entry);
+  }
+  return out;
+}
+
+/**
+ * 当前 target 已选标签集合（target-local，用于推荐去重）。
+ * 只排除当前 target 自身已有的 tag，不跨界污染其他角色。
+ */
+function selectedTagKeysForTarget(document, target) {
+  const doc = normalize(document);
+  const t = String(target || "").trim();
+  const keys = new Set();
+  for (const entry of getTargetEntries(doc, t)) {
+    const tag = String(entry?.tag ?? "").trim();
+    if (tag) keys.add(tag.toLocaleLowerCase());
+  }
+  return keys;
+}
 function weightText(entry) { const weight = Number(entry.weight ?? 1); return weight === 1 ? entry.tag : `${Number(weight.toFixed(2))}::${entry.tag}::`; }
 function serializeTarget(document, target) { return getTargetEntries(document, target).filter((e) => e.tag).map(weightText).join(", "); }
 function knownMap(knownTags) {
@@ -232,4 +275,4 @@ function applyExclusiveGroup(document, payload = {}) {
   return doc;
 }
 
-export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
+export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };

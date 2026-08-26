@@ -27,7 +27,7 @@
  *   GET  /api/favorites
  */
 
-import { getTargetEntries } from "./prompt-document.js";
+import { getTargetEntries, recommendationContextTags, selectedTagKeysForTarget } from "./prompt-document.js";
 
 export const TAB_LABELS = { recommend: "推荐", catalog: "目录", search: "搜索", favorites: "收藏" };
 export const TAB_ORDER = ["recommend", "catalog", "search", "favorites"];
@@ -64,36 +64,10 @@ function abbreviateCount(n) {
   return v ? String(v) : "";
 }
 
-// ---- 推荐：从 PromptDocument 提取 positive 标签（base + 各角色 prompt；UC 不参与，与后端一致） ----
-export function positiveTagsFromDocument(doc) {
-  const tags = [];
-  if (!doc || typeof doc !== "object") return tags;
-  const push = (entry) => { if (entry && String(entry.tag).trim()) tags.push(String(entry.tag).trim()); };
-  for (const entry of getTargetEntries(doc, "base")) push(entry);
-  for (let i = 0; i < (Array.isArray(doc.characters) ? doc.characters.length : 0); i++) {
-    for (const entry of getTargetEntries(doc, `char:${i}`)) push(entry);
-  }
-  const seen = new Set();
-  return tags.filter((tag) => {
-    const key = tag.toLocaleLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// 已选集合：整个文档所有目标的条目（大小写不敏感）——推荐据此去重。
-export function selectedTagKeys(doc) {
-  const keys = new Set();
-  if (!doc || typeof doc !== "object") return keys;
-  const targets = ["base", "global_uc"];
-  for (let i = 0; i < (Array.isArray(doc.characters) ? doc.characters.length : 0); i++) targets.push(`char:${i}`, `char:${i}:uc`);
-  for (const target of targets) {
-    for (const entry of getTargetEntries(doc, target)) {
-      if (String(entry.tag).trim()) keys.add(String(entry.tag).trim().toLocaleLowerCase());
-    }
-  }
-  return keys;
+// ---- 推荐：active target 是否负面目标（UC）——UC 不参与正向推荐 ----
+export function isUcTarget(target) {
+  const t = String(target || "").trim();
+  return t === "global_uc" || /:uc$/.test(t);
 }
 
 // active target -> 后端允许的 target（base|character）
@@ -104,11 +78,22 @@ export function mapBackendTarget(target) {
   return "base"; // base / global_uc / 未知
 }
 
-export function buildRecommendPayload(doc, target, nodeId = "", limit = REC_LIMIT) {
+export function buildRecommendPayload(doc, target, options = {}) {
+  const { nodeId = "", activeSection = "", limit = REC_LIMIT } = options;
+  const t = String(target || "base");
+  const ctx = (doc && typeof doc === "object" && doc.assistant_context && typeof doc.assistant_context === "object") ? doc.assistant_context : {};
   return {
-    tags: positiveTagsFromDocument(doc),
-    target: mapBackendTarget(target),
+    tags: recommendationContextTags(doc, t),
+    target: mapBackendTarget(t),
+    active_target: t,
     node_id: String(nodeId || ""),
+    active_section: String(activeSection || ""),
+    assistant_context: ctx,
+    participant_count: ctx?.participant_count,
+    primary_scene_type: ctx?.primary_scene_type,
+    stage: ctx?.stage,
+    position: ctx?.position,
+    body_focus: ctx?.body_focus,
     limit: Number(limit) > 0 ? Number(limit) : REC_LIMIT,
   };
 }
@@ -163,12 +148,19 @@ export function groupRecommendations(recommendations) {
 }
 
 // ---- 目录：语义导航骨架（不展开 5 万标签树） ----
-export function flattenSemanticTree(tree) {
+function semanticRootKeyForTarget(t) {
+  const s = String(t || "").trim();
+  if (!s) return null;
+  if (s === "base" || s === "global_uc") return "base";
+  if (/^char:\d+(:uc)?$/.test(s)) return "character";
+  return null;
+}
+
+export function flattenSemanticTree(tree, activeTarget = null) {
   const roots = [];
   if (!tree || typeof tree !== "object") return roots;
-  for (const key of ["base", "character"]) {
-    const root = tree[key];
-    if (!root || typeof root !== "object") continue;
+  const buildRoot = (key, root) => {
+    if (!root || typeof root !== "object") return null;
     const nodes = [];
     const walk = (node, depth) => {
       if (!node || typeof node !== "object" || !node.id) return;
@@ -183,7 +175,17 @@ export function flattenSemanticTree(tree) {
       for (const child of node.children || []) walk(child, depth + 1);
     };
     for (const child of root.children || []) walk(child, 1);
-    roots.push({ key, label: String(root.label ?? (key === "base" ? "Base" : "Character")), nodes });
+    return { key, label: String(root.label ?? (key === "base" ? "Base" : "Character")), nodes };
+  };
+  const targetKey = semanticRootKeyForTarget(activeTarget);
+  if (targetKey) {
+    const root = buildRoot(targetKey, tree[targetKey]);
+    if (root) roots.push(root);
+    return roots;
+  }
+  for (const key of ["base", "character"]) {
+    const root = buildRoot(key, tree[key]);
+    if (root) roots.push(root);
   }
   return roots;
 }
@@ -330,8 +332,12 @@ export class TagAssistant {
     }
     if (!silent) this.view = { ...emptyView(), status: "loading" };
     const target = typeof bridge.getActiveTarget === "function" ? bridge.getActiveTarget() : "base";
-    const payload = buildRecommendPayload(doc, target, this.nodeId, this.limit);
-    const selected = selectedTagKeys(doc);
+    if (isUcTarget(target)) {
+      this.view = { ...emptyView(), status: "empty", message: "负面目标（UC）不参与正向推荐。" };
+      return;
+    }
+    const payload = buildRecommendPayload(doc, target, { nodeId: this.nodeId, limit: this.limit });
+    const selected = selectedTagKeysForTarget(doc, target);
     try {
       const data = await this.api("/api/recommendations", { method: "POST", body: JSON.stringify(payload) });
       const recs = filterSelected(data.recommendations || [], selected);
@@ -358,7 +364,8 @@ export class TagAssistant {
     this.view = { ...emptyView(), status: "loading" };
     try {
       const data = await this.api("/api/catalog/semantic");
-      const groups = flattenSemanticTree(data.tree || {});
+      const target = typeof this.bridge?.getActiveTarget === "function" ? this.bridge.getActiveTarget() : "base";
+      const groups = flattenSemanticTree(data.tree || {}, target);
       this.nodesCache = groups.flatMap((group) => group.nodes);
       this.view = {
         ...emptyView(),
@@ -387,10 +394,15 @@ export class TagAssistant {
     this.view = { ...base, status: "loading" };
     if (this.root) this.render();
     const target = typeof bridge.getActiveTarget === "function" ? bridge.getActiveTarget() : "base";
-    const payload = buildRecommendPayload(doc, target, this.nodeId, this.limit);
+    if (isUcTarget(target)) {
+      this.view = { ...base, status: "empty", message: "负面目标（UC）不参与正向推荐。" };
+      if (this.root) this.render();
+      return;
+    }
+    const payload = buildRecommendPayload(doc, target, { nodeId: this.nodeId, activeSection: (node && node.section) || "", limit: this.limit });
     try {
       const data = await this.api("/api/recommendations", { method: "POST", body: JSON.stringify(payload) });
-      const recs = filterSelected(data.recommendations || [], selectedTagKeys(doc));
+      const recs = filterSelected(data.recommendations || [], selectedTagKeysForTarget(doc, target));
       const groups = groupRecommendations(recs);
       const fallback = recommendFallback(node);
       this.view = {

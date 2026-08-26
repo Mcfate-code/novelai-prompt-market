@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addCharacter, addTag, createEmpty } from "../static/prompt-document.js";
+import { addCharacter, addTag, createEmpty, recommendationContextTags, selectedTagKeysForTarget } from "../static/prompt-document.js";
 import {
   TagAssistant,
   buildAddTagAction,
@@ -17,10 +17,9 @@ import {
   filterSelected,
   flattenSemanticTree,
   groupRecommendations,
+  isUcTarget,
   mapBackendTarget,
-  positiveTagsFromDocument,
   recommendFallback,
-  selectedTagKeys,
   toCard,
   toCards,
 } from "../static/tag-assistant.js";
@@ -37,23 +36,36 @@ const makeBridge = (doc = createEmpty(), target = "base") => ({
   dispatch: () => {},
 });
 
-// ---- 推荐路径：positive 标签提取 ----
+// ---- 推荐路径：推荐上下文（target-local）与 UC 识别 ----
 
-test("positiveTagsFromDocument collects base + character prompt, excludes UC and global UC", () => {
+test("recommendationContextTags: base only includes Base positive", () => {
   let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
   doc = addTag(doc, "char:0", "1girl", "character");
-  doc = addTag(doc, "char:0:uc", "lowres", "other");
-  doc = addTag(doc, "global_uc", "bad anatomy", "other");
-  doc = addCharacter(doc, { name: "Second", prompt_sections: { character: [{ tag: "citlali" }] }, uc_sections: {} });
-  assert.deepEqual(positiveTagsFromDocument(doc), ["blue eyes", "1girl", "citlali"]);
+  doc = addCharacter(doc, { name: "Second" });
+  doc = addTag(doc, "char:1", "solo", "character");
+  assert.deepEqual(recommendationContextTags(doc, "base"), ["blue eyes"]);
 });
 
-test("positiveTagsFromDocument dedupes case-insensitively and tolerates missing document", () => {
-  let doc = addTag(createEmpty(), "base", "Blue Eyes", "appearance");
-  doc = addTag(doc, "base", "blue eyes", "appearance");
-  assert.deepEqual(positiveTagsFromDocument(doc), ["Blue Eyes"]);
-  assert.deepEqual(positiveTagsFromDocument(null), []);
-  assert.deepEqual(positiveTagsFromDocument({}), []);
+test("recommendationContextTags: char:1 includes Base + char:1 only (C1/C3 NOT included)", () => {
+  let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
+  doc = addTag(doc, "char:0", "1girl", "character");
+  doc = addCharacter(doc, { name: "Second" });
+  doc = addTag(doc, "char:1", "solo", "character");
+  assert.deepEqual(recommendationContextTags(doc, "char:1"), ["blue eyes", "solo"]);
+});
+
+test("recommendationContextTags: UC targets return empty (no positive)", () => {
+  let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
+  doc = addTag(doc, "char:0", "1girl", "character");
+  assert.deepEqual(recommendationContextTags(doc, "global_uc"), []);
+  assert.deepEqual(recommendationContextTags(doc, "char:1:uc"), []);
+});
+
+test("isUcTarget recognizes global_uc and char:N:uc", () => {
+  assert.equal(isUcTarget("global_uc"), true);
+  assert.equal(isUcTarget("char:0:uc"), true);
+  assert.equal(isUcTarget("base"), false);
+  assert.equal(isUcTarget("char:0"), false);
 });
 
 // ---- 推荐路径：请求载荷与后端 target 映射 ----
@@ -71,24 +83,32 @@ test("buildRecommendPayload sends positive tags, mapped target, node_id and limi
   let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
   doc = addTag(doc, "char:0", "1girl", "character");
   doc = addTag(doc, "global_uc", "bad anatomy", "other"); // UC 不入 positive 样本
-  const payload = buildRecommendPayload(doc, "char:0:uc", "env_indoor", 15);
-  assert.deepEqual(payload.tags, ["blue eyes", "1girl"]);
-  assert.equal(payload.target, "character");
-  assert.equal(payload.node_id, "env_indoor");
-  assert.equal(payload.limit, 15);
-  assert.equal(buildRecommendPayload(doc, "base", "", 0).limit, 20, "非法 limit 回退默认");
+
+  const uc = buildRecommendPayload(doc, "char:0:uc", { nodeId: "env_indoor", limit: 15 });
+  assert.deepEqual(uc.tags, []);
+  assert.equal(uc.target, "character");
+  assert.equal(uc.active_target, "char:0:uc");
+  assert.equal(uc.active_section, "");
+  assert.equal(uc.node_id, "env_indoor");
+  assert.equal(uc.limit, 15);
+
+  const char = buildRecommendPayload(doc, "char:0", { limit: 15 });
+  assert.deepEqual(char.tags, ["blue eyes", "1girl"]);
+  assert.equal(char.active_target, "char:0");
+
+  assert.equal(buildRecommendPayload(doc, "base", { limit: 0 }).limit, 20, "非法 limit 回退默认");
 });
 
-// ---- 推荐路径：已选去重 ----
+// ---- 推荐路径：已选去重（target-local） ----
 
-test("selectedTagKeys covers every target of the document", () => {
-  let doc = addTag(createEmpty(), "base", "blue eyes", "appearance");
-  doc = addTag(doc, "global_uc", "lowres", "other");
-  doc = addTag(doc, "char:0", "1girl", "character");
-  doc = addTag(doc, "char:0:uc", "bad anatomy", "other");
-  const keys = selectedTagKeys(doc);
-  for (const expected of ["blue eyes", "lowres", "1girl", "bad anatomy"]) assert.ok(keys.has(expected));
-  assert.ok(!keys.has("bedroom"));
+test("selectedTagKeysForTarget is target-local (C1 blue eyes does NOT remove C2 blue eyes)", () => {
+  let doc = addTag(createEmpty(), "char:0", "blue eyes", "appearance");
+  doc = addCharacter(doc, { name: "Second" });
+  doc = addTag(doc, "char:1", "solo", "character");
+  assert.ok(!selectedTagKeysForTarget(doc, "char:1").has("blue eyes"), "C2 的已选集合不包含 C1 的 blue eyes");
+  assert.ok(selectedTagKeysForTarget(doc, "char:0").has("blue eyes"), "C1 的已选集合包含自己的 blue eyes");
+  assert.equal(filterSelected([{ tag: "blue eyes" }], selectedTagKeysForTarget(doc, "char:1")).length, 1, "C1 的 blue eyes 不过滤 C2 的 blue eyes 推荐");
+  assert.equal(filterSelected([{ tag: "blue eyes" }], selectedTagKeysForTarget(doc, "char:0")).length, 0, "C1 自己的 blue eyes 过滤自己");
 });
 
 test("filterSelected removes already-selected tags by tag or canonical, case-insensitively", () => {
@@ -218,7 +238,7 @@ test("catalog path loads semantic skeleton and node selection calls recommendati
   });
   await ta.reload("catalog");
   assert.equal(ta.view.status, "ok");
-  assert.equal(ta.view.nodes.length, 2, "Base / Character 两组骨架");
+  assert.equal(ta.view.nodes.length, 1, "active target=base 只显示 Base 单组骨架");
   assert.ok(ta.view.nodes[0].nodes.some((n) => n.id === "env_indoor"));
 
   await ta.selectNode("env_indoor");
