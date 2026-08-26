@@ -1,5 +1,5 @@
 "use strict";
-import { splitPromptTokens, joinPromptTokens } from "./prompt-tokenizer.js";
+import { splitPromptTokens, joinPromptTokens, tokenRangeAtCaret } from "./prompt-tokenizer.js";
 
 // ===== 状态 =====
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
@@ -318,6 +318,7 @@ async function saveUserSettings() {
     }
     userSettings = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
     window.WorkbenchComponents?.nsfwBuilder?.setAdolescentMode(!!userSettings.adolescent_mode);
+    window.WorkbenchMode?.set(workbenchMode);
     naiSyncResolutionFromInputs();
     closeSettings();
     await loadNaiApiStatus();
@@ -504,7 +505,8 @@ function replacePromptToken(text, caret, replacement) {
   return text.slice(0, range.start) + left + replacement + right + text.slice(range.end);
 }
 // 替换 token 并同时可靠返回新的 value 与 caret（caret 落在插入 tag 末尾，绝不落到 tag 内部）。
-// 与 replacePromptToken 共用同一套 left/right/range 语义，生产代码与测试共用此纯函数。
+// 生产代码已改用 prompt-tokenizer 的 tokenRangeAtCaret；此三函数保留仅供
+// tests/test_app_helpers.mjs 源码提取回归（逗号切分语义）。
 function replacePromptTokenWithCaret(text, caret, replacement) {
   const range = promptTokenRange(text, caret);
   const left = text.slice(range.start, caret).match(/^\s*/)?.[0] || "";
@@ -519,14 +521,16 @@ function naiAutocompleteSkipSearch(acceptedTag, query) {
   return !!acceptedTag && String(query ?? "").trim().toLocaleLowerCase() === String(acceptedTag).toLocaleLowerCase();
 }
 const naiAutocompleteSearch = debounce(async (input) => {
-  const range = promptTokenRange(input.value, input.selectionStart);
+  const caret = input.selectionStart;
+  const range = tokenRangeAtCaret(input.value, caret); // caret-range 唯一权威
+  const query = input.value.slice(range.start, caret).trim();
   const acceptedTag = naiAutocompleteSuppress;
   naiAutocompleteSuppress = null;
-  if (naiAutocompleteSkipSearch(acceptedTag, range.query)) return;
-  if (range.query.length < 2 || /[{}\[\]()<>]/.test(range.query)) { closeNaiAutocomplete(); return; }
+  if (naiAutocompleteSkipSearch(acceptedTag, query)) return;
+  if (query.length < 2 || /[{}\[\]()<>]/.test(query)) { closeNaiAutocomplete(); return; }
   const request = ++naiAutocompleteState.request;
   try {
-    const data = await api(`/api/search?q=${encodeURIComponent(range.query)}`);
+    const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
     if (request !== naiAutocompleteState.request || document.activeElement !== input) return;
     naiAutocompleteState = { ...naiAutocompleteState, input, range, results: (data.results || []).slice(0, 8), selected: 0 };
     renderNaiAutocomplete();
@@ -559,7 +563,12 @@ function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
   const item = results[index]; if (!input || !item) return;
   knownCatalogTags.set(String(item.tag).toLocaleLowerCase(), item.tag);
   const caret = input.selectionStart;
-  const { value, caret: nextCaret } = replacePromptTokenWithCaret(input.value, caret, item.tag);
+  // caret-range 唯一权威：tokenRangeAtCaret 尊重 weight::tag:: 包裹，避免拆进加权 token 内部。
+  const range = tokenRangeAtCaret(input.value, caret);
+  const left = input.value.slice(range.start, caret).match(/^\s*/)?.[0] || "";
+  const right = input.value.slice(caret, range.end).match(/\s*$/)?.[0] || "";
+  const value = input.value.slice(0, range.start) + left + item.tag + right + input.value.slice(range.end);
+  const nextCaret = range.start + left.length + item.tag.length;
   // Tab / 鼠标接受：追加分隔符 `, `（若光标后已有分隔符则不再追加）。
   const delimiter = (typeof window !== "undefined" && window.NaiInputKeys)
     ? window.NaiInputKeys.delimiterToAppend(value.slice(nextCaret))
@@ -700,11 +709,16 @@ async function mountWorkbenchComponents() {
   window.WorkbenchComponents = { assistant, builder, nsfwBuilder };
   const switcher = $("#prompt-mode-switch");
   const setMode = (mode) => {
+    if (mode === "scene" && userSettings.adolescent_mode) mode = "text"; // 青少年模式隐藏 Scene
     endEditTransaction(); // 模式切换结束上一次编辑会话
     workbenchMode = mode;
-    switcher?.querySelectorAll("[data-prompt-mode]").forEach((button) => button.classList.toggle("active", button.dataset.promptMode === mode));
+    switcher?.querySelectorAll("[data-prompt-mode]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.promptMode === mode);
+      if (button.dataset.promptMode === "scene") button.hidden = !!userSettings.adolescent_mode;
+    });
     const isText = mode === "text";
     const isVisual = mode === "visual";
+    const isScene = mode === "scene";
     // Text：单一编辑器 + Prompt/UC 标签 + 角色标签 + Tag Assistant（可折叠）；不复制到 Visual/Scene
     $("#nai-editor").hidden = !isText;
     $(".nai-prompt-meta")?.toggleAttribute("hidden", !isText);
@@ -713,12 +727,14 @@ async function mountWorkbenchComponents() {
     $("#nai-character-tabs")?.toggleAttribute("hidden", !isText);
     $("#nai-character-list")?.toggleAttribute("hidden", !isText);
     $("#tag-assistant-root").hidden = !isText;
-    // Visual 独占
+    // Visual / Scene 独占
     $("#visual-prompt-root").hidden = !isVisual;
+    $("#nsfw-builder-root").hidden = !isScene;
     if (isText) renderWorkbenchEditorFromDocument({ force: true });
   };
   switcher?.addEventListener("click", (event) => { const button = event.target.closest("[data-prompt-mode]"); if (button) setMode(button.dataset.promptMode); });
   setMode("text");
+  window.WorkbenchMode = { set: setMode };
   // PromptDocument 变化 → 单一编辑器回流：编辑器聚焦时由 GUARD 跳过，避免打字被重写。
   window.PromptBridge.subscribe(() => renderWorkbenchEditorFromDocument());
 }

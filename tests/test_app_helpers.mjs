@@ -80,7 +80,6 @@ const shouldAcceptTranslation = loadFunction("shouldAcceptTranslation");
 const mergeImportedFreeText = loadFunction("mergeImportedFreeText");
 const recognizedTagToken = loadFunction("recognizedTagToken");
 const extractRecognizedTagIdentities = new Function("recognizedTagToken", "splitPromptTokens", `${extractFunction("extractRecognizedTagIdentities")}; return extractRecognizedTagIdentities;`)(recognizedTagToken, splitPromptTokens);
-const applyRecognizedTagDiff = new Function("recognizedTagToken", "splitPromptTokens", `${extractFunction("applyRecognizedTagDiff")}; return applyRecognizedTagDiff;`)(recognizedTagToken, splitPromptTokens);
 const promptTokenRange = loadFunction("promptTokenRange");
 const replacePromptToken = loadFunctionBound("replacePromptToken", ["promptTokenRange"])(promptTokenRange);
 const replacePromptTokenWithCaret = loadFunctionBound("replacePromptTokenWithCaret", ["promptTokenRange"])(promptTokenRange);
@@ -88,14 +87,6 @@ const workspaceTabToTarget = loadFunction("workspaceTabToTarget");
 // ---- P3 修复纯函数（无自由变量） ----
 const naiStructuredBaseLine = loadFunction("naiStructuredBaseLine");
 const naiAutocompleteSkipSearch = loadFunction("naiAutocompleteSkipSearch");
-
-test("recognized cart diff patches only catalog tokens and preserves raw syntax", () => {
-  const known = new Map([["blue eyes", "blue eyes"], ["forest", "forest"], ["1girl", "1girl"]]);
-  const raw = "free text, 1girl, 1.2::blue eyes::, {unsupported: syntax}, forest";
-  const patched = applyRecognizedTagDiff(raw, ["1girl", "blue eyes"], known);
-  assert.equal(patched, "free text, 1girl, 1.2::blue eyes::, {unsupported: syntax}");
-  assert.deepEqual(extractRecognizedTagIdentities(patched, known), ["1girl", "blue eyes"]);
-});
 
 test("recognized identity extraction is target-local and excludes unsupported syntax", () => {
   const known = new Map([["same", "same"], ["character tag", "character tag"]]);
@@ -111,7 +102,6 @@ test("autocomplete token replacement preserves surrounding text", () => {
 });
 
 test("advanced cart contract keeps target mapping and layout hooks explicit", () => {
-  assert.match(APP_JS, /\["base", "global_uc", \.\.\.state\.prompt\.characters\.flatMap/);
   assert.match(APP_JS, /cart-advanced-layout/);
   assert.match(APP_JS, /closest\("\.tag-card"\)/);
   assert.match(APP_JS, /setTimeout\(\(\) => showThumbPreview/);
@@ -219,15 +209,20 @@ test("P0 legacy structured rawPrompt restore distributes fields via parseStructu
   assert.equal(parsed.characters[1].prompt, "nahida, green hair");
 });
 
-// P0 结构化边界源码契约：Base 干净、无 display 判定门、快照始终持久化 state.prompt。
-test("P0 app.js contract: no structured display in #nai-prompt, snapshot keeps state.prompt", () => {
-  // naiFillFromCart 把 Base 写入 #nai-prompt（不再是 structured/flat 混合串）
-  assert.match(APP_JS, /\$\("#nai-prompt"\)\.value = basePrompt/);
+// 源码契约：Workbench 单一编辑器收敛 —— 不再有 #nai-prompt/#nai-neg textarea，生成读 PromptDocument，快照始终持久化 state.prompt。
+test("P0 app.js contract: single #nai-editor, generation reads PromptDocument, snapshot keeps state.prompt", () => {
+  // 不再写 #nai-prompt / #nai-neg（单一编辑器，PromptDocument 权威）
+  assert.doesNotMatch(APP_JS, /\$\("#nai-prompt"\)/);
+  assert.doesNotMatch(APP_JS, /\$\("#nai-neg"\)/);
+  // 旧 sync 链 / DOM-fill 已移除
+  assert.doesNotMatch(APP_JS, /function reconcileGenerationFromCart/);
+  assert.doesNotMatch(APP_JS, /async function naiFillFromCart/);
+  assert.doesNotMatch(APP_JS, /function applyRecognizedTagDiff/);
   // 结构化 draft / request 判定门已移除
   assert.doesNotMatch(APP_JS, /naiStructuredDraft/);
   assert.doesNotMatch(APP_JS, /function naiStructuredRequest/);
-  // naiGenerate 的 payload 直接取 prompt.trim()，不再经 naiStructuredRequest
-  assert.match(APP_JS, /naiCompileGeneration\(prompt\.trim\(\), negativePrompt\)/);
+  // naiGenerate 读 PromptDocument 权威（buildGenerationPromptState），不再读 textarea
+  assert.match(APP_JS, /buildGenerationPromptState\(state\.prompt\)/);
   // 快照始终持久化当前结构化状态，绝不用 emptyPromptState() 顶替
   assert.match(APP_JS, /structured_state: state\.prompt/);
 });
