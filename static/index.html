@@ -75,8 +75,7 @@
 
       <div class="nai-tabs">
         <button class="nai-tab active" data-tab="prompt">Prompt</button>
-        <button class="nai-tab" data-tab="undesired">Undesired</button>
-        <button id="nai-split-neg" class="nai-split-btn" title="分离负面提示词（Tab 切换 / 并排显示）">⇱</button>
+        <button class="nai-tab" data-tab="uc">UC</button>
       </div>
       <div class="nai-character-tabs" id="nai-character-tabs" role="tablist">
         <button type="button" class="nai-char-tab active" data-nai-char-tab="base">Base</button>
@@ -84,9 +83,16 @@
         <span class="nai-character-count" id="nai-character-count">0</span>
       </div>
 
-      <textarea id="nai-prompt" class="nai-prompt" placeholder="1girl, masterpiece, …（也可从购物车填入）"></textarea>
-      <textarea id="nai-neg" class="nai-prompt" style="display:none" placeholder="undesired content…"></textarea>
-      <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span><button id="nai-fill-cart" class="nai-link-btn" title="把购物车内容拼成提示词填入">从购物车填入</button></div>
+      <textarea id="nai-editor" class="nai-prompt" placeholder="1girl, masterpiece, …"></textarea>
+      <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span></div>
+      <details class="nai-free-text-collapse" id="nai-free-text-collapse" hidden>
+        <summary><span>▸ 自然语言补充</span></summary>
+        <div class="nai-free-text-body">
+          <textarea id="nai-free-text" class="nai-free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…"></textarea>
+          <label class="nai-free-text-use"><input type="checkbox" id="nai-free-text-use-en" /> 使用英文译文</label>
+          <textarea id="nai-free-text-en" class="nai-free-text" placeholder="英文译文（可编辑）"></textarea>
+        </div>
+      </details>
 
       <div id="nai-character-list" class="nai-character-list"><div class="empty">Base Prompt 在顶部编辑</div></div>
 
