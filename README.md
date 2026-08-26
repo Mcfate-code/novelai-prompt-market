@@ -196,7 +196,7 @@ PromptBridge 与 Tag Assistant / Visual Builder 同源（`getDocument()` / `getA
 | `REMOVE_TAG` | `{ target, entryId }` | 活动取消（仅移除带 scene_activity / scene-builder 溯源标记的自身条目） |
 | `SCENE_PROPOSAL` | `{ kind, count?, autoRemovableEmptyIndices?, blockedIndices? }` | 参与者增减高层提议，`kind:"sync_participants"` / `"remove_characters_blocked"`（Integrator 决定角色槽增删 / 基础主体数同步 / 手动移除提示；组件本身不直接增删角色） |
 
-组件导出纯函数（`buildContext` / `buildRecommendPayload` / `buildSetExclusiveGroupAction` / `buildSetAssistantContextAction` / `buildAddTagAction` / `exclusiveMembers` / `filterPositions` / `normalizeOption(s)` / `normalizeRecommendation(s)` / `participantNumber` / `radioMoveIndex` / `isSelected` / `optionVisibleForCount` / `positiveTagsFromDocument` / `dispatchAction` / `esc` 等）供测试与集成方复用。最终 Workbench 第三模式挂载与 `SCENE_PROPOSAL` 处理由 Integrator 完成。
+组件导出纯函数（`buildContext` / `buildRecommendPayload` / `buildSetExclusiveGroupAction` / `buildSetAssistantContextAction` / `buildAddTagAction` / `exclusiveMembers` / `filterPositions` / `normalizeOption(s)` / `normalizeRecommendation(s)` / `participantNumber` / `radioMoveIndex` / `isSelected` / `optionVisibleForCount` / `positiveTagsFromDocument` / `dispatchAction` / `esc` 等）供测试与集成方复用。组件由 `app.js` 的 `mountWorkbenchComponents()` 挂载为第三模式（Scene）并随 `#prompt-mode-switch` 切换显隐；`SCENE_PROPOSAL`（参与者增减 → 角色槽增删 / 基础主体数同步）这一高层提议的最终落库处理由 Integrator 在 `dispatch` 侧实现（组件只发提议，不直接增删角色）。
 
 ### Prompt Input / Autocomplete 键盘契约（Phase 2，独立模块，已接入）
 
@@ -312,9 +312,14 @@ function apply(event, action) {
 接入：`POST /api/prompt/auto-split`（body `{ text | prompt, manual_assignments? }`）调用同一 service，
 对 proposal 的每个 tag 用 `classify_tag` 补 `section`，返回 `{ proposal, summary, unassigned, structured, resplit, assistant_context }`，
 并附前端易用字段 `base_count`、`characters:[{name,prompt_count,uc_count}]`、`unassigned_count`；不返回 HTML，
-**不修改** PromptDocument（Apply 由前端执行）。前端 Import 弹窗「自动整理角色」按钮请求该接口后 dispatch 单个
-`APPLY_AUTO_SPLIT`（`PromptBridge` 一次 proposal → `PromptDocument` 整体替换 → 单次 notify，不逐 tag dispatch），
-并复用现有 `undo` 回退；不在 keypress 上重拆，已有 structured metadata（`resplit=false`）直接恢复，不二次 split。
+**不修改** PromptDocument（Apply 由前端执行）。
+
+前端 Import 弹窗「自动整理角色」按钮是**非破坏性** analyze → preview → apply/cancel 流程：点击只请求该接口并在弹窗内渲染预览
+（`Base · N tags`、`Character 1 <name> · M tags`、…、`无法确定 · R`，计数全部取自 proposal 的真实字段
+`base` / `characters[].{name,prompt,uc}` / `unassigned`），**不改动当前 PromptDocument**；「应用拆分」才 dispatch 单个
+`APPLY_AUTO_SPLIT`（`PromptBridge` 一次 proposal → `documentFromProposal` → `PromptDocument` 整体替换 → 单次 notify，
+不逐 tag dispatch），「取消」关闭预览、零状态变更；预览可重复打开，每次重新分析。Apply 复用现有 `undo` 回退；
+不在 keypress 上重拆，已有 structured metadata（`resplit=false`）直接恢复，不二次 split。
 
 ### NovelAI 生图（官方 API）
 
@@ -656,11 +661,11 @@ node --check server/server.mjs
 
 测试中的 taxonomy / 中文别名使用 `tests/fixtures/` 内的最小固定数据，不依赖 `.gitignore` 的本机 `data/`。
 
-当前回归基线（非付费）：Python 163 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node `npm test` 258 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
+当前回归基线（非付费）：Python 182 项（含 Recommendation V2 / Auto-Split 与 Phase 2 集成）、Node `npm test` 287 项全部通过；覆盖搜索、拼音、导入、Bundle、Snapshot、图库、NovelAI payload、串行批次、取消、翻译、设置、推荐（V2 RRF / 语义节点 / 成人上下文 / adolescent gating）、Tag Assistant 四入口、Visual Builder 语义卡片与 chip 编辑与防互杀守卫、NSFW Scene Builder 严格互斥组 / 多选活动 / 位置与逐角色服装作用域、Auto-Split（含权重 / 结构化不重拆）、assistant_context 随 snapshot 保留且不泄漏进编译 Prompt、图库恢复参数后的结构化多角色重建、autocomplete 方向键/Tab 接受追加 `, `/Esc 关闭/单 Enter 换行/Enter×2 生成一次/IME composing/弹窗主题 scope。
 
 ### Prompt 语法 Codec（`static/prompt-tokenizer.js`）
 
-前端唯一规范的 NovelAI Prompt 语法编解码器，语义与 Python 参考实现 `prompt/import_parser.py`（`split_tags` / `parse_entry`）与 `prompt/novelai_export.py`（`format_entry` / `format_number`）一致。`static/prompt-document.js` 与 `static/prompt-compiler.js` 均通过它完成 token 拆分 / 解析 / 序列化。
+前端唯一规范的 NovelAI Prompt 语法编解码器，语义与 Python 参考实现一致：`prompt/import_parser.py`（`split_tags` / `parse_entry`）、`prompt/composer.py`（`format_number`）、`prompt/novelai_export.py`（`format_entry`）。`static/prompt-document.js` 与 `static/prompt-compiler.js` 均通过它完成 token 拆分 / 解析 / 序列化。
 
 - `splitPromptTokens(text)`：按逗号拆分，`::…::` 权重包裹内的逗号不拆（成对切换 `inWeight`），trim 后丢弃空 token。
 - `parsePromptToken(token)`：解析为 `{ raw, tag, weight, weighted, relation, brackets, strength }`；支持负数权重 `-1::hat::`、关系前缀 `source#/target#/mutual#`、强调层级 `{{}}`/`[[]]`。

@@ -2170,29 +2170,79 @@ function openImportModal() {
   $("#import-text").value = "";
   $("#import-preview-box").style.display = "none";
   $("#import-preview-box").innerHTML = "";
+  $("#import-auto-split-box").style.display = "none";
+  $("#import-auto-split-box").innerHTML = "";
+  $("#import-auto-split-actions").style.display = "none";
+  autoSplitProposal = null;
+  importPreviewData = null;
   $("#import-text").focus();
   rebuildImportTargetSelect();
 }
 function closeImportModal() { $("#import-modal").style.display = "none"; }
 
-// 手动「自动整理角色」：一次 proposal -> PromptDocument 替换（APPLY_AUTO_SPLIT），
-// 不在 keypress 上重拆；已有 structured metadata 直接恢复（auto_split 返回 resplit=false）。
+// ===== Auto-Split（非破坏性）=====
+// 「自动整理角色」只做 analyze → preview，绝不修改当前 PromptDocument；
+// 只有「应用拆分」才 dispatch APPLY_AUTO_SPLIT（一次 proposal -> documentFromProposal 整体替换）。
+let autoSplitProposal = null; // 最近一次 /api/prompt/auto-split 的 proposal（未应用）
+
 async function doAutoSplitFromImport() {
   const text = $("#import-text").value.trim();
   if (!text) { toast("请先粘贴提示词"); return; }
   const btn = $("#import-auto-split");
   btn.disabled = true;
+  btn.textContent = "分析中…";
   try {
     const r = await api("/api/prompt/auto-split", { method: "POST", body: JSON.stringify({ text }) });
     const proposal = r.proposal || r;
-    window.PromptBridge.dispatch({ type: "APPLY_AUTO_SPLIT", payload: { proposal } });
-    closeImportModal();
-    toast(`已整理角色：${r.summary || proposal.summary || "完成"}`);
+    autoSplitProposal = proposal;
+    renderAutoSplitPreview(proposal, r.summary || proposal.summary || "");
   } catch (e) {
     toast("自动整理失败：" + e.message);
   } finally {
     btn.disabled = false;
+    btn.textContent = "自动整理角色";
   }
+}
+
+// 用 proposal 真实字段渲染预览：base / characters[].{name,prompt,uc} / unassigned。
+// 计数只来自 proposal（free_text 条目无 tag，不计入 Base 标签数）。
+function renderAutoSplitPreview(proposal, summary) {
+  const box = $("#import-auto-split-box");
+  const actions = $("#import-auto-split-actions");
+  const baseCount = (proposal.base || []).filter((e) => e && e.tag).length;
+  const characters = proposal.characters || [];
+  const unassignedCount = (proposal.unassigned || []).length;
+  let html = `<div class="import-seg import-guide">${esc(summary || "")} 仅预览归属，点击「应用拆分」才会写入 Prompt；当前文档不会被改动。</div>`;
+  html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">Base</span><span>· ${baseCount} 个标签</span></div></div>`;
+  characters.forEach((c, i) => {
+    const count = ((c?.prompt || []).length + (c?.uc || []).length);
+    html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">Character ${i + 1} ${esc(c?.name || "")}</span><span>· ${count} 个标签</span></div></div>`;
+  });
+  html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">无法确定</span><span>· ${unassignedCount} 个标签</span></div></div>`;
+  box.innerHTML = html;
+  box.style.display = "block";
+  actions.style.display = "flex";
+  // 与普通导入预览互斥：显示 Auto-Split 预览时收起普通解析预览。
+  $("#import-preview-box").style.display = "none";
+  importPreviewData = null;
+}
+
+// 应用拆分：dispatch 单个 APPLY_AUTO_SPLIT（documentFromProposal 整体替换 -> 单次 notify）。
+function applyAutoSplitFromImport() {
+  if (!autoSplitProposal) return;
+  const proposal = autoSplitProposal;
+  autoSplitProposal = null;
+  window.PromptBridge.dispatch({ type: "APPLY_AUTO_SPLIT", payload: { proposal } });
+  closeImportModal();
+  toast(`已应用角色整理：${proposal.summary || "完成"}`);
+}
+
+// 取消：关闭预览，ZERO 状态变更。
+function cancelAutoSplitPreview() {
+  autoSplitProposal = null;
+  $("#import-auto-split-box").style.display = "none";
+  $("#import-auto-split-box").innerHTML = "";
+  $("#import-auto-split-actions").style.display = "none";
 }
 
 function rebuildImportTargetSelect() {
@@ -2240,6 +2290,10 @@ async function doImportPreview() {
 }
 
 function renderImportPreview(data) {
+  // 普通解析预览与 Auto-Split 预览互斥：显示普通预览时收起 Auto-Split 预览。
+  $("#import-auto-split-box").style.display = "none";
+  $("#import-auto-split-actions").style.display = "none";
+  autoSplitProposal = null;
   const box = $("#import-preview-box"); box.style.display = "block";
   if (!data.segments && Array.isArray(data.entries)) data.segments = [{ kind: "base", label: "Prompt", entries: data.entries }];
   if (!data.stats) { const entries = (data.segments || []).flatMap((s) => s.entries || []); data.stats = { total: entries.length, unmatched: entries.filter((e) => !e.match).length }; }
@@ -2704,6 +2758,8 @@ $("#settings-modal").addEventListener("click", (e) => { if (e.target.id === "set
 $("#import-btn").addEventListener("click", openImportModal);
 $("#import-preview").addEventListener("click", doImportPreview);
 $("#import-auto-split").addEventListener("click", doAutoSplitFromImport);
+$("#auto-split-apply").addEventListener("click", applyAutoSplitFromImport);
+$("#auto-split-cancel").addEventListener("click", cancelAutoSplitPreview);
 $("#import-ok").addEventListener("click", async () => {
   if (importPreviewData) await applyImportedPreview();
   else await doImportFromModal();
