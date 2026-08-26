@@ -126,6 +126,35 @@ test("rejects an unknown uc_preset in normalization", () => {
   assert.throws(() => normalizeGenerationRequest({ prompt: "x", uc_preset: "ultra" }), /off \/ light \/ heavy \/ furry_focus \/ human_focus/);
 });
 
+test("normalizes cfg_rescale and auto_smea through request settings", () => {
+  const request = normalizeGenerationRequest({
+    prompt: "x",
+    settings: { cfg_rescale: 0.7, auto_smea: true },
+  });
+  assert.equal(request.settings.cfg_rescale, 0.7);
+  assert.equal(request.settings.auto_smea, true);
+  // 默认值：cfg_rescale 0、auto_smea false
+  const defaults = normalizeGenerationRequest({ prompt: "x" });
+  assert.equal(defaults.settings.cfg_rescale, 0);
+  assert.equal(defaults.settings.auto_smea, false);
+  // cfg_rescale 越界 clamp 到 [0, 1]
+  assert.equal(normalizeGenerationRequest({ prompt: "x", settings: { cfg_rescale: 5 } }).settings.cfg_rescale, 1);
+  assert.equal(normalizeGenerationRequest({ prompt: "x", settings: { cfg_rescale: -1 } }).settings.cfg_rescale, 0);
+  // 字符串布尔被正确解析
+  assert.equal(normalizeGenerationRequest({ prompt: "x", settings: { auto_smea: "true" } }).settings.auto_smea, true);
+  assert.equal(normalizeGenerationRequest({ prompt: "x", settings: { auto_smea: "false" } }).settings.auto_smea, false);
+});
+
+test("rejects increment mode when seed + count - 1 exceeds the 32-bit seed ceiling", () => {
+  assert.throws(
+    () => normalizeGenerationRequest({ prompt: "x", settings: { seed_mode: "increment", seed: 4294967295 }, count: 2 }),
+    /4294967295/,
+  );
+  // 边界：seed + count - 1 == 4294967295 允许
+  assert.equal(normalizeGenerationRequest({ prompt: "x", settings: { seed_mode: "increment", seed: 4294967295 }, count: 1 }).count, 1);
+  assert.equal(normalizeGenerationRequest({ prompt: "x", settings: { seed_mode: "increment", seed: 4294967294 }, count: 2 }).count, 2);
+});
+
 test("normalizes quality_preset through seed requests and recipes", () => {
   for (const value of ["off", "standard", "light"]) {
     const request = normalizeGenerationRequest({ prompt: "x", quality_preset: value });

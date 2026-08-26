@@ -160,11 +160,10 @@ python -m venv .venv
 ### 单独启动 Node 层（可选）
 
 ```bash
-./server/start-nai.sh          # 后台启动 Node 联动层（8787）
-./server/start-nai.sh --login # 首次登录 NovelAI（仅旧版需要，登录后关闭窗口）
+./server/start-nai.sh          # 启动 Node 联动层（8787，官方 API-only）
 ```
 
-脚本使用 `$HOME/.workbuddy` 作为默认本机目录（可用 `WORKBUDDY_HOME` 覆盖），Node 可用 `NODE_BIN` 指定。
+脚本使用 `$HOME/.workbuddy` 作为默认本机目录（可用 `WORKBUDDY_HOME` 覆盖），Node 可用 `NODE_BIN` 指定。生图走官方 API，无需 Edge / CDP / 浏览器登录。
 
 ### macOS 常驻运行（可选）
 
@@ -195,7 +194,6 @@ python -m venv .venv
 | `NAI_PROXY_URL` | 出网代理地址（留空 = 不用代理） |
 | `WORKBUDDY_HOME` | 覆盖本机 WorkBuddy 目录（默认 `~/.workbuddy`） |
 | `NODE_BIN` | 指定 Node.js 22+ 可执行文件 |
-| `EDGE_BIN` | 指定 Microsoft Edge（`start-nai.sh` 登录模式用） |
 | `NOVELAI_API_KEY` | NovelAI Persistent API Token |
 | `DANBOORU_API_KEY` | Danbooru API Key |
 | `BAIDU_TRANSLATE_APPID` / `BAIDU_TRANSLATE_SECRET` | 百度翻译凭据 |

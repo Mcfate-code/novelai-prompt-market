@@ -59,6 +59,10 @@ let zhMap = {}; // prompt_tag -> 中文名
 let freeTextRawSync = null; // #free-text 输入防抖句柄；translateFreeText 取消 pending 防抖用
 const knownCatalogTags = new Map();
 let reconciliationBusy = false;
+let activeWorkspaceTarget = "base"; // 高级购物车当前 Tab：'base' | 角色索引（number）
+let workspaceSectionFilter = "";    // '' = 全部分区，或 SECTION_IDS 之一
+let workspaceShowEmpty = false;     // 显示空分区（默认关）
+let activeNaiTarget = "base";       // 生图视图角色 Tab：'base' | 角色索引（number）
 
 // ===== 工具 =====
 const $ = (sel) => document.querySelector(sel);
@@ -123,6 +127,12 @@ function weightText(entry) {
   const tag = entry.tag;
   const weight = Number(entry.weight ?? 1);
   return weight === 1 ? tag : `${Number(weight.toFixed(2))}::${tag}::`;
+}
+function abbreviateCount(n) {
+  const v = Number(n) || 0;
+  if (v >= 1000000) return `${(v / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (v >= 1000) return `${(v / 1000).toFixed(1).replace(/\.0$/, "")}K`;
+  return v ? String(v) : "";
 }
 function promptPreviewText() {
   const tags = positivePromptEntries().map(weightText);
@@ -281,6 +291,19 @@ function rebuildTargetSelect() {
   const options = targetOptions();
   if (!options.some((option) => option.value === state.target)) state.target = "base";
   sel.innerHTML = options.map((o) => `<option value="${o.value}" ${o.value === state.target ? "selected" : ""}>${esc(o.label)}</option>`).join("");
+  syncNaiTagTargetFromState();
+  updateCartHeader();
+}
+// #target-select 是唯一可见的目标选择器；隐藏的 #nai-tag-target 只负责给 addTagToTarget 读取，
+// 因此把 state.target 映射回其正向目标（base / char:N）并保持同步。
+function syncNaiTagTargetFromState() {
+  const sel = $("#nai-tag-target");
+  if (!sel) return;
+  let mapped = state.target;
+  if (mapped === "global_uc") mapped = "base";
+  else if (/^char:\d+:uc$/.test(String(mapped || ""))) mapped = String(mapped).replace(/:uc$/, "");
+  if ([...sel.options].some((o) => o.value === mapped)) sel.value = mapped;
+  else if ([...sel.options].some((o) => o.value === "base")) sel.value = "base";
 }
 
 // ===== 标签目标选择器（超市点击标签写入 Base / 指定角色） =====
@@ -326,13 +349,30 @@ function applyRecognizedTagDiff(text, desiredKeys, knownTags = knownCatalogTags)
   return result;
 }
 function currentCartTargetKeys(target) { return new Set((getSlot(target) || []).map((entry) => String(entry.tag).toLocaleLowerCase())); }
+// 结构化模式下从多行 display 中只取 Base: 行内容（去掉 "Base: " 前缀）。
+// 绝不把整段多行 display 交给识别器 —— 避免把 Character N:/Global UC: 行当作 Base 标签解析。
+function naiStructuredBaseLine(display) {
+  const line = String(display || "").split("\n").find((l) => /^Base:\s*/.test(l));
+  return line == null ? null : line.replace(/^Base:\s*/, "");
+}
+// 结构化 display 是否仍与 textarea 同步（用户未手动改动 #nai-prompt）。
+function naiStructuredDisplaySynced() {
+  if (!naiStructuredDraft) return false;
+  const el = $("#nai-prompt");
+  return !!el && el.value.trim() === naiStructuredDraft.displayPrompt;
+}
+// 从权威状态（basePrompt + 活 naiCharacters[] + globalUc）重建 displayPrompt 并回写 textarea。
+// 展示文本始终以活 naiCharacters[] 为准，不改写角色权威数据。
+function naiRebuildStructuredDisplay() {
+  if (!naiStructuredDraft) return;
+  naiStructuredDraft.displayPrompt = naiStructuredDisplayText(naiStructuredDraft.basePrompt, naiCharacters, naiStructuredDraft.globalUc);
+  if ($("#nai-prompt")) $("#nai-prompt").value = naiStructuredDraft.displayPrompt;
+}
 function generationTargetText(target) {
   if (target === "base" && naiStructuredDraft) {
-    const display = $("#nai-prompt")?.value || "";
-    if (display.trim() === naiStructuredDraft.displayPrompt) {
-      const baseLine = display.split("\n").find((line) => /^Base:\s*/.test(line));
-      return baseLine ? baseLine.replace(/^Base:\s*/, "") : naiStructuredDraft.basePrompt || "";
-    }
+    // 结构化模式：Base 目标永远只取 Base: 行（同步或手动失同步都如此）。
+    const baseLine = naiStructuredBaseLine($("#nai-prompt")?.value || "");
+    return baseLine != null ? baseLine : (naiStructuredDraft.basePrompt || "");
   }
   if (target === "global_uc") return $("#nai-neg")?.value || "";
   const m = String(target).match(/^char:(\d+)(:uc)?$/);
@@ -340,16 +380,38 @@ function generationTargetText(target) {
   return $("#nai-prompt")?.value || "";
 }
 function setGenerationTargetText(target, text) {
+  const synced = naiStructuredDisplaySynced();
   if (target === "base") {
-    if (naiStructuredDraft && $("#nai-prompt")?.value.trim() === naiStructuredDraft.displayPrompt) {
+    if (naiStructuredDraft && synced) {
       naiStructuredDraft.basePrompt = text;
-      naiStructuredDraft.displayPrompt = naiStructuredDisplayText(text, naiCharacters, naiStructuredDraft.globalUc);
-      $("#nai-prompt").value = naiStructuredDraft.displayPrompt;
+      naiRebuildStructuredDisplay();
+    } else if (naiStructuredDraft) {
+      // 结构化 display 已被手动改动：绝不整段覆盖原始文本，只对 Base 行做安全的
+      // 目标局部标签 diff；无 Base 行则保持原样（清晰的安全路径）。
+      const display = $("#nai-prompt")?.value;
+      if (display != null) {
+        const lines = String(display).split("\n");
+        const idx = lines.findIndex((l) => /^Base:\s*/.test(l));
+        if (idx >= 0) {
+          lines[idx] = `Base: ${text}`;
+          $("#nai-prompt").value = lines.join("\n");
+        }
+      }
     } else if ($("#nai-prompt")) $("#nai-prompt").value = text;
-  } else if (target === "global_uc") { if ($("#nai-neg")) $("#nai-neg").value = text; }
-  else {
+  } else if (target === "global_uc") {
+    if ($("#nai-neg")) $("#nai-neg").value = text;
+    if (naiStructuredDraft) {
+      naiStructuredDraft.globalUc = text;
+      naiStructuredDraft.displayNegative = text;
+      if (synced) naiRebuildStructuredDisplay();
+    }
+  } else {
     const m = String(target).match(/^char:(\d+)(:uc)?$/), c = m && naiCharacters[Number(m[1])];
-    if (c) { c[m[2] ? "negative_prompt" : "prompt"] = text; naiRenderCharacters(); }
+    if (c) {
+      c[m[2] ? "negative_prompt" : "prompt"] = text;
+      naiRenderCharacters();
+      if (naiStructuredDraft && synced) naiRebuildStructuredDisplay();
+    }
   }
 }
 function reconcileGenerationFromCart() {
@@ -400,8 +462,16 @@ function replacePromptToken(text, caret, replacement) {
   return text.slice(0, range.start) + left + replacement + right + text.slice(range.end);
 }
 let naiAutocompleteState = { input: null, target: "base", range: null, results: [], selected: 0, request: 0 };
+let naiAutocompleteSuppress = null; // 一次性抑制：接受建议后若光标仍停在刚插入的完整 tag 内，抑制搜索，避免弹窗立即重开
+// 接受建议后判断：query 是否等于刚接受的 tag（等于则跳过搜索，不重开弹窗）。
+function naiAutocompleteSkipSearch(acceptedTag, query) {
+  return !!acceptedTag && String(query ?? "").trim().toLocaleLowerCase() === String(acceptedTag).toLocaleLowerCase();
+}
 const naiAutocompleteSearch = debounce(async (input) => {
   const range = promptTokenRange(input.value, input.selectionStart);
+  const acceptedTag = naiAutocompleteSuppress;
+  naiAutocompleteSuppress = null;
+  if (naiAutocompleteSkipSearch(acceptedTag, range.query)) return;
   if (range.query.length < 2 || /[{}\[\]()<>]/.test(range.query)) { closeNaiAutocomplete(); return; }
   const request = ++naiAutocompleteState.request;
   try {
@@ -416,7 +486,13 @@ function renderNaiAutocomplete() {
   const box = $("#nai-autocomplete");
   const { results, selected } = naiAutocompleteState;
   if (!box || !results.length) { closeNaiAutocomplete(); return; }
-  box.innerHTML = results.map((item, i) => `<div role="option" data-autocomplete-index="${i}" aria-selected="${i === selected}"><span>${esc(item.tag)}</span><small>${esc(item.zh || "")}</small></div>`).join("");
+  box.innerHTML = results.map((item, i) => {
+    const zh = item.zh || "";
+    const count = abbreviateCount(item.post_count);
+    const viaAlias = /别名/.test(item.match_reason || "");
+    const second = [zh, count, viaAlias ? "via 别名" : ""].filter(Boolean).join(" · ");
+    return `<div role="option" data-autocomplete-index="${i}" aria-selected="${i === selected}"><span class="ac-tag">${esc(item.tag)}</span><small>${esc(second)}</small></div>`;
+  }).join("");
   const input = naiAutocompleteState.input;
   const rect = input.getBoundingClientRect();
   box.style.left = `${Math.max(8, rect.left)}px`;
@@ -434,6 +510,7 @@ function acceptNaiAutocomplete(index = naiAutocompleteState.selected) {
   const nextCaret = input.value.indexOf(item.tag, Math.max(0, caret - 1)) + item.tag.length;
   input.setSelectionRange(nextCaret, nextCaret);
   closeNaiAutocomplete();
+  naiAutocompleteSuppress = item.tag; // 抑制合成 input 触发的搜索，避免弹窗立即重开
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 function bindNaiAutocomplete(input, target) {
@@ -482,12 +559,13 @@ function rebuildNaiTagTarget() {
   }
 }
 
-function addTagToTarget(tag) {
+async function addTagToTarget(tag) {
   const sel = document.getElementById("nai-tag-target");
   state.target = sel?.value || "base";
   const m = state.target.match(/^char:(\d+)$/);
   if (m && !naiCharacters[Number(m[1])]) state.target = "base";
-  addEntry(tag);
+  const label = targetLabel(state.target);
+  const added = await addEntry(tag);
   if (state.target === "base") {
     const promptEl = $("#nai-prompt");
     if (naiStructuredDraft) {
@@ -511,6 +589,7 @@ function addTagToTarget(tag) {
       }
     }
   }
+  if (added) toast(`已加入「${tag}」→ ${label}`);
 }
 
 // ===== 初始化 =====
@@ -667,13 +746,16 @@ async function openCatalog(cid, page = 1, opts = {}) {
 function tagCardHtml(t) {
   const fav = state.favorites.has(t.tag);
   const meta = t.post_count ? `Danbooru posts: ${t.post_count.toLocaleString()}` : (t.is_deprecated ? "deprecated" : "");
+  const abbrev = t.post_count ? abbreviateCount(t.post_count) : "";
   return `<div class="tag-card ${t.is_deprecated ? "tag-deprecated" : ""}" data-tag="${esc(t.tag)}">` +
     `<div class="tag-thumb-wrap" data-thumb-wrap="${esc(t.tag)}"><img class="tag-thumb" data-thumb="${esc(t.tag)}" alt="" loading="lazy" decoding="async" /></div>` +
     `<div class="tag-example-controls" data-example-controls="${esc(t.tag)}"></div>` +
     `<button class="fav-toggle ${fav ? "on" : ""}" data-fav="${esc(t.tag)}" title="${fav ? "取消收藏" : "收藏"}">${fav ? "★" : "☆"}</button>` +
     `<div class="tag-en">${esc(t.tag)}</div>` +
     (t.zh ? `<div class="tag-zh">${esc(t.zh)}</div>` : "") +
+    (abbrev ? `<div class="tag-count" title="Danbooru posts: ${esc(String(t.post_count.toLocaleString()))}">${esc(abbrev)}</div>` : "") +
     `<div class="tag-meta">${esc(meta || "General")}</div>` +
+    `<span class="tag-add-hint" aria-hidden="true">+</span>` +
     (t.match_reason ? `<div class="match-reason">${esc(t.match_reason)}</div>` : "") +
     `</div>`;
 }
@@ -1211,26 +1293,225 @@ function compactUcHtml() {
   return entries.length ? entries.join("") : `<div class="compact-empty">暂无 UC 标签</div>`;
 }
 
-function advancedCartHtml() {
-  let html = `<div class="slot"><div class="slot-title">全局 Prompt</div>${sectionDetailsHtml(state.prompt.sections, "base")}</div>`;
-  state.prompt.characters.forEach((ch, i) => {
-    html += `<div class="slot"><div class="slot-title">${esc(ch.name)} <span class="rm" data-rm="char:${i}">移除</span></div>${sectionDetailsHtml(ch.prompt_sections, `char:${i}`)}` +
-      `<details class="uc-block"><summary>角色 UC</summary>${sectionDetailsHtml(ch.uc_sections, `char:${i}:uc`)}</details></div>`;
-  });
-  return html + `<details class="uc-block"><summary>Global UC</summary>${sectionDetailsHtml(state.prompt.global_uc_sections, "global_uc")}</details>`;
+// ===== Prompt Workspace（高级购物车：Tab + 单一目标编辑器） =====
+function targetLabel(target) {
+  if (target === "base") return "Base";
+  if (target === "global_uc") return "Global UC";
+  const m = String(target || "").match(/^char:(\d+)(:uc)?$/);
+  if (m) {
+    const ch = state.prompt.characters[+m[1]];
+    return (ch?.name || `Character ${+m[1] + 1}`) + (m[2] ? " UC" : "");
+  }
+  return "Base";
 }
-
-function renderCart() {
+function workspaceTargetKey() {
+  return activeWorkspaceTarget === "base" ? "base" : `char:${activeWorkspaceTarget}`;
+}
+function workspaceTargetName() {
+  if (activeWorkspaceTarget === "base") return "Base";
+  const ch = state.prompt.characters[activeWorkspaceTarget];
+  return ch?.name || `Character ${Number(activeWorkspaceTarget) + 1}`;
+}
+function workspacePromptTagsText(key) {
+  if (key === "base") return flattenSections(state.prompt.sections).map(weightText).join(", ");
+  const m = key.match(/^char:(\d+)$/);
+  if (m && state.prompt.characters[+m[1]]) return flattenSections(state.prompt.characters[+m[1]].prompt_sections).map(weightText).join(", ");
+  return "";
+}
+function workspaceFullText(key) {
+  const tags = workspacePromptTagsText(key);
+  if (key === "base") {
+    const ft = effectiveFreeText();
+    return ft ? (tags ? `${tags}, ${ft}` : ft) : tags;
+  }
+  return tags;
+}
+function workspaceSectionCounts(key) {
+  const counts = {};
+  SECTION_IDS.forEach((id) => { counts[id] = (getSectionMap(key)?.[id] || []).length; });
+  return counts;
+}
+function workspaceUcKey(key) { return key === "base" ? "global_uc" : `${key}:uc`; }
+function workspaceUcCount(key) { return flattenSections(getSectionMap(workspaceUcKey(key)) || {}).length; }
+// 把文本中「非标签、非权重、非强调括号」的自由文本提取出来，作为 base 的自然语言补充。
+// 绝不丢失自由文本：仅当文本里确实有这类 token 时更新 free_text，且永远不覆盖为更短的内容。
+function workspaceFreeTextFromText(text, known) {
+  return String(text || "").split(",").map((t) => t.trim()).filter((token) => {
+    if (!token) return false;
+    if (recognizedTagToken(token, known)) return false;
+    if (/^\s*(?:\d+(?:\.\d+)?|\.\d+)::.+::\s*$/.test(token)) return false;
+    if (/[{}[\]()<>]/.test(token)) return false;
+    return true;
+  }).join(", ");
+}
+function workspaceChipsHtml(key) {
+  const sections = getSectionMap(key);
+  if (!sections) return `<div class="ws-empty">无可编辑的目标</div>`;
+  const ids = workspaceSectionFilter ? [workspaceSectionFilter] : SECTION_IDS;
+  let html = "", any = false;
+  ids.forEach((id) => {
+    const entries = sections[id] || [];
+    if (!entries.length && !workspaceShowEmpty && !workspaceSectionFilter) return;
+    any = true;
+    html += `<div class="ws-section" data-section="${id}"><div class="ws-section-head"><span>${esc(SECTION_LABELS[id])}</span><span>${entries.length}</span></div>` +
+      `<div class="ws-section-chips">${entries.map((e) => entryHtml(e, key)).join("") || `<span class="ws-section-empty">暂无 Tag</span>`}</div></div>`;
+  });
+  return any ? html : `<div class="ws-empty">该目标暂无标签，从左侧标签库点击加入</div>`;
+}
+function ucChipsHtml(key) {
+  const sections = getSectionMap(key);
+  const entries = sections ? flattenSections(sections) : [];
+  return entries.length ? entries.map((e) => entryHtml(e, key)).join("") : `<span class="ws-section-empty">暂无 UC 标签</span>`;
+}
+function workspaceFilterHtml(key) {
+  const counts = workspaceSectionCounts(key);
+  let html = `<button class="ws-filter-chip ${workspaceSectionFilter === "" ? "active" : ""}" data-ws-filter="">全部 ${SECTION_IDS.reduce((s, id) => s + counts[id], 0)}</button>`;
+  SECTION_IDS.forEach((id) => {
+    if (counts[id]) html += `<button class="ws-filter-chip ${workspaceSectionFilter === id ? "active" : ""}" data-ws-filter="${id}">${esc(SECTION_LABELS[id])} ${counts[id]}</button>`;
+  });
+  html += `<label class="ws-show-empty"><input type="checkbox" id="ws-show-empty" ${workspaceShowEmpty ? "checked" : ""} /> 显示空分区</label>`;
+  return html;
+}
+function renderWorkspace() {
+  const el = $("#cart");
+  const key = workspaceTargetKey();
+  const isBase = activeWorkspaceTarget === "base";
+  let tabs = `<button class="workspace-tab ${activeWorkspaceTarget === "base" ? "active" : ""}" data-ws-tab="base">Base</button>`;
+  state.prompt.characters.forEach((ch, i) => {
+    tabs += `<button class="workspace-tab ${activeWorkspaceTarget === i ? "active" : ""}" data-ws-tab="${i}">${esc(ch.name || `Character ${i + 1}`)}<span class="workspace-tab-remove" data-ws-rm="${i}" title="移除角色">×</span></button>`;
+  });
+  tabs += `<button class="workspace-tab workspace-tab-add" data-ws-add title="添加角色">+</button>`;
+  const ucCount = workspaceUcCount(key);
+  const effectiveText = isBase ? promptPreviewText() : workspacePromptTagsText(key);
+  const html =
+    `<div class="workspace-tabs">${tabs}</div>` +
+    `<div class="workspace-editor">` +
+      `<textarea id="ws-prompt" class="ws-prompt" placeholder="${isBase ? "Base prompt：标签 + 自然语言补充…" : "角色提示词…"}">${esc(workspaceFullText(key))}</textarea>` +
+      `<div class="ws-section-filter">${workspaceFilterHtml(key)}</div>` +
+      `<div class="ws-sections" id="ws-sections">${workspaceChipsHtml(key)}</div>` +
+      `<details class="ws-collapse"><summary><span>▸ UC（${ucCount}）</span></summary><div class="ws-collapse-body"><div class="ws-section-chips" id="ws-uc-chips">${ucChipsHtml(workspaceUcKey(key))}</div></div></details>` +
+      `<details class="ws-collapse"><summary><span>▸ Effective Prompt</span></summary><div class="ws-collapse-body"><pre id="ws-effective">${esc(effectiveText || "(空)")}</pre></div></details>` +
+      (isBase ? `<details class="ws-collapse"><summary><span>▸ 自然语言补充 / 翻译</span></summary><div class="ws-collapse-body"><div class="ws-free-text"><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></div></div></details>` : "") +
+    `</div>`;
+  el.innerHTML = html;
+  bindEntryControls(el);
+  if (openWeightEntryId) {
+    const openPop = el.querySelector(`.entry[data-entry-id="${cssEsc(openWeightEntryId)}"] .weight-popover`);
+    if (openPop) openPop.hidden = false; else openWeightEntryId = null;
+  }
+  // Prompt 文本域：自动补全 + 识别标签回写（不重建 DOM，避免打字中断）
+  const promptEl = $("#ws-prompt");
+  bindNaiAutocomplete(promptEl, key);
+  promptEl.addEventListener("input", (event) => workspaceSyncDebounced(key, event.target.value));
+  // 自由文本（Base 专用）
+  if (isBase) {
+    freeTextRawSync = debounce((ev) => { state.prompt.free_text = ev.target.value; state.prompt.use_free_text_en = false; commitPromptChange({ render: false }); workspaceRefreshDerived(); }, 180);
+    $("#free-text").addEventListener("input", freeTextRawSync);
+    $("#free-text-en").addEventListener("input", debounce((ev) => { state.prompt.free_text_en = ev.target.value; commitPromptChange({ render: false }); workspaceRefreshDerived(); }, 180));
+    $("#free-text-use-en").addEventListener("change", (ev) => { state.prompt.use_free_text_en = ev.target.checked && !!state.prompt.free_text_en.trim(); commitPromptChange({ render: false }); workspaceRefreshDerived(); });
+    $("#free-text-translate").addEventListener("click", translateFreeText);
+  }
+  // Tab 切换
+  el.querySelectorAll("[data-ws-tab]").forEach((b) => b.addEventListener("click", () => {
+    activeWorkspaceTarget = b.dataset.wsTab === "base" ? "base" : Number(b.dataset.wsTab);
+    workspaceSectionFilter = "";
+    renderWorkspace();
+  }));
+  el.querySelectorAll("[data-ws-rm]").forEach((b) => b.addEventListener("click", (e) => { e.stopPropagation(); removeCharacter(+b.dataset.wsRm); }));
+  el.querySelector("[data-ws-add]")?.addEventListener("click", () => { addCharacter(); activeWorkspaceTarget = state.prompt.characters.length - 1; workspaceSectionFilter = ""; renderWorkspace(); });
+  // 分区过滤 / 显示空分区
+  bindWorkspaceFilterControls(el);
+  updateCartHeader();
+}
+// 分区过滤 / 显示空分区：workspaceRefreshChips() 会重建这些节点，刷新后必须重新绑定
+function bindWorkspaceFilterControls(el) {
+  el.querySelectorAll("[data-ws-filter]").forEach((b) => b.addEventListener("click", () => { workspaceSectionFilter = b.dataset.wsFilter; workspaceRefreshChips(); }));
+  el.querySelector("#ws-show-empty")?.addEventListener("change", (e) => { workspaceShowEmpty = e.target.checked; workspaceRefreshChips(); });
+}
+// 打字时的轻量刷新：不重建 textarea，只更新 chips / filter / UC / effective
+function workspaceRefreshChips() {
+  const el = $("#cart");
+  const key = workspaceTargetKey();
+  const filterBox = el.querySelector(".ws-section-filter");
+  if (filterBox) filterBox.innerHTML = workspaceFilterHtml(key);
+  const sectionsBox = el.querySelector("#ws-sections");
+  if (sectionsBox) sectionsBox.innerHTML = workspaceChipsHtml(key);
+  const ucBox = el.querySelector("#ws-uc-chips");
+  if (ucBox) ucBox.innerHTML = ucChipsHtml(workspaceUcKey(key));
+  const eff = el.querySelector("#ws-effective");
+  if (eff) eff.textContent = ((activeWorkspaceTarget === "base" ? promptPreviewText() : workspacePromptTagsText(key)) || "(空)");
+  bindEntryControls(el);
+  bindWorkspaceFilterControls(el);
+  if (openWeightEntryId) {
+    const openPop = el.querySelector(`.entry[data-entry-id="${cssEsc(openWeightEntryId)}"] .weight-popover`);
+    if (openPop) openPop.hidden = false; else openWeightEntryId = null;
+  }
+}
+// 自由文本变化后：同步主 textarea 中 free_text 后缀 + effective
+function workspaceRefreshDerived() {
+  const el = $("#cart");
+  if (activeWorkspaceTarget !== "base") return;
+  const promptEl = el.querySelector("#ws-prompt");
+  if (promptEl && document.activeElement !== promptEl) {
+    const tags = workspacePromptTagsText("base");
+    const ft = effectiveFreeText();
+    promptEl.value = ft ? (tags ? `${tags}, ${ft}` : ft) : tags;
+  }
+  const eff = el.querySelector("#ws-effective");
+  if (eff) eff.textContent = promptPreviewText() || "(空)";
+  updatePromptPreview();
+}
+const workspaceSyncDebounced = debounce((key, text) => workspaceDoSync(key, text), 250);
+function workspaceFlushSync() {
+  workspaceSyncDebounced.cancel();
+  const promptEl = $("#ws-prompt");
+  if (promptEl && cartAdvanced) workspaceDoSync(workspaceTargetKey(), promptEl.value);
+}
+function workspaceDoSync(key, text) {
+  if (reconciliationBusy) return;
+  const known = new Map(knownCatalogTags);
+  (getSlot(key) || []).filter((e) => e.source !== "custom" && !e.custom).forEach((e) => known.set(String(e.tag).toLocaleLowerCase(), e.tag));
+  const desired = new Set(extractRecognizedTagIdentities(text, known));
+  const current = new Set([...currentCartTargetKeys(key)].filter((k) => known.has(k)));
+  const tagsChanged = !(desired.size === current.size && [...desired].every((k) => current.has(k)));
+  if (tagsChanged) {
+    const sections = getSectionMap(key);
+    if (!sections) return;
+    SECTION_IDS.forEach((id) => { sections[id] = sections[id].filter((e) => !known.has(String(e.tag).toLocaleLowerCase()) || desired.has(String(e.tag).toLocaleLowerCase())); });
+    const present = currentCartTargetKeys(key);
+    [...desired].filter((k) => !present.has(k)).forEach((k) => sections.other.push(normalizeEntry({ tag: known.get(k), section: "other" }, "other")));
+  }
+  if (key === "base") {
+    const ft = workspaceFreeTextFromText(text, known);
+    if (ft !== state.prompt.free_text) {
+      state.prompt.free_text = ft;
+      state.prompt.use_free_text_en = false;
+    }
+  }
+  if (!tagsChanged && key !== "base") return;
+  persistDraft();
   syncLegacyProjection();
+  reconcileGenerationFromCart();
+  workspaceRefreshChips();
+  refreshPromptServices();
+}
+function updateCartHeader() {
+  const nameEl = $("#cart-target-name");
+  if (nameEl) nameEl.textContent = cartAdvanced ? workspaceTargetName() : targetLabel(state.target);
+  const preview = $(".prompt-preview-bar");
+  if (preview) preview.style.display = cartAdvanced ? "none" : "";
+  const legacy = $(".legacy-preset-box");
+  if (legacy) legacy.style.display = cartAdvanced ? "none" : "";
+  const wsActions = $("#workspace-actions");
+  if (wsActions) wsActions.hidden = !cartAdvanced;
+}
+function renderCompactCart() {
   const el = $("#cart");
   const html = `<section class="compact-cart"><label class="cart-tag-input"><span>添加标签</span><div><input id="cart-tag-input" autocomplete="off" placeholder="输入中文或英文，回车直接加入" /><button id="cart-tag-submit" type="button">添加</button></div><small>输入时会在中间自动查找；回车会加入完全匹配的标签。</small></label><button id="cart-custom-tag" type="button" class="ghost add-custom-btn">＋ 自定义标签</button><div class="compact-cart-head"><strong>Prompt</strong><span>${positivePromptEntries().length} 个标签</span></div><div class="compact-tags">${compactEntriesHtml()}</div>` +
     `<details class="compact-uc"><summary>Undesired Content（${negativePromptEntries().length}）</summary><div class="compact-tags">${compactUcHtml()}</div></details>` +
-     `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><small class="setting-help">Raw 中文始终保留；英文译文仅在勾选后作为 Effective Prompt。</small><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></label></section>` +
-    `<details class="cart-advanced" ${cartAdvanced ? "open" : ""}><summary>高级编辑：分区、权重与多角色</summary><div class="cart-advanced-body"><button type="button" class="cart-add-character" data-add-character>+ 添加角色</button>${advancedCartHtml()}</div></details>`;
+     `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><small class="setting-help">Raw 中文始终保留；英文译文仅在勾选后作为 Effective Prompt。</small><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></label></section>`;
   el.innerHTML = html;
-  document.querySelector("main.layout")?.classList.toggle("cart-advanced-layout", cartAdvanced);
   bindEntryControls(el);
-  // 重建后恢复当前打开的权重面板（加减/手动输入会触发重渲染，不能因此关闭）
   if (openWeightEntryId) {
     const openPop = el.querySelector(`.entry[data-entry-id="${cssEsc(openWeightEntryId)}"] .weight-popover`);
     if (openPop) openPop.hidden = false; else openWeightEntryId = null;
@@ -1240,9 +1521,7 @@ function renderCart() {
   $("#free-text-en").addEventListener("input", debounce((ev) => { state.prompt.free_text_en = ev.target.value; commitPromptChange({ render: false }); updatePromptPreview(); }, 180));
   $("#free-text-use-en").addEventListener("change", (ev) => { state.prompt.use_free_text_en = ev.target.checked && !!state.prompt.free_text_en.trim(); commitPromptChange({ render: false }); updatePromptPreview(); });
   $("#free-text-translate").addEventListener("click", translateFreeText);
-  el.querySelectorAll("[data-rm]").forEach((n) => n.addEventListener("click", () => removeCharacter(+n.dataset.rm.split(":")[1])));
   el.querySelectorAll("[data-compact-remove]").forEach((button) => button.addEventListener("click", () => removeEntryById(button.dataset.compactSlot, button.dataset.compactRemove)));
-  el.querySelector("[data-add-character]")?.addEventListener("click", addCharacter);
   const cartInput = $("#cart-tag-input");
   const syncMiddleSearch = debounce((value) => {
     $("#search-input").value = value;
@@ -1256,12 +1535,15 @@ function renderCart() {
   });
   $("#cart-tag-submit").addEventListener("click", addCartInputTag);
   $("#cart-custom-tag")?.addEventListener("click", openCustomTagModal);
-  el.querySelector(".cart-advanced")?.addEventListener("toggle", (event) => {
-    cartAdvanced = event.currentTarget.open;
-    document.querySelector("main.layout")?.classList.toggle("cart-advanced-layout", cartAdvanced);
-    rebuildTargetSelect();
-  });
   updatePromptPreview();
+}
+
+function renderCart() {
+  syncLegacyProjection();
+  document.querySelector("main.layout")?.classList.toggle("cart-advanced-layout", cartAdvanced);
+  updateCartHeader();
+  if (cartAdvanced) { renderWorkspace(); return; }
+  renderCompactCart();
 }
 
 async function addCartInputTag() {
@@ -1447,13 +1729,14 @@ async function classifyTag(tag) {
 }
 async function addEntry(tag, options = {}) {
   const sections = getSectionMap(options.target || state.target);
-  if (!sections) return;
-  if (flattenSections(sections).some((e) => e.tag === tag)) { toast(`「${tag}」已在当前位置`); return; }
+  if (!sections) return false;
+  if (flattenSections(sections).some((e) => e.tag === tag)) { toast(`「${tag}」已在当前位置`); return false; }
   pushHistory();
   const section = options.section || await classifyTag(tag);
   sections[section].push(normalizeEntry({ tag, section, custom: !!options.custom, source: options.source || "tag" }, section));
   api("/api/recent", { method: "POST", body: JSON.stringify({ tag }) }).catch(() => {});
   commitPromptChange();
+  return true;
 }
 function removeEntryById(slot, id) {
   const found = findEntry(slot, id); if (!found) return;
@@ -1486,6 +1769,12 @@ function removeCharacter(i) {
   state.prompt.characters.splice(i, 1);
   if (!state.prompt.characters.length) state.prompt.characters.push({ name: "Character 1", prompt_sections: emptySections(), uc_sections: emptySections() });
   if (state.target.startsWith("char:")) { const m = state.target.match(/^char:(\d+)/); if (m && +m[1] >= state.prompt.characters.length) state.target = "base"; }
+  // 高级工作区当前 Tab 跟随角色删除
+  if (activeWorkspaceTarget !== "base") {
+    if (activeWorkspaceTarget === i) activeWorkspaceTarget = "base";
+    else if (activeWorkspaceTarget > i) activeWorkspaceTarget -= 1;
+    if (activeWorkspaceTarget >= state.prompt.characters.length) activeWorkspaceTarget = "base";
+  }
   rebuildTargetSelect(); commitPromptChange();
 }
 
@@ -2205,7 +2494,7 @@ const bind = (id, event, handler) => {
 };
 
 $("#model-select").addEventListener("change", (e) => { state.model = e.target.value; persistDraft(); });
-$("#target-select").addEventListener("change", (e) => { state.target = e.target.value; });
+$("#target-select").addEventListener("change", (e) => { state.target = e.target.value; syncNaiTagTargetFromState(); updateCartHeader(); });
 $("#nai-tag-target")?.addEventListener("change", (e) => {
   const v = e.target.value;
   const m = v.match(/^char:(\d+)$/);
@@ -2225,7 +2514,7 @@ const recommendationsCloseBtn = $("#recommendations-close");
 if (recommendationsCloseBtn) recommendationsCloseBtn.addEventListener("click", () => { const box = $("#recommendations"); if (box) box.hidden = true; });
 $("#sort-select").addEventListener("change", (e) => { sortMode = e.target.value; if (activeCatalogId) openCatalog(activeCatalogId, 1); });
 $("#back-btn").addEventListener("click", goBack);
-$("#cart-advanced-toggle").addEventListener("click", () => { cartAdvanced = !cartAdvanced; rebuildTargetSelect(); renderCart(); });
+$("#cart-advanced-toggle").addEventListener("click", () => { cartAdvanced = !cartAdvanced; if (cartAdvanced) activeWorkspaceTarget = "base"; workspaceSectionFilter = ""; rebuildTargetSelect(); renderCart(); });
 $("#clear-btn").addEventListener("click", clearAll);
 $("#undo-btn").addEventListener("click", undo);
 $("#export-btn").addEventListener("click", doExport);
@@ -2262,6 +2551,27 @@ bind("#bundles-close", "click", closeBundlesModal); bind("#bundle-create", "clic
 bind("#snapshot-close", "click", closeSnapshotModal); bind("#save-snapshot-btn", "click", () => saveSnapshot());
 bind("#save-bundle-btn", "click", () => openBundlesModal());
 bind("#send-generate-btn", "click", async () => { const text = promptPreviewText(); if (!text) { toast("当前 Prompt 为空"); return; } await showView("generate"); await naiFillFromCart(); });
+// More 菜单（头部 More ▾ 与高级工作区 More… 共用同一个菜单）
+function toggleCartMore(force) {
+  const menu = $("#cart-more-menu");
+  if (!menu) return;
+  menu.hidden = typeof force === "boolean" ? !force : !menu.hidden;
+}
+function closeCartMore() { toggleCartMore(false); }
+$("#cart-more-btn")?.addEventListener("click", (e) => { e.stopPropagation(); toggleCartMore(); });
+$("#ws-more-btn")?.addEventListener("click", (e) => { e.stopPropagation(); toggleCartMore(); });
+$("#cart-history-btn")?.addEventListener("click", openSnapshotModal);
+document.addEventListener("click", (e) => { if (!e.target.closest(".cart-more")) closeCartMore(); });
+$("#cart-more-menu")?.addEventListener("click", (e) => { if (e.target.closest("button")) closeCartMore(); });
+// 高级工作区底部动作条
+$("#ws-copy")?.addEventListener("click", async () => { workspaceFlushSync(); doExport(); });
+$("#ws-continue")?.addEventListener("click", async () => {
+  workspaceFlushSync();
+  const text = promptPreviewText();
+  if (!text) { toast("当前 Prompt 为空"); return; }
+  await showView("generate");
+  await naiFillFromCart();
+});
 $("#bundles-modal").addEventListener("click", (e) => { if (e.target.id === "bundles-modal") closeBundlesModal(); });
 $("#snapshot-modal").addEventListener("click", (e) => { if (e.target.id === "snapshot-modal") closeSnapshotModal(); });
 document.addEventListener("click", (event) => {
@@ -2331,6 +2641,7 @@ function setGalleryReviewMode(enabled) {
   button.textContent = enabled ? "退出审阅" : "审阅模式";
   if (review) review.hidden = !enabled;
   if (!enabled) {
+    stopReviewIdle();
     galleryReviewIndex = -1;
     setGalleryReviewZoom("fit");
     document.querySelectorAll(".gallery-card.review-selected").forEach((el) => el.classList.remove("review-selected"));
@@ -2345,6 +2656,22 @@ function setGalleryReviewMode(enabled) {
   if (grid) reviewSavedGridScrollTop = grid.scrollTop;
   if (galleryItems.length && galleryReviewIndex < 0) galleryReviewIndex = 0;
   renderGalleryReview();
+  resetReviewIdle();
+}
+// ---- 审阅工具栏闲置淡出（约 1.5s 无鼠标/键盘活动后淡出，活动即恢复） ----
+let reviewIdleTimer = null;
+function resetReviewIdle() {
+  const review = $("#gallery-review");
+  if (review) review.classList.remove("toolbars-hidden");
+  clearTimeout(reviewIdleTimer);
+  reviewIdleTimer = setTimeout(() => {
+    if (galleryReviewMode) $("#gallery-review")?.classList.add("toolbars-hidden");
+  }, 1500);
+}
+function stopReviewIdle() {
+  clearTimeout(reviewIdleTimer);
+  reviewIdleTimer = null;
+  $("#gallery-review")?.classList.remove("toolbars-hidden");
 }
 // 统一进入审阅入口：索引 clamp，选中并渲染；可被双击卡片 / 审阅按钮 / 删除后恢复调用
 function openReview(index) {
@@ -2506,11 +2833,6 @@ function galleryCardHtml(it, dirName) {
     `<img src="/gallery/${encodeURIComponent(dirName)}/${encodeURIComponent(it.file_path.split("/").pop())}" loading="lazy" alt="" />` +
     `<button class="gallery-fav ${it.favorite ? "on" : ""}" title="${it.favorite ? "取消收藏" : "收藏"}">★</button>` +
     `<div class="gallery-card-prompt">${esc(it.prompt)}</div>` +
-    `<div class="gallery-card-actions">` +
-    `<button class="gallery-action-btn" data-action="restore" title="恢复参数">恢复参数</button>` +
-    `<button class="gallery-action-btn" data-action="seed" title="复用 Seed">复用 Seed</button>` +
-    `<button class="gallery-action-btn" data-action="copy" title="复制 Prompt">复制 Prompt</button>` +
-    `</div>` +
     `</div>`;
 }
 // 生成 #gallery-grid 的内部 HTML：非 nai_generated 保持原平铺；nai_generated 按日期顺序插标题。
@@ -2582,47 +2904,19 @@ async function openGalleryDir(dirName) {
       checkbox.addEventListener("click", (e) => e.stopPropagation());
       checkbox.addEventListener("change", () => toggleGalleryFile(dirName, card.dataset.file, checkbox.checked));
       card.addEventListener("click", (e) => {
-        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select") || e.target.closest(".gallery-action-btn")) return;
+        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
         lastGalleryCardIndex = galleryItems.findIndex((x) => x.file_name === card.dataset.file);
         showGalleryPreview(dirName, card.dataset.file);
         if (galleryReviewMode) selectGalleryReviewItem(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
       });
       card.addEventListener("dblclick", (e) => {
-        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select") || e.target.closest(".gallery-action-btn")) return;
+        if (e.target.closest(".gallery-fav") || e.target.closest(".gallery-select")) return;
         openReview(galleryItems.findIndex((x) => x.file_name === card.dataset.file));
       });
       card.querySelector(".gallery-fav").addEventListener("click", (e) => {
         e.stopPropagation();
         const fav = !card.classList.contains("fav");
         toggleGalleryFav(dirName, card.dataset.file, fav);
-      });
-      // Metadata restore action buttons
-      card.querySelectorAll(".gallery-action-btn").forEach((btn) => {
-        btn.addEventListener("click", async (e) => {
-          e.stopPropagation();
-          const fileName = card.dataset.file;
-          const item = galleryItems.find((x) => x.file_name === fileName);
-          if (!item) return;
-          const action = btn.dataset.action;
-          if (action === "restore") {
-            const meta = extractMetaFromGalleryItem(item);
-            await showView("generate");
-            applyGenerationConfig(meta);
-          } else if (action === "seed") {
-            const meta = extractMetaFromGalleryItem(item);
-            if (meta.seed != null) {
-              await showView("generate");
-              $("#nai-seed").value = String(meta.seed);
-              $("#nai-seed-mode").value = "fixed";
-              toast(`Seed ${meta.seed} 已填入（Fixed 模式）`);
-            } else { toast("该图无 Seed 信息"); }
-          } else if (action === "copy") {
-            const meta = extractMetaFromGalleryItem(item);
-            const text = meta.effectivePrompt || meta.rawPrompt || item.prompt || "";
-            try { await navigator.clipboard.writeText(text); toast("Prompt 已复制"); }
-            catch { $("#nai-prompt").value = text; toast("已填入 Prompt 框"); }
-          }
-        });
       });
     });
     if (galleryReviewMode) selectGalleryReviewItem(Math.max(0, galleryReviewIndex));
@@ -2653,6 +2947,9 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   selectGalleryReviewItem(galleryReviewIndex + (event.key === "ArrowRight" ? 1 : -1));
 });
+// 审阅模式下鼠标/键盘活动即恢复工具栏，闲置约 1.5s 后淡出
+document.addEventListener("mousemove", () => { if (galleryReviewMode) resetReviewIdle(); }, { passive: true });
+document.addEventListener("keydown", () => { if (galleryReviewMode) resetReviewIdle(); });
 
 async function showGalleryPreview(dirName, fileName) {
   const seq = ++galleryPreviewSeq;
@@ -2671,23 +2968,19 @@ async function showGalleryPreview(dirName, fileName) {
     body.innerHTML =
       `<img src="${imgPath}" class="gallery-preview-img" alt="" />` +
       (() => { const recipe = naiRecipeFromItem(it), settings = recipe.settings || recipe; return `<dl class="gallery-meta"><dt>Prompt</dt><dd>${esc(it.prompt || "")}</dd><dt>Negative</dt><dd>${esc(it.negative_prompt || "")}</dd><dt>Seed</dt><dd>${esc(settings.seed ?? it.seed ?? "-")}</dd><dt>Model</dt><dd>${esc(settings.model ?? it.model ?? "-")}</dd></dl>`; })() +
-      `<div class="gallery-preview-actions"><button class="primary" id="gallery-copy-btn">复制提示词</button><button class="ghost" id="gallery-fav-btn">${it.favorite ? "取消收藏 ★" : "收藏 ☆"}</button></div>` +
-      `<div class="gallery-recipe-actions"><button id="gallery-recipe-restore">恢复参数</button><button id="gallery-recipe-seed">复用 Seed</button><button id="gallery-recipe-copy-prompt">复制 Prompt</button><button id="gallery-recipe-img2img">以此图进行图生图</button></div>` +
-      (it.snapshot_id ? `<div class="gallery-restore-actions"><button data-restore-sections="">全部加载</button><button data-restore-sections="character,appearance,clothing,expression,action">加载角色</button><button data-restore-sections="style,quality">加载画风</button><button data-restore-sections="composition,scene">加载构图</button></div>` : "");
-    $("#gallery-copy-btn").addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(it.prompt);
-        toast("提示词已复制");
-      } catch { toast("复制失败，请手动选择"); }
+      `<div class="gallery-preview-actions"><button class="primary" id="gallery-continue-btn">继续生成</button><button class="ghost" id="gallery-fav-btn">${it.favorite ? "取消收藏 ★" : "收藏 ☆"}</button></div>` +
+      `<div class="gallery-recipe-actions"><button id="gallery-recipe-seed">复用 Seed</button><button id="gallery-recipe-img2img">用作图生图</button><button id="gallery-recipe-copy-prompt">复制 Prompt</button></div>` +
+      (it.snapshot_id ? `<details class="gallery-partial-restore"><summary>部分恢复 ▾</summary><div class="gallery-restore-actions"><button data-restore-sections="">全部加载</button><button data-restore-sections="character,appearance,clothing,expression,action">加载角色</button><button data-restore-sections="style,quality">加载画风</button><button data-restore-sections="composition,scene">加载构图</button></div></details>` : "");
+    // 主按钮：恢复完整生成配置 + 跳转生图 + 聚焦 Prompt
+    $("#gallery-continue-btn").addEventListener("click", async () => {
+      const meta = extractMetaFromGalleryItem(it);
+      await showView("generate");
+      applyGenerationConfig(meta);
+      $("#nai-prompt").focus();
     });
     $("#gallery-fav-btn").addEventListener("click", () => {
       toggleGalleryFav(dirName, it.file_name, !it.favorite);
       showGalleryPreview(dirName, it.file_name);
-    });
-    $("#gallery-recipe-restore").addEventListener("click", async () => {
-      const meta = extractMetaFromGalleryItem(it);
-      await showView("generate");
-      applyGenerationConfig(meta);
     });
     $("#gallery-recipe-seed").addEventListener("click", async () => {
       const meta = extractMetaFromGalleryItem(it);
@@ -2905,9 +3198,11 @@ function naiApplyResolutionPreset() {
     $("#nai-width").value = preset.width;
     $("#nai-height").value = preset.height;
     naiSyncCountOptions();
+    naiToggleCustomResolution();
     return preset;
   }
   naiSyncCountOptions();
+  naiToggleCustomResolution();
   return null;
 }
 
@@ -2915,6 +3210,14 @@ function naiSyncResolutionFromInputs() {
   const key = naiResolutionPresetForSize($("#nai-width").value, $("#nai-height").value);
   $("#nai-resolution-category").value = key;
   naiSyncCountOptions();
+  naiToggleCustomResolution();
+}
+
+// 仅当 Resolution = Custom 时显示原始宽高输入
+function naiToggleCustomResolution() {
+  const box = $("#nai-custom-resolution");
+  if (!box) return;
+  box.hidden = $("#nai-resolution-category").value !== "custom";
 }
 
 function naiRecipeFromItem(item) {
@@ -2970,38 +3273,55 @@ async function naiUseImageSource(url, name = "历史图") {
 }
 
 function naiRenderCharacters() {
+  const tabsBox = $("#nai-character-tabs");
   const list = $("#nai-character-list");
   const count = document.getElementById("nai-character-count");
   if (count) count.textContent = String(naiCharacters.length);
   rebuildNaiTagTarget();
-  if (!naiCharacters.length) {
-    list.innerHTML = `<div class="empty">暂无独立角色</div>`;
+  // 悬空 activeNaiTarget 回退 base
+  if (activeNaiTarget !== "base" && !naiCharacters[activeNaiTarget]) activeNaiTarget = "base";
+  // Tab 条：Base（静态）+ Character N（动态，插在「+ 角色」前）
+  if (tabsBox) {
+    const addBtn = tabsBox.querySelector("#nai-character-add");
+    const baseBtn = tabsBox.querySelector('[data-nai-char-tab="base"]');
+    tabsBox.querySelectorAll("[data-nai-char-tab]").forEach((b) => { if (b !== baseBtn) b.remove(); });
+    naiCharacters.forEach((_, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = `nai-char-tab ${activeNaiTarget === i ? "active" : ""}`;
+      b.dataset.naiCharTab = String(i);
+      b.textContent = `Character ${i + 1}`;
+      tabsBox.insertBefore(b, addBtn);
+    });
+    baseBtn?.classList.toggle("active", activeNaiTarget === "base");
+  }
+  if (activeNaiTarget === "base") {
+    list.innerHTML = `<div class="empty">Base Prompt 在顶部编辑</div>`;
     return;
   }
-  list.innerHTML = naiCharacters.map((character, index) => {
-    const manual = !!character.position;
-    return `<article class="nai-character" data-character-index="${index}">
-      <div class="nai-character-head"><strong>角色 ${index + 1}</strong><div>
-        <button type="button" data-character-move="up" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
-        <button type="button" data-character-move="down" title="下移" ${index === naiCharacters.length - 1 ? "disabled" : ""}>↓</button>
-        <button type="button" data-character-remove title="移除角色">×</button>
-      </div></div>
-      <label><span>Prompt</span><textarea data-character-field="prompt" placeholder="角色独立提示词">${esc(character.prompt || "")}</textarea></label>
-      <label><span>UC</span><textarea data-character-field="negative_prompt" placeholder="角色独立负面提示词">${esc(character.negative_prompt || "")}</textarea></label>
-      <label class="nai-character-position"><input type="checkbox" data-character-manual ${manual ? "checked" : ""} /><span>手动位置</span></label>
-      <div class="nai-coordinate-row" ${manual ? "" : "hidden"}>
-        <label><span>X</span><input type="number" min="0" max="1" step="0.05" data-character-field="x" value="${character.position?.x ?? 0.5}" /></label>
-        <label><span>Y</span><input type="number" min="0" max="1" step="0.05" data-character-field="y" value="${character.position?.y ?? 0.5}" /></label>
-      </div>
-    </article>`;
-  }).join("");
+  const index = activeNaiTarget;
+  const character = naiCharacters[index];
+  if (!character) { list.innerHTML = `<div class="empty">暂无独立角色</div>`; return; }
+  const manual = !!character.position;
+  list.innerHTML = `<article class="nai-character" data-character-index="${index}">
+    <div class="nai-character-head"><strong>角色 ${index + 1}</strong><div>
+      <button type="button" data-character-move="up" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
+      <button type="button" data-character-move="down" title="下移" ${index === naiCharacters.length - 1 ? "disabled" : ""}>↓</button>
+      <button type="button" data-character-remove title="移除角色">×</button>
+    </div></div>
+    <label><span>Prompt</span><textarea data-character-field="prompt" placeholder="角色独立提示词">${esc(character.prompt || "")}</textarea></label>
+    <label><span>UC</span><textarea data-character-field="negative_prompt" placeholder="角色独立负面提示词">${esc(character.negative_prompt || "")}</textarea></label>
+    <label class="nai-character-position"><input type="checkbox" data-character-manual ${manual ? "checked" : ""} /><span>手动位置</span></label>
+    <div class="nai-coordinate-row" ${manual ? "" : "hidden"}>
+      <label><span>X</span><input type="number" min="0" max="1" step="0.05" data-character-field="x" value="${character.position?.x ?? 0.5}" /></label>
+      <label><span>Y</span><input type="number" min="0" max="1" step="0.05" data-character-field="y" value="${character.position?.y ?? 0.5}" /></label>
+    </div>
+  </article>`;
   list.querySelectorAll('textarea[data-character-field="prompt"]').forEach((input) => {
-    const index = Number(input.closest("[data-character-index]").dataset.characterIndex);
     bindNaiAutocomplete(input, `char:${index}`);
     input.addEventListener("input", (event) => { if (!reconciliationBusy) reconcileGenerationInput(`char:${index}`, event.target.value); });
   });
   list.querySelectorAll('textarea[data-character-field="negative_prompt"]').forEach((input) => {
-    const index = Number(input.closest("[data-character-index]").dataset.characterIndex);
     bindNaiAutocomplete(input, `char:${index}:uc`);
     input.addEventListener("input", (event) => { if (!reconciliationBusy) reconcileGenerationInput(`char:${index}:uc`, event.target.value); });
   });
@@ -3009,6 +3329,7 @@ function naiRenderCharacters() {
 
 function naiAddCharacter(character = {}) {
   naiCharacters.push({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || character.uc || "", position: character.position && character.position !== "auto" ? { x: Number(character.position.x ?? 0.5), y: Number(character.position.y ?? 0.5) } : null });
+  activeNaiTarget = naiCharacters.length - 1;
   naiRenderCharacters();
 }
 
@@ -3343,6 +3664,8 @@ async function naiGenerate() {
           seed_mode: parameters.seed_mode,
           seed: parameters.seed,
           noise_schedule: parameters.scheduler || "karras",
+          cfg_rescale: parameters.cfg_rescale ?? 0,
+          auto_smea: parameters.auto_smea === true,
         },
          count,
          quality_preset: naiPositiveTier,
@@ -3564,6 +3887,7 @@ async function naiRestoreItem(it) {
   $("#nai-height").value = p.height ?? 1216;
   $("#nai-resolution-category").value = naiResolutionPresetForSize(p.width ?? 832, p.height ?? 1216);
   naiSyncCountOptions();
+  naiToggleCustomResolution();
   $("#nai-count").value = String(Math.max(1, Math.min(naiBatchMaxCount(), Number(recipe.count || p.count || 1))));
   $("#nai-seed-mode").value = p.seed_mode || "fixed";
   $("#nai-seed").value = p.seed != null ? String(p.seed) : "";
@@ -3626,6 +3950,7 @@ function applyGenerationConfig(cfg) {
   $("#nai-height").value = h;
   $("#nai-resolution-category").value = naiResolutionPresetForSize(w, h);
   naiSyncCountOptions();
+  naiToggleCustomResolution();
   // Sampler / Scheduler
   naiSetSelectValue("#nai-sampler", cfg.sampler, "k_euler_ancestral");
   if ($("#nai-scheduler")) $("#nai-scheduler").value = cfg.scheduler || "karras";
@@ -3666,8 +3991,8 @@ function applyGenerationConfig(cfg) {
     }));
     naiRenderCharacters();
     if (naiCharacters.length > 0) {
-      const section = document.getElementById("nai-characters-section");
-      if (section) section.open = true;
+      activeNaiTarget = 0;
+      naiRenderCharacters();
     }
   }
   // Refresh UI
@@ -3760,8 +4085,12 @@ $("#nai-noise").addEventListener("input", () => { naiUpdateRangeLabels(); naiRen
 $("#nai-character-add").addEventListener("click", (e) => {
   e.stopPropagation();
   naiAddCharacter();
-  const section = document.getElementById("nai-characters-section");
-  if (section) section.open = true;
+});
+$("#nai-character-tabs")?.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-nai-char-tab]");
+  if (!btn) return;
+  activeNaiTarget = btn.dataset.naiCharTab === "base" ? "base" : Number(btn.dataset.naiCharTab);
+  naiRenderCharacters();
 });
 $("#nai-character-list").addEventListener("input", (event) => {
   const article = event.target.closest("[data-character-index]");

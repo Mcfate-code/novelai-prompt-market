@@ -9,7 +9,8 @@ import { inflateRawSync } from "node:zlib";
 
 const ENDPOINT = "https://image.novelai.net/ai/generate-image";
 const ACCOUNT_ENDPOINT = "https://image.novelai.net/user/subscription";
-const TOKEN_FILE = path.join(os.homedir(), ".workbuddy", "tags-market-settings.json");
+const WORKBUDDY_HOME = process.env.WORKBUDDY_HOME?.trim() || path.join(os.homedir(), ".workbuddy");
+const TOKEN_FILE = path.join(WORKBUDDY_HOME, "tags-market-settings.json");
 const PROBE_TIMEOUT_MS = 12_000;
 const GENERATION_TIMEOUT_MS = 120_000;
 const DEFAULT_MODEL = "nai-diffusion-5-full";
@@ -40,11 +41,13 @@ function readNetworkSettings() {
 
 function createHttpClient() {
   const settings = readNetworkSettings();
-  if (!settings.proxyEnabled || !settings.proxyUrl) return { fetch: globalThis.fetch, proxy: "direct" };
+  const envProxyUrl = process.env.NAI_PROXY_URL?.trim() || "";
+  const proxyUrl = envProxyUrl || settings.proxyUrl;
+  if (!proxyUrl || (!envProxyUrl && !settings.proxyEnabled)) return { fetch: globalThis.fetch, proxy: "direct" };
   try {
     const { fetch, ProxyAgent } = require("undici");
-    const dispatcher = new ProxyAgent(settings.proxyUrl);
-    return { fetch: (url, options = {}) => fetch(url, { ...options, dispatcher }), proxy: settings.proxyUrl };
+    const dispatcher = new ProxyAgent(proxyUrl);
+    return { fetch: (url, options = {}) => fetch(url, { ...options, dispatcher }), proxy: proxyUrl };
   } catch (cause) {
     throw new Error(`已启用代理但无法加载 HTTP 代理支持：${cause.message}`);
   }
@@ -436,9 +439,9 @@ function buildV5Parameters(parameters, model, prompt, negativePrompt, characters
   // V5 behavioral flags (match website defaults)
   parameters.prefer_brownian = true;
   parameters.straight_alpha = true;
-  parameters.autoSmea = false;
+  parameters.autoSmea = parameters.autoSmea === true;
   parameters.dynamic_thresholding = false;
-  parameters.cfg_rescale = 0;
+  parameters.cfg_rescale = Number(parameters.cfg_rescale ?? 0);
   parameters.deliberate_euler_ancestral_bug = false;
   parameters.legacy = false;
   parameters.legacy_v3_extend = false;
@@ -506,7 +509,9 @@ export class NovelAIProvider {
 
   get network() {
     const settings = readNetworkSettings();
-    return settings.proxyEnabled && settings.proxyUrl ? settings.proxyUrl : "direct";
+    const envProxyUrl = process.env.NAI_PROXY_URL?.trim() || "";
+    const proxyUrl = envProxyUrl || settings.proxyUrl;
+    return proxyUrl && (envProxyUrl || settings.proxyEnabled) ? proxyUrl : "direct";
   }
 
   get configured() {
@@ -566,6 +571,8 @@ export class NovelAIProvider {
       prompt,
       noise_schedule: request.noise_schedule || DEFAULT_NOISE_SCHEDULE,
       qualityToggle: request.quality_toggle !== false,
+      cfg_rescale: settings.cfg_rescale ?? 0,
+      autoSmea: settings.auto_smea === true,
     };
 
     if (isStructuredPromptModel(model)) {

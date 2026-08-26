@@ -77,6 +77,9 @@ const extractRecognizedTagIdentities = loadFunctionBound("extractRecognizedTagId
 const applyRecognizedTagDiff = loadFunctionBound("applyRecognizedTagDiff", ["recognizedTagToken"])(recognizedTagToken);
 const promptTokenRange = loadFunction("promptTokenRange");
 const replacePromptToken = loadFunctionBound("replacePromptToken", ["promptTokenRange"])(promptTokenRange);
+// ---- P3 修复纯函数（无自由变量） ----
+const naiStructuredBaseLine = loadFunction("naiStructuredBaseLine");
+const naiAutocompleteSkipSearch = loadFunction("naiAutocompleteSkipSearch");
 
 test("recognized cart diff patches only catalog tokens and preserves raw syntax", () => {
   const known = new Map([["blue eyes", "blue eyes"], ["forest", "forest"], ["1girl", "1girl"]]);
@@ -104,6 +107,103 @@ test("advanced cart contract keeps target mapping and layout hooks explicit", ()
   assert.match(APP_JS, /cart-advanced-layout/);
   assert.match(APP_JS, /closest\("\.tag-card"\)/);
   assert.match(APP_JS, /setTimeout\(\(\) => showThumbPreview/);
+});
+
+// ---- 4. P3 修复：结构化 Base 手动编辑不再整段解析多行 display ----
+
+test("naiStructuredBaseLine extracts only the Base line regardless of sync state", () => {
+  assert.equal(naiStructuredBaseLine("Base: solo\nCharacter 1: nahida"), "solo");
+  assert.equal(naiStructuredBaseLine("Character 1: nahida\nBase: 1girl, forest"), "1girl, forest");
+  assert.equal(naiStructuredBaseLine("Character 1: nahida"), null, "无 Base 行返回 null");
+  assert.equal(naiStructuredBaseLine(""), null);
+  assert.equal(naiStructuredBaseLine("Base: 1girl, forest\nCharacter 1: nahida\nCharacter 1 UC: lowres\nGlobal UC: bad anatomy"), "1girl, forest");
+});
+
+test("structured Base manual edit in multi-character display keeps recognized base tags (P3-B regression)", () => {
+  const known = new Map([["1girl", "1girl"], ["forest", "forest"], ["blue eyes", "blue eyes"], ["nahida", "nahida"]]);
+  // 用户在 Base 行手动加了 blue eyes -> display 与 displayPrompt 失同步
+  const display = "Base: 1girl, forest, blue eyes\nCharacter 1: nahida\nGlobal UC: lowres";
+  const baseText = naiStructuredBaseLine(display);
+  assert.equal(baseText, "1girl, forest, blue eyes");
+  const desired = extractRecognizedTagIdentities(baseText, known);
+  // 只取 Base 行：Character 行的 nahida 不得被当作 Base 标签
+  assert.deepEqual(desired, ["1girl", "forest", "blue eyes"]);
+  assert.ok(!desired.includes("nahida"), "nahida 属于 Character，不得混入 Base 标签");
+  // 现有 base 购物车标签不得被误删；新 Base 标签被识别补入
+  const current = ["1girl", "forest"];
+  assert.deepEqual(current.filter((key) => desired.includes(key)), ["1girl", "forest"], "现有 base 标签不被误删");
+  assert.deepEqual(desired.filter((key) => !current.includes(key)), ["blue eyes"], "新 Base 标签被识别");
+});
+
+// ---- 5. P3 修复：结构化 char/global UC 购物车变更 -> 重建 display（用活 naiCharacters） ----
+// 与 app.js setGenerationTargetText 的 char:N / global_uc 分支逐行一致的纯逻辑模拟（DOM 跳过）
+function simulateStructuredTargetSync(draft, naiCharacters, target, text) {
+  const synced = true; // display 与 displayPrompt 同步（本测试焦点）
+  const promptEl = { value: draft.displayPrompt };
+  const negEl = { value: draft.displayNegative };
+  const rebuild = () => {
+    draft.displayPrompt = naiStructuredDisplayText(draft.basePrompt, naiCharacters, draft.globalUc);
+    promptEl.value = draft.displayPrompt;
+  };
+  if (target === "global_uc") {
+    negEl.value = text;
+    draft.globalUc = text;
+    draft.displayNegative = text;
+    if (synced) rebuild();
+  } else {
+    const m = String(target).match(/^char:(\d+)(:uc)?$/);
+    const c = m && naiCharacters[Number(m[1])];
+    if (c) {
+      c[m[2] ? "negative_prompt" : "prompt"] = text;
+      if (synced) rebuild();
+    }
+  }
+  return { promptEl, negEl };
+}
+
+test("structured char/global UC cart sync rebuilds display from live naiCharacters (P3-A)", () => {
+  const draft = {
+    displayPrompt: "Base: 1girl\nCharacter 1: nahida\nGlobal UC: lowres",
+    displayNegative: "lowres",
+    basePrompt: "1girl",
+    globalUc: "lowres",
+  };
+  const naiCharacters = [{ prompt: "nahida", negative_prompt: "", position: null }];
+
+  // 购物车 char:0 变更 -> 更新活角色 + 用活 naiCharacters 重建 displayPrompt
+  const afterChar = simulateStructuredTargetSync(draft, naiCharacters, "char:0", "nahida, blue eyes");
+  assert.equal(naiCharacters[0].prompt, "nahida, blue eyes");
+  assert.equal(afterChar.promptEl.value, "Base: 1girl\nCharacter 1: nahida, blue eyes\nGlobal UC: lowres");
+  assert.equal(draft.displayPrompt, afterChar.promptEl.value, "displayPrompt 与 textarea 保持一致");
+  assert.ok(naiStructuredRequest(draft)(afterChar.promptEl.value, draft.displayNegative), "char 同步后 structured request 仍有效");
+
+  // 购物车 global_uc 变更 -> 更新 #nai-neg + displayNegative + globalUc + 重建 display
+  const afterUc = simulateStructuredTargetSync(draft, naiCharacters, "global_uc", "lowres, bad anatomy");
+  assert.equal(draft.globalUc, "lowres, bad anatomy");
+  assert.equal(draft.displayNegative, "lowres, bad anatomy");
+  assert.equal(afterUc.negEl.value, "lowres, bad anatomy", "#nai-neg 与 displayNegative 一致");
+  assert.equal(afterUc.promptEl.value, "Base: 1girl\nCharacter 1: nahida, blue eyes\nGlobal UC: lowres, bad anatomy");
+  assert.ok(naiStructuredRequest(draft)(afterUc.promptEl.value, afterUc.negEl.value), "global UC 同步后 structured request 仍有效");
+});
+
+// ---- 6. P3 修复：接受 autocomplete 建议不再立即重开弹窗 ----
+
+test("naiAutocompleteSkipSearch suppresses only the just-accepted tag query (P3-D)", () => {
+  assert.equal(naiAutocompleteSkipSearch("blue eyes", "blue eyes"), true, "光标停在刚接受的 tag 内 -> 抑制");
+  assert.equal(naiAutocompleteSkipSearch("blue eyes", "blue eyes, solo"), false, "用户继续输入 -> 不抑制");
+  assert.equal(naiAutocompleteSkipSearch("blue eyes", "blu"), false, "query 不同 -> 不抑制");
+  assert.equal(naiAutocompleteSkipSearch(null, "blue eyes"), false, "无接受标记 -> 不抑制");
+  assert.equal(naiAutocompleteSkipSearch(undefined, ""), false);
+});
+
+test("accepting a suggestion leaves caret inside the completed tag so re-search is suppressed", () => {
+  // acceptNaiAutocomplete 机制：replacePromptToken 替换 token 后光标落在完整 tag 末尾
+  const value = replacePromptToken("1girl, blue e", 13, "blue eyes");
+  assert.equal(value, "1girl, blue eyes");
+  const caret = value.indexOf("blue eyes") + "blue eyes".length;
+  const query = promptTokenRange(value, caret).query;
+  assert.equal(query, "blue eyes");
+  assert.equal(naiAutocompleteSkipSearch("blue eyes", query), true, "接受后立即重开被抑制");
 });
 
 // ---- 与 app.js addTagToTarget 的 base 分支逐行一致的纯逻辑模拟（DOM 部分跳过） ----

@@ -229,6 +229,24 @@ test("builds a V5 multi-character payload without flattening characters", () => 
   assert.equal(payload.parameters.use_coords, true);
 });
 
+test("passes cfg_rescale and autoSmea through to the V5 payload", () => {
+  const request = normalizeGenerationRequest({
+    prompt: "1girl",
+    settings: { model: "nai-diffusion-5-full", cfg_rescale: 0.6, auto_smea: true },
+  });
+  const payload = provider.buildPayload(requestForSeed(request, 1));
+  assert.equal(payload.parameters.cfg_rescale, 0.6);
+  assert.equal(payload.parameters.autoSmea, true);
+
+  // 未传时保持官网默认：cfg_rescale 0、autoSmea false
+  const defaults = provider.buildPayload(requestForSeed(
+    normalizeGenerationRequest({ prompt: "1girl", settings: { model: "nai-diffusion-5-full" } }),
+    1,
+  ));
+  assert.equal(defaults.parameters.cfg_rescale, 0);
+  assert.equal(defaults.parameters.autoSmea, false);
+});
+
 test("builds an img2img payload with source image, strength and noise", () => {
   const request = normalizeGenerationRequest({
     mode: "img2img",

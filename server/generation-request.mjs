@@ -62,6 +62,12 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function booleanValue(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return String(value).toLowerCase() === "true" || value === 1;
+}
+
 function normalizePosition(position) {
   if (!position || position === "auto" || position.mode === "auto") return null;
   const source = position.center || position;
@@ -109,6 +115,8 @@ function normalizeSettings(input = {}) {
     seed_mode: String(settings.seed_mode || input.seed_mode || "random"),
     width: clamp(width, 64, MAX_EDGE),
     height: clamp(height, 64, MAX_EDGE),
+    cfg_rescale: clamp(finiteNumber(settings.cfg_rescale, 0), 0, 1),
+    auto_smea: booleanValue(settings.auto_smea, false),
   };
 }
 
@@ -142,6 +150,9 @@ export function normalizeGenerationRequest(input = {}) {
   // count 是本地串行队列总数；每次真正发往 NovelAI 的请求始终固定为 1 张。
   // 因此它不应复用上游单请求 n_samples 的尺寸上限。
   if (count < 1 || count > MAX_LOCAL_BATCH_COUNT) throw new Error(`批处理数量需为 1-${MAX_LOCAL_BATCH_COUNT}`);
+  if (settings.seed_mode === "increment" && settings.seed + count - 1 > MAX_SEED) {
+    throw new Error("Increment 模式下 Seed + 生成数量 - 1 不能超过 4294967295");
+  }
   const references = Array.isArray(input.references) ? input.references : [];
   if (references.length) throw new Error("Vibe / Reference 当前版本仅预留接口，不能发送请求");
   const characters = Array.isArray(input.characters)
