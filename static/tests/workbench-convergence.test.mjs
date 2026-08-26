@@ -230,13 +230,13 @@ test("restore -> document 归一化：base/characters 隔离且保留 position/n
 });
 
 test("tokenRangeAtCaret respects weight::tag:: wrapper (autocomplete caret contract)", () => {
-  assert.deepEqual(tokenRangeAtCaret("1girl, blue e, masterpiece", 13), { start: 6, end: 13 });
+  assert.deepEqual((({ start, end }) => ({ start, end }))(tokenRangeAtCaret("1girl, blue e, masterpiece", 13)), { start: 6, end: 13 });
   // caret 落在加权 token 内部：span 覆盖整个 1.2::blue eyes::，绝不拆进 token 内部
-  assert.deepEqual(tokenRangeAtCaret("1girl, 1.2::blue eyes::, masterpiece", 15), { start: 6, end: 23 });
-  assert.deepEqual(tokenRangeAtCaret("1girl, 1.2::blue eyes::, masterpiece", 25), { start: 24, end: 36 });
+  assert.deepEqual((({ start, end }) => ({ start, end }))(tokenRangeAtCaret("1girl, 1.2::blue eyes::, masterpiece", 15)), { start: 6, end: 23 });
+  assert.deepEqual((({ start, end }) => ({ start, end }))(tokenRangeAtCaret("1girl, 1.2::blue eyes::, masterpiece", 25)), { start: 24, end: 36 });
   // caret 在行首 / 行尾（span 为原始 span，含 token 前导空白，供 left/right 空白逻辑使用）
-  assert.deepEqual(tokenRangeAtCaret("1girl, solo", 0), { start: 0, end: 5 });
-  assert.deepEqual(tokenRangeAtCaret("1girl, solo", 11), { start: 6, end: 11 });
+  assert.deepEqual((({ start, end }) => ({ start, end }))(tokenRangeAtCaret("1girl, solo", 0)), { start: 0, end: 5 });
+  assert.deepEqual((({ start, end }) => ({ start, end }))(tokenRangeAtCaret("1girl, solo", 11)), { start: 6, end: 11 });
 });
 
 test("documentFromProposal still available for Auto-Split Apply", () => {
