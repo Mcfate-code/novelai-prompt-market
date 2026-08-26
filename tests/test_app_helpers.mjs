@@ -28,6 +28,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { splitPromptTokens } from "../static/prompt-tokenizer.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -71,15 +72,15 @@ function loadFunctionBound(name, freeVars) {
   return (draft) => wrapper(draft);
 }
 
-const insertTagIntoString = loadFunction("insertTagIntoString");
+const insertTagIntoString = new Function("splitPromptTokens", "joinPromptTokens", `${extractFunction("insertTagIntoString")}; return insertTagIntoString;`)(splitPromptTokens, (tokens) => tokens.join(", "));
 const remapNaiTagTarget = loadFunction("remapNaiTagTarget");
 
 // ---- P2 翻译一致性纯函数（无自由变量） ----
 const shouldAcceptTranslation = loadFunction("shouldAcceptTranslation");
 const mergeImportedFreeText = loadFunction("mergeImportedFreeText");
 const recognizedTagToken = loadFunction("recognizedTagToken");
-const extractRecognizedTagIdentities = loadFunctionBound("extractRecognizedTagIdentities", ["recognizedTagToken"])(recognizedTagToken);
-const applyRecognizedTagDiff = loadFunctionBound("applyRecognizedTagDiff", ["recognizedTagToken"])(recognizedTagToken);
+const extractRecognizedTagIdentities = new Function("recognizedTagToken", "splitPromptTokens", `${extractFunction("extractRecognizedTagIdentities")}; return extractRecognizedTagIdentities;`)(recognizedTagToken, splitPromptTokens);
+const applyRecognizedTagDiff = new Function("recognizedTagToken", "splitPromptTokens", `${extractFunction("applyRecognizedTagDiff")}; return applyRecognizedTagDiff;`)(recognizedTagToken, splitPromptTokens);
 const promptTokenRange = loadFunction("promptTokenRange");
 const replacePromptToken = loadFunctionBound("replacePromptToken", ["promptTokenRange"])(promptTokenRange);
 const replacePromptTokenWithCaret = loadFunctionBound("replacePromptTokenWithCaret", ["promptTokenRange"])(promptTokenRange);

@@ -109,7 +109,7 @@ class RecommendationService:
         rankings = {}
         for source in self.SOURCE_NAMES:
             values = [tag for tag, item in candidates.items() if source in item["sources"]]
-            rankings[source] = sorted(values, key=lambda tag: item_sort(candidates[tag], tag))
+            rankings[source] = sorted(values, key=lambda tag: source_sort(source, candidates[tag], tag))
         fused = reciprocal_rank_fusion(rankings, self.rrf_k)
         ordered = sorted(candidates, key=lambda tag: self._final_sort(tag, candidates[tag], fused, ctx))
         selected = self._diversify(ordered, candidates, max(0, min(int(limit), 100)), ctx)
@@ -126,9 +126,11 @@ class RecommendationService:
             raw = self._source(source, ctx)
             for item in _as_items(raw):
                 tag = _norm(item.get("tag") or item.get("prompt_tag"))
-                entry = collected.setdefault(tag, {"tag": tag, "sources": set(), "meta": {}})
+                entry = collected.setdefault(tag, {"tag": tag, "sources": set(), "meta": {}, "source_meta": {}})
                 entry["sources"].add(source)
-                entry["meta"].update({k: v for k, v in item.items() if k not in ("tag", "prompt_tag")})
+                source_meta = {k: v for k, v in item.items() if k not in ("tag", "prompt_tag")}
+                entry["source_meta"][source] = source_meta
+                entry["meta"].update(source_meta)
         if self.conn is not None:
             for tag, entry in collected.items():
                 row = self.conn.execute(
@@ -266,6 +268,21 @@ class RecommendationService:
 
 def item_sort(item, tag):
     return (-int(item.get("meta", {}).get("rank", 10**9)), tag)
+
+
+def source_sort(source, item, tag):
+    meta = item.get("source_meta", {}).get(source, item.get("meta", {}))
+    if source == "local_cooccurrence":
+        return (-int(meta.get("count", 0) or 0), tag)
+    if source == "personal_recent":
+        return (-int(meta.get("use_count", meta.get("personal_metric", 0)) or 0), tag)
+    if source == "global_related":
+        return (-float(meta.get("score", meta.get("npmi", 0)) or 0), int(meta.get("rank", 10**9)), tag)
+    if source == "semantic_context":
+        return (-int(meta.get("semantic_priority", meta.get("priority", 0)) or 0), tag)
+    if source == "adult_context":
+        return (-int(meta.get("context_priority", meta.get("priority", 0)) or 0), tag)
+    return item_sort(item, tag)
 
 
 def _participant_number(value):

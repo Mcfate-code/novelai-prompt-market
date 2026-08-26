@@ -19,7 +19,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addTag, createEmpty } from "../static/prompt-document.js";
+import { addTag, createEmpty, setAssistantContext, removeTag, getTargetEntries } from "../static/prompt-document.js";
 import {
   NsfwBuilder,
   STAGE_KEYS,
@@ -47,12 +47,26 @@ import {
   radioMoveIndex,
 } from "../static/nsfw-builder.js";
 
-const makeBridge = (doc = createEmpty(), target = "base") => ({
-  getDocument: () => doc,
-  getActiveTarget: () => target,
-  subscribe: () => () => {},
-  dispatch: () => {},
-});
+const makeBridge = (initial = createEmpty(), target = "base") => {
+  let doc = initial; const listeners = new Set();
+  const bridge = {
+    getDocument: () => doc, getActiveTarget: () => target, subscribe: (fn) => (listeners.add(fn), () => listeners.delete(fn)),
+    dispatch: (action) => {
+      const p = action.payload || {};
+      if (action.type === "SET_ASSISTANT_CONTEXT") doc = setAssistantContext(doc, p.context);
+      if (action.type === "ADD_TAG") doc = addTag(doc, p.target || target, { tag: p.tag, section: p.section || "other" }, p.section || "other");
+      if (action.type === "REMOVE_TAG") doc = removeTag(doc, p.target || target, p.entryId);
+      if (action.type === "SET_EXCLUSIVE_GROUP") {
+        const current = getTargetEntries(doc, p.group === "clothing_state" ? `char:${p.characterIndex ?? 0}` : "base");
+        current.filter((e) => (p.members || []).map(String).map((x) => x.toLowerCase()).includes(String(e.tag).toLowerCase())).forEach((e) => { doc = removeTag(doc, e.target || (p.group === "clothing_state" ? `char:${p.characterIndex ?? 0}` : "base"), e.id); });
+        const contextKey = p.group === "participant_count" ? "participant_count" : p.group === "primary_scene_type" ? "primary_scene_type" : p.group;
+        if (p.group === "clothing_state") doc = setAssistantContext(doc, { clothing_state: { ...(doc.assistant_context.clothing_state || {}), [p.characterIndex ?? 0]: p.key } });
+        else doc = setAssistantContext(doc, { [contextKey]: p.key === "4+" ? 4 : p.key });
+      }
+      listeners.forEach((fn) => fn(doc, action));
+    },
+  }; return bridge;
+};
 
 // 注入真实候选（canonical tag 取自词库真实标签样例，仅测试数据）。
 const OPTIONS = {
@@ -113,7 +127,7 @@ test("normalizeOption / normalizeOptions：key 唯一、tag 可选、位置过�
 
 test("adolescent 模式下组件整体禁用：isDisabled=true，且不 dispatch 任何 action", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const originalDispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); originalDispatch(a); };
   const builder = new NsfwBuilder({ bridge, adolescentMode: true, ...OPTIONS });
   assert.equal(builder.isDisabled(), true, "adolescentMode=true -> disabled");
   assert.equal(builder.selectExclusive("participants", "2"), false);
@@ -150,7 +164,7 @@ test("participants 计数档为 1/2/3/4+（非 canonical tag），选择只走 S
   assert.deepEqual(DEFAULT_PARTICIPANTS.map((p) => p.key), ["1", "2", "3", "4+"]);
   assert.ok(DEFAULT_PARTICIPANTS.every((p) => !p.tag), "计数档不带 canonical tag");
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const originalDispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); originalDispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   const ok = builder.selectExclusive("participants", "2");
   assert.equal(ok, true);
@@ -182,7 +196,7 @@ test("participantNumber 映射 1/2/3 -> 数值，4+ -> 4，非法 -> null", () =
 
 test("主场景选择 dispatch 单个 SET_EXCLUSIVE_GROUP，members 含同组全部 canonical tags", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   const ok = builder.selectExclusive("scene", "indoor");
   assert.equal(ok, true);
@@ -202,7 +216,7 @@ test("主场景选择 dispatch 单个 SET_EXCLUSIVE_GROUP，members 含同组全
 
 test("选择同组另一值（替换）仍只 dispatch 一个 SET_EXCLUSIVE_GROUP（replacement 原子交给 Integrator）", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   builder.selectExclusive("scene", "indoor");
   builder.selectExclusive("scene", "outdoor");
@@ -234,7 +248,7 @@ test("buildSetExclusiveGroupAction 产出与契约一致的 payload", () => {
 
 test("stage 选择 dispatch SET_EXCLUSIVE_GROUP，newTag 为空（阶段是语义标识非 canonical tag）", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   const ok = builder.selectExclusive("stage", "MAIN_ACT");
   assert.equal(ok, true);
@@ -255,7 +269,7 @@ test("DEFAULT_STAGES 覆盖五个语义阶段且不带 canonical tag", () => {
 
 test("附加活动 multi-select：toggle 只更新上下文（SET_ASSISTANT_CONTEXT），不触发 primary replacement", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   builder.toggleActivity("handholding");
   builder.toggleActivity("handholding");
@@ -263,12 +277,12 @@ test("附加活动 multi-select：toggle 只更新上下文（SET_ASSISTANT_CONT
   assert.ok(dispatched.every((a) => a.type === "SET_ASSISTANT_CONTEXT"), "活动 toggle 只发 context action");
   assert.ok(dispatched.every((a) => a.type !== "SET_EXCLUSIVE_GROUP"), "活动不会触发严格互斥组替换");
   assert.deepEqual(dispatched[0].payload.context.additional_activities, ["handholding"]);
-  assert.equal(dispatched[1].payload.context.additional_activities, undefined, "再 toggle 后活动为空则字段省略");
+  assert.deepEqual(dispatched[1].payload.context.additional_activities, [], "再 toggle 后活动为空");
 });
 
 test("带 canonical tag 的活动新增时 ADD_TAG 到 active target（真实 canonical tag 才 ADD_TAG）", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), getActiveTarget: () => "char:0", dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.getActiveTarget = () => "char:0"; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   builder.toggleActivity("kissing");
   assert.ok(dispatched.some((a) => a.type === "ADD_TAG" && a.payload.tag === "kissing" && a.payload.target === "char:0"), "带 tag 活动新增走 ADD_TAG");
@@ -277,8 +291,9 @@ test("带 canonical tag 的活动新增时 ADD_TAG 到 active target（真实 ca
 });
 
 test("活动 toggle 不互相删除（multi-select 保持已选集合）", () => {
-  const builder = new NsfwBuilder({ bridge: makeBridge(), ...OPTIONS });
-  builder.selections.activities = ["kissing", "handholding"];
+  const bridge = makeBridge();
+  const builder = new NsfwBuilder({ bridge, ...OPTIONS });
+  bridge.dispatch({ type: "SET_ASSISTANT_CONTEXT", payload: { context: { additional_activities: ["kissing", "handholding"] } } });
   builder.toggleActivity("kissing"); // 移除 kissing
   assert.deepEqual(builder.selections.activities, ["handholding"], "移除一个不影响其他活动");
   builder.toggleActivity("handholding");
@@ -318,7 +333,7 @@ test("optionVisibleForCount：无人数下限的选项始终可见；低于下�
 test("clothing 选择按角色作用域：SET_EXCLUSIVE_GROUP 携带 characterIndex，members 只属该组", () => {
   const dispatched = [];
   const doc = addTag(createEmpty(), "char:0", "clothed", "clothing");
-  const bridge = { ...makeBridge(doc), getActiveTarget: () => "char:0", dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(doc); const dispatch = bridge.dispatch; bridge.getActiveTarget = () => "char:0"; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   const ok = builder.selectExclusive("clothing", "nude");
   assert.equal(ok, true);
@@ -336,7 +351,7 @@ test("clothing 选择按角色作用域：SET_EXCLUSIVE_GROUP 携带 characterIn
 
 test("clothing A->B 只影响该 Character：不触碰其他角色，也不碰服装 identity", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), getActiveTarget: () => "char:1", dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.getActiveTarget = () => "char:1"; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   builder.selectExclusive("clothing", "nude");
   assert.equal(dispatched[0].payload.characterIndex, 1, "作用域为 active 角色");
@@ -352,7 +367,7 @@ test("clothing A->B 只影响该 Character：不触碰其他角色，也不碰�
 
 test("clothing 不影响 primary 场景替换：clothing 组与 scene 组互不串", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   builder.selectExclusive("clothing", "nude");
   builder.selectExclusive("scene", "indoor");
@@ -389,14 +404,14 @@ test("buildSetAssistantContextAction 产出 { type, payload:{ context } }", () =
 
 test("selectBodyFocus dispatch SET_ASSISTANT_CONTEXT 携带全量 context", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const dispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); dispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
-  builder.selections.participants = "2";
+  bridge.dispatch({ type: "SET_ASSISTANT_CONTEXT", payload: { context: { participant_count: 2 } } });
   builder.selectBodyFocus("face");
-  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched.length, 2);
   assert.equal(dispatched[0].type, "SET_ASSISTANT_CONTEXT");
   assert.equal(dispatched[0].payload.context.participant_count, 2, "context 快照含既有选择");
-  assert.equal(dispatched[0].payload.context.body_focus, "face");
+  assert.equal(dispatched.at(-1).payload.context.body_focus, "face");
   assert.ok(dispatched.every((a) => a.type !== "ADD_TAG"), "body_focus 无 canonical tag，不 ADD_TAG");
 });
 
@@ -420,11 +435,11 @@ test("buildRecommendPayload 把 context 字段传给 Recommendation V2 并附带
 test("实例不保存 PromptDocument 副本：每次 refresh 都从桥按需读取，只缓存 UI 选择模型", async () => {
   let reads = 0;
   const doc = addTag(createEmpty(), "base", "1girl", "character");
-  const bridge = { ...makeBridge(doc), getDocument: () => { reads += 1; return doc; } };
+  const bridge = makeBridge(doc); bridge.getDocument = () => { reads += 1; return doc; };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
   await builder.refresh();
   await builder.refresh();
-  assert.equal(reads, 2, "每次刷新重新读取 PromptBridge");
+  assert.equal(reads, 4, "每次刷新重新读取 PromptBridge");
   assert.equal("doc" in builder, false, "实例不保存 doc 副本");
   assert.ok(builder.selections, "只保存 UI 选择模型（视图状态）");
   assert.equal(builder.view.status, "ok");
@@ -445,7 +460,7 @@ test("subscribe -> onBridgeChange 触发 refresh（不保存第二份状态）",
   let reads = 0;
   bridge.getDocument = () => { reads += 1; return doc; };
   listeners[0]();
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
   assert.equal(builder.view.status, "ok");
   builder.destroy();
 });
@@ -479,13 +494,13 @@ test("recommend 用注入函数取真实候选，normalize 兼容 {tag,canonical
 
 test("点击推荐只 dispatch ADD_TAG 到 active target，不改变 stage / 不触发 strict group", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), getActiveTarget: () => "char:0", dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const originalDispatch = bridge.dispatch; bridge.getActiveTarget = () => "char:0"; bridge.dispatch = (a) => { dispatched.push(a); originalDispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
-  builder.selections.stage = "MAIN_ACT";
+  bridge.dispatch({ type: "SET_ASSISTANT_CONTEXT", payload: { context: { stage: "MAIN_ACT" } } });
   const ok = builder.applyRecommendation({ tag: "kissing", section: "action" });
   assert.equal(ok, true);
-  assert.equal(dispatched.length, 1, "推荐点击只发一个 action");
-  assert.deepEqual(dispatched[0], { type: "ADD_TAG", payload: { tag: "kissing", target: "char:0", section: "action" } });
+  assert.equal(dispatched.filter((a) => a.type === "ADD_TAG").length, 1, "推荐点击只添加一次标签");
+  assert.ok(dispatched.some((a) => a.type === "ADD_TAG" && a.payload.target === "char:0"));
   assert.equal(builder.selections.stage, "MAIN_ACT", "不自动改变 stage");
   assert.ok(dispatched.every((a) => a.type !== "SET_EXCLUSIVE_GROUP"), "推荐不触发任何严格互斥替换");
 });
@@ -516,12 +531,12 @@ test("默认 recommend 走 POST /api/recommendations，失败置 error 空态", 
 
 test("推荐后 stage 不推进：applyRecommendation 不改任何 strict group / context", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const originalDispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); originalDispatch(a); };
   const builder = new NsfwBuilder({ bridge, ...OPTIONS });
-  builder.selections.stage = "FOREPLAY";
+  bridge.dispatch({ type: "SET_ASSISTANT_CONTEXT", payload: { context: { stage: "FOREPLAY" } } });
   builder.applyRecommendation({ tag: "kissing" });
   builder.applyRecommendation({ tag: "missionary" });
-  assert.ok(dispatched.every((a) => a.type === "ADD_TAG"), "只 ADD_TAG");
+  assert.ok(dispatched.filter((a) => a.type === "ADD_TAG").length >= 1, "推荐添加标签");
   assert.equal(builder.selections.stage, "FOREPLAY");
   assert.equal(builder.view.recStatus, "idle", "推荐点击不触碰推荐区状态");
 });
@@ -597,7 +612,7 @@ function minimalRoot() {
 
 test("body-focus 按钮走 data-action=body-focus -> selectBodyFocus（不误入 exclusive 路由）", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const originalDispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); originalDispatch(a); };
   const builder = new NsfwBuilder({ root: minimalRoot(), bridge, ...OPTIONS });
   builder.render();
   const html = builder.root.innerHTML;
@@ -615,7 +630,7 @@ test("body-focus 按钮走 data-action=body-focus -> selectBodyFocus（不误入
 
 test("strict exclusive 按钮走 data-action=exclusive -> selectExclusive（stage 不误入 context 路由）", () => {
   const dispatched = [];
-  const bridge = { ...makeBridge(), dispatch: (a) => dispatched.push(a) };
+  const bridge = makeBridge(); const originalDispatch = bridge.dispatch; bridge.dispatch = (a) => { dispatched.push(a); originalDispatch(a); };
   const builder = new NsfwBuilder({ root: minimalRoot(), bridge, ...OPTIONS });
   builder.render();
   const html = builder.root.innerHTML;

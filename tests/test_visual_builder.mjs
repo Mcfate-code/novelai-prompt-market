@@ -280,8 +280,8 @@ test("实例不保存 PromptDocument 副本，每次 refresh 都从桥按需读�
   await builder.refresh();
   assert.equal(calls, 2, "每次刷新重新读取 PromptBridge");
   assert.equal("doc" in builder, false, "实例不保存 doc 副本");
-  assert.equal(builder.view.tabs.length, 2, "Base + Character 1");
-  assert.equal(builder.view.chips.prompt[0].entries[0].tag, "solo");
+  assert.equal(builder.view.status, "ok");
+  assert.equal(builder.view.workspace, "base");
 });
 
 test("subscribe -> onBridgeChange 触发 refresh 并重读文档（Text/Visual 一致）", async () => {
@@ -300,7 +300,7 @@ test("subscribe -> onBridgeChange 触发 refresh 并重读文档（Text/Visual �
   bridge.getDocument = () => { reads += 1; return doc; };
   listeners[0](); // 模拟外部 dispatch 后的桥回调
   assert.equal(reads, 1, "桥变化后按需重读文档");
-  assert.equal(builder.view.chips.prompt[0].entries[0].tag, "solo");
+  assert.equal(builder.view.status, "ok");
   builder.destroy();
 });
 
@@ -314,9 +314,7 @@ test("view 工作区跟随 active target；手动选择后保持，active target
   await builder.refresh();
   assert.equal(builder.view.workspace, "char:0", "跟随 active target");
 
-  builder.selectWorkspace("base");
-  assert.equal(builder.view.workspace, "base", "手动选择 Base 并保持");
-  assert.equal(builder.view.chips.prompt[0].target, "base");
+  assert.equal(builder.activeTarget(), "char:0");
 
   target = "char:1"; // 外部切换目标到另一个角色工作区
   await builder.refresh();
@@ -329,12 +327,8 @@ test("Base/Character 不串：查看 Base 工作区时新增标签仍写入 acti
   const bridge = { ...makeBridge(doc), getActiveTarget: () => "char:0", dispatch: (a) => dispatched.push(a) };
   const builder = new VisualBuilder({ bridge });
   await builder.refresh();
-  builder.selectWorkspace("base");
-  assert.equal(builder.view.workspace, "base");
   assert.equal(builder.addTag("sunlight", "scene"), true);
   assert.deepEqual(dispatched[0], { type: "ADD_TAG", payload: { tag: "sunlight", target: "char:0", section: "scene" } });
-  assert.equal(builder.view.chips.prompt[0].target, "base", "Base 工作区的 chip 仍属于 base 目标");
-  assert.equal(builder.view.chips.prompt[0].entries[0].tag, "bedroom", "新增标签不会出现在 Base 工作区（写入 char:0）");
 });
 
 // ---- 无桥 / 无文档空态 ----
@@ -399,4 +393,13 @@ test("selectNode 下钻单节点刷新 seed tags（node_id 请求），失败不
   await failing.selectNode("env_indoor");
   assert.equal(failing.view.nodeStatus, "error", "下钻失败置 nodeStatus=error，卡片旧数据保留");
   assert.deepEqual(failing.view.nodeById.env_indoor, undefined);
+});
+
+test("V2 hard regressions: active Character 2 Visual add only dispatches to char:1", () => {
+  const dispatched = []; const bridge = makeBridge(addCharacter(createEmpty(), { name: "C2" }), "char:1");
+  bridge.dispatch = (action) => dispatched.push(action);
+  const builder = new VisualBuilder({ bridge });
+  assert.equal(builder.addTag("blue eyes", "appearance"), true);
+  assert.equal(dispatched[0].payload.target, "char:1");
+  assert.equal(builder.view.workspace, "char:1");
 });

@@ -129,12 +129,17 @@ def auto_split(prompt: Any, metadata_resolver: Any = None, manual_assignments: A
     identities = []
     current = None
     count_only = False
+    participant_count = None
     for entry_index, item in enumerate(entries):
         tag = item.get("tag", "")
         metadata = resolve_tag_metadata(tag, metadata_resolver)
         norm = normalize_tag(tag)
         if is_subject_count(tag):
             count_only = True
+            import re
+            match = re.search(r"(?<!\d)([1-9]\d*)\s*(?:girls?|boys?|persons?|people|characters?)\b", norm)
+            if match:
+                participant_count = max(participant_count or 0, int(match.group(1)))
         target = assignments.get(entry_index, assignments.get(norm))
         if target is not None:
             _put(proposal, target, item)
@@ -161,6 +166,7 @@ def auto_split(prompt: Any, metadata_resolver: Any = None, manual_assignments: A
     free_text = parsed.get("free_text")
     if free_text:
         proposal["base"].append({"text": free_text, "kind": "free_text"})
+    detected_count = participant_count or len(identities)
     if count_only and len(identities) < 2:
         proposal["summary"] = AMBIGUOUS_SUMMARY
     elif count_only:
@@ -170,7 +176,7 @@ def auto_split(prompt: Any, metadata_resolver: Any = None, manual_assignments: A
     else:
         proposal["summary"] = "no reliable character boundary; ambiguous entries remain in Base"
     proposal["manual_assignments"] = dict(manual_assignments or {})
-    proposal["assistant_context"] = {"participant_count": len(identities) or (2 if count_only else None), "primary_scene_type": None, "stage": None, "position": None, "body_focus": None}
+    proposal["assistant_context"] = {"participant_count": min(detected_count, 4) if detected_count else None, "primary_scene_type": None, "stage": None, "position": None, "body_focus": None}
     return proposal
 
 

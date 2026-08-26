@@ -1,4 +1,5 @@
 "use strict";
+import { splitPromptTokens, joinPromptTokens } from "./prompt-tokenizer.js";
 
 // ===== 状态 =====
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
@@ -18,19 +19,34 @@ const promptSubscribers = new Set();
 function notifyPromptSubscribers(action = null) {
   promptSubscribers.forEach((listener) => { try { listener(state.prompt, action); } catch (error) { console.error("PromptBridge subscriber failed", error); } });
 }
-function promptBridgeTarget(target) {
+function resolveDisplayTarget(target) {
   const value = String(target || "base");
   if (value === "base" || value === "global_uc") return value;
   const match = value.match(/^char:(\d+)(:uc)?$/);
   return match && state.prompt?.characters?.[Number(match[1])] ? value : "base";
 }
+function resolveMutationTarget(target) {
+  const value = String(target || state.target || "base");
+  if (value === "base" || value === "global_uc") return value;
+  const match = value.match(/^char:(\d+)(:uc)?$/);
+  return match && state.prompt?.characters?.[Number(match[1])] ? value : null;
+}
+const promptBridgeTarget = resolveDisplayTarget;
 function dispatchPromptAction(action = {}) {
   if (!promptDocument || !state.prompt) return state.prompt;
   const payload = action.payload || {};
-  const target = promptBridgeTarget(payload.target || state.target);
+  const target = resolveMutationTarget(payload.target || state.target);
+  if (!target) return state.prompt;
   if (action.type === "ADD_TAG" && !String(payload.tag || "").trim()) return state.prompt;
-  if (!["ADD_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "RENAME_CHARACTER", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP"].includes(action.type)) return state.prompt;
+   if (!["ADD_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP"].includes(action.type)) return state.prompt;
   pushHistory();
+  const remapTarget = (target, type, from, to) => {
+    const m = String(target).match(/^char:(\d+)(:uc)?$/); if (!m) return target;
+    const n = Number(m[1]); const suffix = m[2] || "";
+    if (type === "remove") return n === from ? "base" : n > from ? `char:${n - 1}${suffix}` : target;
+    if (type === "move") { if (n === from) return `char:${to}${suffix}`; if (n === to) return `char:${from}${suffix}`; }
+    return target;
+  };
   switch (action.type) {
     case "ADD_TAG": {
       const tag = String(payload.tag || "").trim();
@@ -46,7 +62,9 @@ function dispatchPromptAction(action = {}) {
     case "RECONCILE_TEXT": state.prompt = promptDocument.reconcileTargetText(state.prompt, target, payload.text || "", new Map(knownCatalogTags)); break;
     case "ADD_CHARACTER": state.prompt = promptDocument.addCharacter(state.prompt, payload); break;
     case "REMOVE_CHARACTER": state.prompt = promptDocument.removeCharacter(state.prompt, payload.index); break;
+    case "MOVE_CHARACTER": state.prompt = promptDocument.moveCharacter(state.prompt, payload.fromIndex, payload.toIndex); break;
     case "RENAME_CHARACTER": state.prompt = promptDocument.renameCharacter(state.prompt, payload.index, payload.name); break;
+    case "SET_CHARACTER_POSITION": state.prompt = promptDocument.setCharacterPosition(state.prompt, payload.index, payload.position); break;
     case "APPLY_AUTO_SPLIT": {
       // 一次 proposal -> PromptDocument 整体替换 -> 单次 notify；不逐 tag dispatch。
       const proposal = payload.proposal || payload;
@@ -57,8 +75,10 @@ function dispatchPromptAction(action = {}) {
     case "SET_ASSISTANT_CONTEXT": state.prompt = promptDocument.setAssistantContext(state.prompt, payload.context || {}); break;
     case "SET_EXCLUSIVE_GROUP": state.prompt = promptDocument.applyExclusiveGroup(state.prompt, payload); break;
   }
+  if (action.type === "REMOVE_CHARACTER") state.target = remapTarget(state.target, "remove", Number(payload.index));
+  if (action.type === "MOVE_CHARACTER") state.target = remapTarget(state.target, "move", Number(payload.fromIndex), Number(payload.toIndex));
   commitPromptChange({ refresh: true });
-  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "RENAME_CHARACTER", "APPLY_AUTO_SPLIT"].includes(action.type)) {
+  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT"].includes(action.type)) {
     rebuildTargetSelect();
     if (typeof naiRenderCharacters === "function") {
       syncNaiCharactersFromState();
@@ -70,7 +90,7 @@ function dispatchPromptAction(action = {}) {
 window.PromptBridge = {
   getDocument: () => state.prompt,
   getActiveTarget: () => state.target,
-  setActiveTarget: (target) => { state.target = promptBridgeTarget(target); rebuildTargetSelect(); updateCartHeader(); notifyPromptSubscribers({ type: "SET_ACTIVE_TARGET", payload: { target: state.target } }); return state.target; },
+  setActiveTarget: (target) => { state.target = resolveDisplayTarget(target); rebuildTargetSelect(); updateCartHeader(); notifyPromptSubscribers({ type: "SET_ACTIVE_TARGET", payload: { target: state.target } }); return state.target; },
   subscribe: (listener) => { if (typeof listener !== "function") return () => {}; promptSubscribers.add(listener); return () => promptSubscribers.delete(listener); },
   dispatch: dispatchPromptAction,
   serializeTarget: (target) => promptDocument?.serializeTarget(state.prompt, promptBridgeTarget(target)) || "",
@@ -341,14 +361,11 @@ function syncNaiTagTargetFromState() {
 function insertTagIntoString(text, tag) {
   const raw = String(tag ?? "").trim();
   if (!raw) return text;
-  const tokens = String(text || "")
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+  const tokens = splitPromptTokens(text);
   const existing = new Set(tokens.map((t) => t.toLowerCase()));
   if (existing.has(raw.toLowerCase())) return text;
   tokens.push(raw);
-  return tokens.join(", ");
+  return joinPromptTokens(tokens);
 }
 
 // Reconciliation deliberately understands only catalog identities in plain comma tokens
@@ -362,11 +379,11 @@ function recognizedTagToken(token, knownTags) {
   return knownTags.has(key) && (weighted || /^[^{}\[\]<>]+$/.test(candidate)) ? { key, tag: knownTags.get(key), weighted, weight: weighted ? Number(weighted[0].split("::", 1)[0]) : 1 } : null;
 }
 function extractRecognizedTagIdentities(text, knownTags = knownCatalogTags) {
-  return String(text || "").split(",").map((token) => recognizedTagToken(token, knownTags)).filter(Boolean).map((x) => x.key);
+  return splitPromptTokens(text).map((token) => recognizedTagToken(token, knownTags)).filter(Boolean).map((x) => x.key);
 }
 function applyRecognizedTagDiff(text, desiredKeys, knownTags = knownCatalogTags) {
   const desired = new Set(desiredKeys || []);
-  const tokens = String(text || "").split(",");
+  const tokens = splitPromptTokens(text);
   const kept = [];
   const seen = new Set();
   tokens.forEach((token) => {
@@ -375,7 +392,7 @@ function applyRecognizedTagDiff(text, desiredKeys, knownTags = knownCatalogTags)
     if (desired.has(recognized.key) && !seen.has(recognized.key)) { kept.push(token); seen.add(recognized.key); }
   });
   const missing = [...desired].filter((key) => !seen.has(key)).map((key) => knownTags.get(key)).filter(Boolean);
-  let result = kept.join(",");
+  let result = kept.join(", ");
   missing.forEach((tag) => { result = result.trim() ? `${result.trimEnd()}, ${tag}` : tag; });
   return result;
 }
@@ -418,6 +435,14 @@ function syncNaiCharactersFromState() {
     prompt: promptDocument.serializeTarget(state.prompt, `char:${index}`),
     negative_prompt: promptDocument.serializeTarget(state.prompt, `char:${index}:uc`),
     position: character.position || null,
+  }));
+}
+function buildGenerationCharacters(document = state.prompt) {
+  if (!document || !promptDocument) return [];
+  return (document.characters || []).map((character, index) => ({
+    prompt: promptDocument.serializeTarget(document, `char:${index}`),
+    negative_prompt: promptDocument.serializeTarget(document, `char:${index}:uc`),
+    position: character.position ? { ...character.position } : null,
   }));
 }
 // P0 结构化边界：#nai-prompt 只存 Base，#nai-neg 只存 Global UC，角色只存 naiCharacters[]。
@@ -622,13 +647,13 @@ function rebuildNaiTagTarget() {
     sel.value = state.target;
   } else {
     sel.value = "base";
-    if (m) state.target = "base"; // 悬空的 char:N 回退到 base
+     if (m) window.PromptBridge.setActiveTarget("base");
   }
 }
 
 async function addTagToTarget(tag) {
   const sel = document.getElementById("nai-tag-target");
-  state.target = sel?.value || "base";
+  window.PromptBridge.setActiveTarget(sel?.value || "base");
   const m = state.target.match(/^char:(\d+)$/);
   if (m && !naiCharacters[Number(m[1])]) state.target = "base";
   const label = targetLabel(state.target);
@@ -3451,17 +3476,13 @@ function naiRenderCharacters() {
 }
 
 function naiAddCharacter(character = {}) {
-  naiCharacters.push({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || character.uc || "", position: character.position && character.position !== "auto" ? { x: Number(character.position.x ?? 0.5), y: Number(character.position.y ?? 0.5) } : null });
-  activeNaiTarget = naiCharacters.length - 1;
-  naiRenderCharacters();
+  window.PromptBridge.dispatch({ type: "ADD_CHARACTER", payload: character });
+  activeNaiTarget = (state.prompt?.characters?.length || 1) - 1;
+  window.PromptBridge.setActiveTarget(`char:${activeNaiTarget}`);
 }
 
 function naiCollectCharacters() {
-  return naiCharacters.map((character) => ({
-    prompt: String(character.prompt || "").trim(),
-    negative_prompt: String(character.negative_prompt || "").trim(),
-    position: character.position ? { x: Number(character.position.x), y: Number(character.position.y) } : null,
-  })).filter((character) => character.prompt);
+  return buildGenerationCharacters(state.prompt).filter((character) => character.prompt);
 }
 
 function naiCollectParameters() {
@@ -4239,30 +4260,27 @@ $("#nai-character-list").addEventListener("input", (event) => {
   if (!article || !field) return;
   const character = naiCharacters[Number(article.dataset.characterIndex)];
   if (["x", "y"].includes(field)) {
-    character.position ||= { x: 0.5, y: 0.5 };
-    character.position[field] = Math.max(0, Math.min(1, Number(event.target.value)));
-  } else character[field] = event.target.value;
+    const index = Number(article.dataset.characterIndex);
+    const position = { ...(state.prompt.characters[index].position || { x: 0.5, y: 0.5 }) };
+    position[field] = Math.max(0, Math.min(1, Number(event.target.value)));
+    window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index, position } });
+  }
 });
 $("#nai-character-list").addEventListener("change", (event) => {
   if (!event.target.matches("[data-character-manual]")) return;
   const article = event.target.closest("[data-character-index]");
-  const character = naiCharacters[Number(article.dataset.characterIndex)];
-  character.position = event.target.checked ? { x: 0.5, y: 0.5 } : null;
-  naiRenderCharacters();
+  window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index: Number(article.dataset.characterIndex), position: event.target.checked ? { x: 0.5, y: 0.5 } : null } });
 });
 $("#nai-character-list").addEventListener("click", (event) => {
   const article = event.target.closest("[data-character-index]");
   if (!article) return;
   const index = Number(article.dataset.characterIndex);
   if (event.target.matches("[data-character-remove]")) {
-    state.target = remapNaiTagTarget(state.target, "remove", index);
-    naiCharacters.splice(index, 1);
+    window.PromptBridge.dispatch({ type: "REMOVE_CHARACTER", payload: { index } });
   } else if (event.target.matches('[data-character-move="up"]') && index > 0) {
-    state.target = remapNaiTagTarget(state.target, "move", index, index - 1);
-    [naiCharacters[index - 1], naiCharacters[index]] = [naiCharacters[index], naiCharacters[index - 1]];
+    window.PromptBridge.dispatch({ type: "MOVE_CHARACTER", payload: { fromIndex: index, toIndex: index - 1 } });
   } else if (event.target.matches('[data-character-move="down"]') && index < naiCharacters.length - 1) {
-    state.target = remapNaiTagTarget(state.target, "move", index, index + 1);
-    [naiCharacters[index + 1], naiCharacters[index]] = [naiCharacters[index], naiCharacters[index + 1]];
+    window.PromptBridge.dispatch({ type: "MOVE_CHARACTER", payload: { fromIndex: index, toIndex: index + 1 } });
   } else return;
   naiRenderCharacters();
 });

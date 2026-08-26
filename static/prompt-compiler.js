@@ -1,3 +1,5 @@
+import { splitPromptTokens, joinPromptTokens } from "./prompt-tokenizer.js";
+
 /**
  * Prompt Compiler — 纯函数，将用户原始输入编译为 NovelAI 实际发送的 Effective Prompt / Negative。
  *
@@ -182,11 +184,7 @@ export function getAutoPromptPreset(model, options = {}) {
  * @returns {string[]}
  */
 export function splitTokens(text) {
-  if (!text || typeof text !== "string") return [];
-  return text
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+  return splitPromptTokens(text);
 }
 
 /**
@@ -195,7 +193,7 @@ export function splitTokens(text) {
  * @returns {string}
  */
 export function joinTokens(tokens) {
-  return tokens.join(", ");
+  return joinPromptTokens(tokens);
 }
 
 /**

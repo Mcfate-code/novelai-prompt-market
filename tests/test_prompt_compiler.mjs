@@ -16,6 +16,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { splitTokens, joinTokens } from "../static/prompt-compiler.js";
 import {
   compileGenerationPrompts,
   compileNegative,
@@ -25,6 +26,12 @@ import {
   QUALITY_PRESETS,
   UC_PRESETS,
 } from "../static/prompt-compiler.js";
+
+test("compiler tokenizer preserves weighted comma token", () => {
+  const tokens = splitTokens("1.5::rain, night::, bedroom");
+  assert.deepEqual(tokens, ["1.5::rain, night::", "bedroom"]);
+  assert.equal(joinTokens(tokens), "1.5::rain, night::, bedroom");
+});
 import { normalizeGenerationRequest } from "../server/generation-request.mjs";
 import { NovelAIProvider } from "../server/novelai-provider.mjs";
 

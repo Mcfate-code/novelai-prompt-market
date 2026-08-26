@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   addCharacter, addTag, createEmpty, getTargetEntries, normalize, parseTargetText,
-  reconcileTargetText, removeCharacter, removeTag, renameCharacter, serializeTarget,
+  reconcileTargetText, removeCharacter, removeTag, renameCharacter, moveCharacter, setCharacterPosition, serializeTarget,
   updateEntry,
 } from "../static/prompt-document.js";
 
@@ -97,4 +97,23 @@ test("character and entry mutations preserve a valid document", () => {
   doc = removeCharacter(doc, 1);
   assert.equal(doc.characters.length, 1);
   assert.equal(doc.characters[0].name, "Character 1");
+});
+
+test("V2 hard regressions: character add/move/position/isolation/invalid target and weighted comma token", () => {
+  let doc = createEmpty();
+  doc = addCharacter(doc, { name: "Second" });
+  assert.equal(doc.characters.length, 2);
+  doc = addTag(doc, "base", "bedroom", "scene");
+  doc = addTag(doc, "char:1", "blue eyes", "appearance");
+  assert.deepEqual(getTargetEntries(doc, "base").map((e) => e.tag), ["bedroom"]);
+  assert.deepEqual(getTargetEntries(doc, "char:0"), []);
+  doc = setCharacterPosition(doc, 1, { x: 0.25, y: 0.75 });
+  doc = moveCharacter(doc, 1, 0);
+  assert.equal(doc.characters[0].position.x, 0.25);
+  assert.deepEqual(getTargetEntries(doc, "char:0").map((e) => e.tag), ["blue eyes"]);
+  assert.deepEqual(getTargetEntries(doc, "char:999"), []);
+  assert.deepEqual(getTargetEntries(doc, "base").map((e) => e.tag), ["bedroom"]);
+  const roundTrip = reconcileTargetText(createEmpty(), "base", "1.5::rain, night::", new Map());
+  assert.equal(getTargetEntries(roundTrip, "base").length, 1);
+  assert.equal(serializeTarget(roundTrip, "base"), "1.5::rain, night::");
 });

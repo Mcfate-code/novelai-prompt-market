@@ -79,7 +79,7 @@ class Phase2IntegrationTest(unittest.TestCase):
         self.assertEqual([e["tag"] for e in proposal["base"]], ["2girls"])
         self.assertEqual([e["tag"] for e in proposal["characters"][0]["prompt"]],
                          ["citlali (genshin impact)", "long hair", "blue eyes"])
-        self.assertEqual(proposal["assistant_context"]["participant_count"], 1)
+        self.assertEqual(proposal["assistant_context"]["participant_count"], 2)
 
     def test_auto_split_endpoint_weighted_preserves_strength(self):
         self.insert_tags([

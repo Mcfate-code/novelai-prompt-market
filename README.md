@@ -348,7 +348,14 @@ function apply(event, action) {
 
 ### 翻译
 
-设置页填写百度翻译 APP ID / 密钥后可手动触发翻译（仅点击时请求，不会自动上传）；自定义标签支持中文名，自然语言补充可保留中文 Raw 并选择英文译文作为 Effective Prompt。
+翻译走百度通用翻译开放平台（`https://fanyi-api.baidu.com/api/trans/vip/translate`，签名 = MD5(appid + q + salt + secret)）。两种配置方式任选其一（环境变量优先于设置文件）：
+
+- **设置页**：填入百度翻译「APP ID」与「密钥」，保存在 `~/.workbuddy/tags-market-settings.json`（0600，不回显）。
+- **环境变量**：启动前 `export BAIDU_TRANSLATE_APPID=... BAIDU_TRANSLATE_SECRET=...`（项目不自动读取 `.env`，见 `.env.example`）。
+
+仅点击时请求，不会自动上传；自定义标签支持中文名，自然语言补充可保留中文 Raw 并选择英文译文作为 Effective Prompt。
+
+翻译请求的出网代理与语义搜索一致：优先用户设置 `proxy_enabled` / `proxy_url`（或环境变量 `NAI_PROXY_URL`），未配置时回退到 `config/app_settings.json` 的 `proxy.enabled` / `proxy.url`。注意 `fanyi-api.baidu.com` 为国内服务——若经代理出口到海外 IP 可能触发百度 `58000 客户端 IP 非法`，此时请在代理规则中把该域名设为直连，或关闭代理。错误响应会携带百度原始错误码（`54001` 签名错误 / `52003` 未授权未开通 / `54003` QPS / `54004` 余额不足 / `58000` IP 限制等）便于定位。
 
 ### 数据维护
 
@@ -523,9 +530,11 @@ WantedBy=multi-user.target
 
 ### 项目级配置
 
-- `config/app_settings.json`：可选本机覆盖（端口 / 主机 / 受限 taxonomy 路径等），已被 gitignore；缺失时使用内建默认值，不阻塞启动。
+- `config/app_settings.json`：可选本机覆盖（端口 / 主机 / `proxy.enabled`·`proxy.url` 出网代理兜底 / 受限 taxonomy 路径等），已被 gitignore；缺失时使用内建默认值，不阻塞启动。
 - `config/navigation.default.json`：随仓库维护的最小默认目录；本地存在 `data/navigation.json` 时优先使用本地版本。
 - `config/model_overlays.json`：模型能力语义，随仓库维护。
+
+出网代理的生效优先级：用户设置 `proxy_enabled`/`proxy_url`（或环境变量 `NAI_PROXY_URL`）> `config/app_settings.json` 的 `proxy.enabled`/`proxy.url` 兜底；用户设置关闭代理（`proxy_enabled=false`）时强制直连。
 
 ## 使用指南
 
@@ -588,6 +597,14 @@ WantedBy=multi-user.target
 ## 开发相关
 
 ### 运行测试
+
+### Visual Workspace V2
+
+Visual Workspace 使用 Semantic Prompt Composer：固定语义节点总览与右侧 Inspector，节点显示已选数量和最多三个摘要，Inspector 提供当前目标的上下文推荐、加标签、权重和删除操作。Base 与角色共用一个全局 Target Bar；Text、Visual、Tag Assistant、NSFW Scene Builder 都通过 `PromptBridge` 观察同一个 active target。
+
+`PromptDocument` schema v2 是唯一状态源。角色增删、移动、重命名、位置编辑和文本 reconciliation 全部通过 PromptBridge action 完成；生图请求从文档即时生成 Base、Global UC 与逐角色 prompt/UC/position projection，避免 `naiCharacters` 成为第二份业务状态。无效的 `char:N` mutation 会被拒绝，不会回退污染 Base。
+
+Visual 推荐向 `/api/recommendations` 发送当前文档、active target、semantic node 和 assistant context；仅在请求失败或无结果时使用节点 seed tags。NSFW 上下文从 `assistant_context` 即时 hydration，活动开启会添加 canonical tag，关闭会移除对应 tag，并同步上下文。
 
 ```bash
 # Python（后端）

@@ -4,6 +4,7 @@
  */
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
 const TARGET_RE = /^char:(\d+)(:uc)?$/;
+import { splitPromptTokens, parsePromptToken } from "./prompt-tokenizer.js";
 
 function emptySections() { return Object.fromEntries(SECTION_IDS.map((id) => [id, []])); }
 function idFor(raw, section, extra = {}) { return String(raw.id || extra.id || `tag-${section}-${raw.sort_order ?? extra.sort_order ?? 0}-${String(raw.tag ?? raw.raw ?? "").trim()}`); }
@@ -77,13 +78,11 @@ function knownMap(knownTags) {
 }
 function parseTargetText(text, knownTags = new Map()) {
   const known = knownMap(knownTags);
-  return String(text || "").split(",").map((token) => {
-    const raw = token.trim(); if (!raw) return null;
-    const weighted = raw.match(/^\s*((?:\d+(?:\.\d+)?|\.\d+))::(.+?)::\s*$/);
-    const tag = (weighted ? weighted[2] : raw).trim();
+  return splitPromptTokens(text).map((token) => {
+    const parsed = parsePromptToken(token); const raw = parsed.raw; const tag = parsed.tag;
     const canonical = known.get(tag.toLocaleLowerCase());
-    if (!canonical && !weighted && /[{}\[\]<>]/.test(tag)) return null;
-    return { tag: canonical || tag, weight: weighted ? Number(weighted[1]) : 1, weighted: !!weighted };
+    if (!canonical && !parsed.weighted && /[{}\[\]<>]/.test(tag)) return null;
+    return { tag: canonical || tag, weight: parsed.weight, weighted: parsed.weighted };
   }).filter(Boolean);
 }
 function replaceSections(sections, entries) {
@@ -99,9 +98,6 @@ function reconcileTargetText(document, target, text, knownTags = new Map()) {
   const entries = parsed.map((item, index) => {
     const existing = byTag.get(item.tag.toLocaleLowerCase());
     return { ...(existing || {}), tag: item.tag, weight: item.weight, custom: existing?.custom ?? !known.has(item.tag.toLocaleLowerCase()), source: existing?.source || (known.has(item.tag.toLocaleLowerCase()) ? "tag" : "raw"), sort_order: index };
-  });
-  current.filter((entry) => !known.has(entry.tag.toLocaleLowerCase()) || entry.custom || entry.source === "custom" || entry.source === "raw").forEach((entry) => {
-    if (!entries.some((item) => item.tag.toLocaleLowerCase() === entry.tag.toLocaleLowerCase())) entries.push({ ...entry, sort_order: entries.length });
   });
   if (target === "base") doc.sections = replaceSections(sections, entries);
   else if (target === "global_uc") doc.global_uc_sections = replaceSections(sections, entries);
@@ -121,8 +117,19 @@ function updateEntry(document, target, entryId, patch) {
 function addTag(document, target, value, section = "other", extra = {}) { const doc = normalize(document); const sections = getSections(doc, target); if (!sections) return doc; const entry = normalizeEntry(value, section, extra); sections[entry.section].push(entry); return doc; }
 function removeTag(document, target, entryId) { const doc = normalize(document); const sections = getSections(doc, target); if (!sections) return doc; SECTION_IDS.forEach((id) => { sections[id] = sections[id].filter((e) => e.id !== entryId); }); return doc; }
 function addCharacter(document, character = {}) { const doc = normalize(document); doc.characters.push(normalizeCharacter(character, doc.characters.length)); return doc; }
-function removeCharacter(document, index) { const doc = normalize(document); if (Number.isInteger(Number(index))) doc.characters.splice(Number(index), 1); if (!doc.characters.length) doc.characters.push(normalizeCharacter({}, 0)); return doc; }
+function removeCharacter(document, index) { const doc = normalize(document); const idx = Number(index); if (!Number.isInteger(idx) || idx < 0 || idx >= doc.characters.length) return doc; doc.characters.splice(idx, 1); if (!doc.characters.length) doc.characters.push(normalizeCharacter({}, 0)); return doc; }
 function renameCharacter(document, index, name) { const doc = normalize(document); if (doc.characters[Number(index)]) doc.characters[Number(index)].name = String(name || `Character ${Number(index) + 1}`); return doc; }
+function moveCharacter(document, fromIndex, toIndex) {
+  const doc = normalize(document); const from = Number(fromIndex); const to = Number(toIndex);
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= doc.characters.length || to >= doc.characters.length) return doc;
+  const [character] = doc.characters.splice(from, 1); doc.characters.splice(to, 0, character); return doc;
+}
+function setCharacterPosition(document, index, position) {
+  const doc = normalize(document); const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0 || !doc.characters[idx]) return doc;
+  doc.characters[idx].position = position == null ? null : { x: Number(position.x), y: Number(position.y) };
+  return doc;
+}
 
 function getAssistantContext(document) { return (normalize(document).assistant_context) || {}; }
 function setAssistantContext(document, context = {}) {
@@ -225,4 +232,4 @@ function applyExclusiveGroup(document, payload = {}) {
   return doc;
 }
 
-export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
+export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup };
