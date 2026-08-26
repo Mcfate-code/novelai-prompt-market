@@ -39,6 +39,7 @@ const PYTHON_API_PREFIXES = [
   "/api/cooccurrence/", "/api/recommendations", "/api/conflicts", "/api/snapshots",
   "/api/import", "/api/user-tags", "/api/inbox", "/api/export", "/api/favorites",
   "/api/recent", "/api/presets", "/api/gallery", "/api/sync", "/api/sync-hot",
+  "/api/nsfw-builder",
 ];
 const LOOPBACK_ORIGIN = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i;
 

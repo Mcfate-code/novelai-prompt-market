@@ -1,5 +1,5 @@
 "use strict";
-import { splitPromptTokens, joinPromptTokens, tokenRangeAtCaret } from "./prompt-tokenizer.js";
+import { splitPromptTokens, joinPromptTokens, tokenRangeAtCaret, serializePromptToken } from "./prompt-tokenizer.js";
 
 // ===== 状态 =====
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
@@ -361,8 +361,10 @@ async function clearNovelAIExampleCache() {
 // ===== 目标槽位 =====
 function targetOptions() {
   const opts = [{ value: "base", label: "Base Prompt" }, { value: "global_uc", label: "Global UC" }];
-  if (!cartAdvanced) return opts;
-  state.prompt.characters.forEach((ch, i) => {
+  // 角色目标必须与 cartAdvanced 无关地派生自权威 PromptDocument（state.prompt.characters），
+  // 否则 setActiveTarget('char:N') 后 rebuildTargetSelect() 会把 state.target 重置回 'base'，
+  // PromptBridge.getActiveTarget() 永远拿不到角色目标（破坏 Visual/Scene/模板捕获）。
+  (state.prompt?.characters || []).forEach((ch, i) => {
     opts.push({ value: `char:${i}`, label: `${ch.name || "Character " + (i + 1)} Prompt` });
     opts.push({ value: `char:${i}:uc`, label: `${ch.name || "Character " + (i + 1)} UC` });
   });
@@ -521,6 +523,8 @@ function naiAutocompleteSkipSearch(acceptedTag, query) {
 const naiAutocompleteSearch = debounce(async (input) => {
   const caret = input.selectionStart;
   const range = tokenRangeAtCaret(input.value, caret); // caret-range 唯一权威
+  // tokenRangeAtCaret 对空编辑器返回 null（无任何 token），必须守卫，否则 slice(range.start) 抛错。
+  if (!range) { closeNaiAutocomplete(); return; }
   const query = input.value.slice(range.start, caret).trim();
   const acceptedTag = naiAutocompleteSuppress;
   naiAutocompleteSuppress = null;
@@ -639,15 +643,18 @@ function remapNaiTagTarget(target, op, a, b) {
 function rebuildNaiTagTarget() {
   const sel = $("#nai-tag-target");
   if (!sel) return;
+  // 权威来源 = PromptDocument（state.prompt.characters），绝不依赖 view adapter naiCharacters，
+  // 否则页面加载时 naiCharacters 尚未同步（undefined）会让 init() 抛错中断。
+  const characters = (state.prompt?.characters || []);
   const options = [`<option value="base">Base / Scene</option>`];
-  naiCharacters.forEach((_, i) => options.push(`<option value="char:${i}">Character ${i + 1}</option>`));
+  characters.forEach((_, i) => options.push(`<option value="char:${i}">Character ${i + 1}</option>`));
   sel.innerHTML = options.join("");
   const m = String(state.target || "").match(/^char:(\d+)$/);
-  if (m && naiCharacters[Number(m[1])]) {
+  if (m && characters[Number(m[1])]) {
     sel.value = state.target;
   } else {
     sel.value = "base";
-     if (m) window.PromptBridge.setActiveTarget("base");
+    if (m) window.PromptBridge.setActiveTarget("base");
   }
 }
 
