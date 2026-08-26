@@ -1127,10 +1127,28 @@ class SemanticSearchBody(BaseModel):
     limit: int = 80
 
 
-def _semantic_proxy_handler(settings: dict):
+def _effective_proxy(settings: dict) -> str:
+    """解析当前生效的出网代理地址（空串 = 直连）。
+
+    优先级：用户设置 proxy_enabled/proxy_url（含环境变量 NAI_PROXY_URL 覆盖）→
+    config/app_settings.json 的 proxy.enabled/proxy.url 兜底（与 importer/sync_danbooru.py 一致）。
+    用户显式关闭代理（proxy_enabled=false）时强制直连，不再兜底。
+    """
     if not settings.get("proxy_enabled"):
-        return urllib.request.ProxyHandler({})
+        return ""
     proxy = str(settings.get("proxy_url") or "").strip()
+    if proxy:
+        return proxy
+    cfg_proxy = (SETTINGS or {}).get("proxy") or {}
+    if _parse_bool(cfg_proxy.get("enabled"), False):
+        cfg_url = str(cfg_proxy.get("url") or "").strip()
+        if cfg_url:
+            return cfg_url
+    return ""
+
+
+def _semantic_proxy_handler(settings: dict):
+    proxy = _effective_proxy(settings)
     return urllib.request.ProxyHandler({"http": proxy, "https": proxy}) if proxy else urllib.request.ProxyHandler({})
 
 
@@ -1782,17 +1800,29 @@ def baidu_translate_sign(appid: str, text: str, salt: str, secret: str) -> str:
     return hashlib.md5(f"{appid}{text}{salt}{secret}".encode("utf-8")).hexdigest()
 
 
+BAIDU_TRANSLATE_ERROR_MESSAGES = {
+    "52001": "请求超时，请稍后重试",
+    "52002": "系统错误，请稍后重试",
+    "52003": "未授权用户：APP ID 无效或未开通通用翻译服务",
+    "54000": "必填参数为空",
+    "54001": "签名错误：APP ID 或密钥不正确",
+    "54003": "访问频率受限（QPS 超限），请稍后再试",
+    "54004": "账户余额不足，请前往百度翻译开放平台充值",
+    "54005": "长文本请求过于频繁，请稍后再试",
+    "58000": "客户端 IP 非法：请将当前出口 IP 加入百度翻译开放平台的 IP 白名单，或改用国内直连网络",
+    "58001": "语言方向不支持：仅支持 from=auto/zh/en、to=zh/en",
+    "58002": "服务当前已关闭：请前往百度翻译开放平台开通服务",
+    "90107": "认证未通过或未生效：请完成实名认证并确认应用已生效",
+}
+
+
 def _translate_error_message(payload: dict) -> str:
-    code = str(payload.get("error_code") or "")
-    messages = {
-        "52001": "百度翻译请求超时",
-        "54003": "百度翻译请求过于频繁，请稍后再试",
-        "54004": "百度翻译账户余额不足",
-        "54005": "百度翻译短时间内请求过于频繁",
-        "58001": "百度翻译语言参数不支持",
-        "54001": "百度翻译鉴权失败，请检查配置",
-    }
-    return messages.get(code, "百度翻译服务暂时不可用")
+    code = str(payload.get("error_code") or "").strip()
+    msg = str(payload.get("error_msg") or "").strip()
+    detail = BAIDU_TRANSLATE_ERROR_MESSAGES.get(code)
+    if detail is None:
+        detail = "未知错误" + (f"（{msg}）" if msg else "")
+    return f"百度翻译错误 {code}：{detail}"
 
 
 @app.post("/api/translate")
@@ -1810,7 +1840,7 @@ def translate(body: TranslateBody):
     appid = settings["baidu_translate_appid"]
     secret = settings["baidu_translate_secret"]
     if not appid or not secret:
-        raise HTTPException(428, "尚未配置百度翻译，请先在设置中填写 APP ID 和密钥")
+        raise HTTPException(428, "尚未配置百度翻译：请在设置页填写 APP ID 和密钥，或设置环境变量 BAIDU_TRANSLATE_APPID / BAIDU_TRANSLATE_SECRET")
 
     global _translate_last_request
     with _translate_lock:
@@ -1838,9 +1868,11 @@ def translate(body: TranslateBody):
         with opener.open(request, timeout=BAIDU_TRANSLATE_TIMEOUT) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise HTTPException(502, "百度翻译服务返回错误") from exc
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise HTTPException(502, "百度翻译服务连接失败，请检查代理或稍后重试")
+        raise HTTPException(502, f"百度翻译请求失败（HTTP {exc.code}），请检查代理或网络") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        proxy = _effective_proxy(settings)
+        hint = f"（当前代理 {proxy}）" if proxy else "（当前未配置代理，直连）"
+        raise HTTPException(502, f"百度翻译服务连接失败，请检查网络或代理后重试 {hint}") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(502, "百度翻译服务返回无效结果") from exc
     if payload.get("error_code"):
