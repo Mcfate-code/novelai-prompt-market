@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-08-27T02:50:44Z",
+  "generated_at": "2026-08-27T12:16:35Z",
   "decision": {
     "model": "BAAI/bge-m3",
-    "reason": "composite=0.7036 (0.4*zh_recall10 + 0.3*slot_top1 + 0.3*neighbor_prec10), avg_latency=0.5534s"
+    "reason": "composite=0.7653 (0.4*zh_recall10 + 0.3*slot_top1 + 0.3*neighbor_recall10), avg_latency=0.5534s"
   },
   "models": {
     "BAAI/bge-m3": {
@@ -17,8 +17,14 @@
           "top3": 1.0
         },
         "neighbor": {
-          "precision_10": 0.0881,
-          "must_avoid_violation_rate": 0.3051
+          "must_include_recall_10": 0.2938,
+          "same_slot_purity_10": 0.8119,
+          "must_avoid_violation_rate": 0.3051,
+          "queries_evaluated": 59,
+          "must_include_found": 52,
+          "must_include_total": 177,
+          "C_entries": 64,
+          "C_missing_query_tags": 5
         },
         "fixtures": {
           "A_entries": 219,
@@ -51,8 +57,15 @@
           "top3": 0.9013
         },
         "neighbor": {
-          "precision_10": 0.0881,
-          "must_avoid_violation_rate": 0.2712
+          "must_include_recall_10": 0.2938,
+          "same_slot_purity_10": 0.8051,
+          "must_avoid_violation_rate": 0.2712,
+          "queries_evaluated": 59,
+          "must_include_found": 52,
+          "must_include_total": 177,
+          "C_entries": 64,
+          "C_missing_query_tags": 5,
+          "cache_misses": 8
         },
         "fixtures": {
           "A_entries": 219,

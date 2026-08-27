@@ -1,5 +1,22 @@
 # Embedding Prior Review
 
+> **Semantic Neighbor 语义 = 同义/同类（alternative, same-class）**，由 embedding 相似度 +
+> 元数据节点归属推导，**不是**标签共现（co-occurrence/NPMI）。`relation_type`
+> （same_slot / same_parent / cross_slot）表达「同槽位/同父槽位/跨槽位」的语义替代关系。
+
+## 0. Corrected Neighbor Quality Metrics（bge-m3，直接读自离线制品）
+
+| metric | value |
+|---|---|
+| Must-Include Recall@10 | 0.2938（命中 52 / 目标 177） |
+| Same-Slot Purity@10 | 0.8119（479 / 590） |
+| Must-Avoid Violation Rate | 0.3051（18 / 59） |
+| C-fixture 已评估条目 | 59 / 64（5 个 query tag 不在制品中） |
+
+> 注：旧版报告的 `neighbor Precision@10 = found/10`（≈0.0881）为误导性指标，已移除；
+> 上表为修正后的真实口径（§5.1/§5.2），数值直接从 `prior_semantic_neighbor` 行计算，
+> 未调用 SiliconFlow API。
+
 ## 1. Semantic Neighbor Top-10 Validation (§49)
 
 - **blue eyes**: red eyes(0.925), green eyes(0.915), white eyes(0.909), brown eyes(0.904), yellow eyes(0.903), purple eyes(0.900), grey eyes(0.891), black eyes(0.891), multicolored eyes(0.885), aqua eyes(0.882)

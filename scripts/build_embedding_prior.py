@@ -348,7 +348,138 @@ def _family_ranks(query_vec, slot_vectors, node_family, families):
     return [f for f, _ in ranked]
 
 
-def run_benchmark(model, args, corpus_keys, corpus_matrix, slot_defs, embed_fn):
+# --------------------------------------------------------------------------- #
+# 近邻质量指标（§5.1 修正版 —— 替代伪造的 precision@10 = found/10）
+# --------------------------------------------------------------------------- #
+def compute_neighbor_metrics(neighbor_tags, relation_types, must_include, must_avoid):
+    """单条 query 的修正近邻指标（纯函数，无网络、无 IO）。
+
+    - ``must_include_recall_10``：top-K 命中 ``must_include`` 目标的比例（真 recall，0..1）。
+    - ``same_slot_purity_10``：top-K 中 ``relation_type ∈ {same_slot, same_parent}`` 的比例。
+    - ``must_avoid_violation``：布尔，top-K 是否含任一 ``must_avoid``。
+
+    供 benchmark 代码路径、离线报告重算与单元测试三者复用，保证口径一致。
+    """
+    top_set = set(neighbor_tags)
+    total = len(must_include)
+    found = sum(1 for t in must_include if t in top_set)
+    recall = (found / total) if total else 0.0
+    on_slot = sum(1 for r in relation_types if r in ("same_slot", "same_parent"))
+    purity = (on_slot / len(relation_types)) if relation_types else 0.0
+    violation = any(t in top_set for t in must_avoid)
+    return {
+        "must_include_found": found,
+        "must_include_total": total,
+        "must_include_recall_10": recall,
+        "same_slot_count": on_slot,
+        "same_slot_total": len(relation_types),
+        "same_slot_purity_10": purity,
+        "must_avoid_violation": violation,
+    }
+
+
+def aggregate_neighbor_metrics(rows):
+    """跨 query 宏聚合（§5.2 定义：总命中/总目标，而非逐条平均）。
+
+    - recall_10   = sum(found) / sum(total must_include targets)
+    - purity_10   = sum(on_slot) / sum(top-K neighbors)
+    - violation   = 含 must_avoid 的 query 占比
+    """
+    found = sum(r["must_include_found"] for r in rows)
+    total = sum(r["must_include_total"] for r in rows)
+    on_slot = sum(r["same_slot_count"] for r in rows)
+    n_neigh = sum(r["same_slot_total"] for r in rows)
+    n_viol = sum(1 for r in rows if r["must_avoid_violation"])
+    n = len(rows)
+    return {
+        "must_include_recall_10": round((found / total), 4) if total else 0.0,
+        "same_slot_purity_10": round((on_slot / n_neigh), 4) if n_neigh else 0.0,
+        "must_avoid_violation_rate": round((n_viol / n), 4) if n else 0.0,
+        "queries_evaluated": n,
+        "must_include_found": found,
+        "must_include_total": total,
+    }
+
+
+def compute_c_metrics_from_artifact(db_path, c_entries):
+    """直接从离线制品 ``prior_semantic_neighbor`` 读 C-fixture 的 Top-10 近邻（按
+    similarity 降序）及其已存 ``relation_type``，计算修正近邻指标（§5.4 首选路径，零 API）。
+
+    返回与 ``aggregate_neighbor_metrics`` 同构的聚合 dict，并附带 C 覆盖信息。
+    """
+    conn = db.get_conn(db_path)
+    try:
+        rows = []
+        missing = 0
+        for entry in c_entries:
+            tag = tag_enrichment.normalize_tag(entry["tag"])
+            neigh = conn.execute(
+                "SELECT dst_tag, relation_type FROM prior_semantic_neighbor "
+                "WHERE src_tag=? ORDER BY similarity DESC LIMIT 10",
+                (tag,),
+            ).fetchall()
+            if not neigh:
+                missing += 1
+                continue
+            neighbor_tags = [r["dst_tag"] for r in neigh]
+            relation_types = [r["relation_type"] for r in neigh]
+            must_include = [tag_enrichment.normalize_tag(t) for t in entry.get("must_include", [])]
+            must_avoid = [tag_enrichment.normalize_tag(t) for t in entry.get("must_avoid", [])]
+            rows.append(compute_neighbor_metrics(
+                neighbor_tags, relation_types, must_include, must_avoid))
+    finally:
+        conn.close()
+    agg = aggregate_neighbor_metrics(rows)
+    agg["C_entries"] = len(c_entries)
+    agg["C_missing_query_tags"] = missing
+    return agg
+
+
+def compute_corrected_c_metrics(corpus_keys, corpus_matrix, slot_vectors, seed_map,
+                                parent_map, adult_set, metas, args, c_entries):
+    """对 C-fixture 计算修正近邻指标（真 recall / 纯度 / 违规率）。
+
+    近邻来自已 embedding 的 corpus_matrix（``_rank_topk``），relation_type 由元数据优先
+    的节点解析（``resolve_node`` → ``classify_relation``）派生。确定性、无网络。
+    """
+    corpus_index = {k: i for i, k in enumerate(corpus_keys)}
+    node_cache = {}
+
+    def node_of(tag):
+        if tag in node_cache:
+            return node_cache[tag]
+        idx = corpus_index.get(tag)
+        meta = metas.get(tag)
+        if idx is None or meta is None:
+            node_cache[tag] = "unknown"
+            return "unknown"
+        node_cache[tag] = resolve_node(
+            tag, meta, corpus_matrix[idx], slot_vectors, seed_map, adult_set,
+            args.min_similarity, args.min_margin)[0]
+        return node_cache[tag]
+
+    rows = []
+    missing = 0
+    for entry in c_entries:
+        tag = tag_enrichment.normalize_tag(entry["tag"])
+        qi = corpus_index.get(tag)
+        if qi is None:
+            missing += 1
+            continue
+        must_include = [tag_enrichment.normalize_tag(t) for t in entry.get("must_include", [])]
+        must_avoid = [tag_enrichment.normalize_tag(t) for t in entry.get("must_avoid", [])]
+        top10 = _rank_topk(corpus_matrix[qi], corpus_matrix, corpus_keys, 10, exclude_idx=qi)
+        src_node = node_of(tag)
+        rels = [classify_relation(src_node, node_of(d), parent_map) for d in top10]
+        rows.append(compute_neighbor_metrics(top10, rels, must_include, must_avoid))
+    agg = aggregate_neighbor_metrics(rows)
+    agg["C_entries"] = len(c_entries)
+    agg["C_missing_query_tags"] = missing
+    return agg
+
+
+def run_benchmark(model, args, corpus_keys, corpus_matrix, slot_defs, embed_fn,
+                  seed_map=None, parent_map=None, adult_set=None, metas=None):
     fixture = json.loads(Path(BENCHMARK_FIXTURE).read_text(encoding="utf-8"))
     # 槽位向量
     slot_vectors, _ = semantic_slots.embed_slot_vectors(slot_defs, embed_fn)
@@ -395,48 +526,63 @@ def run_benchmark(model, args, corpus_keys, corpus_matrix, slot_defs, embed_fn):
         top1 /= n_b
         top3 /= n_b
 
-    # Task C: neighbors（查询向量用该 tag 在 corpus 中的增强文本向量，排除自身）
+    # Task C: neighbors —— 修正指标（真 recall / 纯度 / 违规率，§5.1/§5.2）。
+    # relation_type 由元数据优先节点解析派生，绝不依赖相似度直接判定（与 build 一致）。
     c_entries = fixture.get("C_tag_neighbors", [])
-    c_tags = [tag_enrichment.normalize_tag(e["tag"]) for e in c_entries]
-    corpus_index = {k: i for i, k in enumerate(corpus_keys)}
-    prec_sum = 0.0
-    avoid_violations = 0
-    n_c = 0
-    missing_c = 0
-    for i, entry in enumerate(c_entries):
-        qi = corpus_index.get(c_tags[i])
-        if qi is None:
-            missing_c += 1
-            continue
-        must_include = [tag_enrichment.normalize_tag(t) for t in entry.get("must_include", [])]
-        must_avoid = [tag_enrichment.normalize_tag(t) for t in entry.get("must_avoid", [])]
-        top10 = _rank_topk(corpus_matrix[qi], corpus_matrix, corpus_keys, 10, exclude_idx=qi)
-        top10_set = set(top10)
-        found = sum(1 for t in must_include if t in top10_set)
-        prec_sum += found / 10.0
-        if any(t in top10_set for t in must_avoid):
-            avoid_violations += 1
-        n_c += 1
-    precision10 = (prec_sum / n_c) if n_c else 0.0
-    avoid_rate = (avoid_violations / n_c) if n_c else 0.0
+    neighbor = compute_corrected_c_metrics(
+        corpus_keys, corpus_matrix, slot_vectors, seed_map, parent_map,
+        adult_set, metas, args, c_entries,
+    ) if (seed_map and parent_map and adult_set and metas) else \
+        _neighbor_metrics_fallback(corpus_keys, corpus_matrix, c_entries)
+    missing_c = neighbor.get("C_missing_query_tags", len(c_entries))
 
     return {
         "zh_to_en": {"recall_1": round(recalls[1], 4), "recall_5": round(recalls[5], 4),
                      "recall_10": round(recalls[10], 4)},
         "slot": {"top1": round(top1, 4), "top3": round(top3, 4)},
-        "neighbor": {"precision_10": round(precision10, 4), "must_avoid_violation_rate": round(avoid_rate, 4)},
+        "neighbor": {
+            "must_include_recall_10": neighbor["must_include_recall_10"],
+            "same_slot_purity_10": neighbor["same_slot_purity_10"],
+            "must_avoid_violation_rate": neighbor["must_avoid_violation_rate"],
+        },
         "fixtures": {"A_entries": len(a_entries), "B_entries": len(b_entries),
                      "C_entries": len(c_entries), "A_missing_targets": missing_a,
                      "C_missing_targets": missing_c},
     }
 
 
+def _neighbor_metrics_fallback(corpus_keys, corpus_matrix, c_entries):
+    """无节点解析上下文时的 C 指标回退（仅计算 recall 与违规率，纯度置 0）。
+
+    正常 benchmark 路径会传入 seed_map/parent_map/adult_set/metas，不会走到这里；
+    保留回退是为了纯矩阵调用（如历史测试）不抛错。
+    """
+    corpus_index = {k: i for i, k in enumerate(corpus_keys)}
+    rows = []
+    missing = 0
+    for entry in c_entries:
+        tag = tag_enrichment.normalize_tag(entry["tag"])
+        qi = corpus_index.get(tag)
+        if qi is None:
+            missing += 1
+            continue
+        must_include = [tag_enrichment.normalize_tag(t) for t in entry.get("must_include", [])]
+        must_avoid = [tag_enrichment.normalize_tag(t) for t in entry.get("must_avoid", [])]
+        top10 = _rank_topk(corpus_matrix[qi], corpus_matrix, corpus_keys, 10, exclude_idx=qi)
+        rows.append(compute_neighbor_metrics(
+            top10, ["unknown"] * len(top10), must_include, must_avoid))
+    agg = aggregate_neighbor_metrics(rows)
+    agg["C_entries"] = len(c_entries)
+    agg["C_missing_query_tags"] = missing
+    return agg
+
+
 def model_decision(results, keys):
-    """§15 决策规则：加权复合分，平局比延迟。"""
+    """§15 决策规则：加权复合分，平局比延迟。neighbor 项改用修正后的 must_include_recall。"""
     def composite(r):
         zh = r["metrics"]["zh_to_en"]["recall_10"]
         slot = r["metrics"]["slot"]["top1"]
-        neigh = r["metrics"]["neighbor"]["precision_10"]
+        neigh = r["metrics"]["neighbor"]["must_include_recall_10"]
         return 0.4 * zh + 0.3 * slot + 0.3 * neigh
 
     def latency(r):
@@ -457,6 +603,29 @@ def model_decision(results, keys):
     return best
 
 
+def _stats_dict(r):
+    """把 ``live_probe`` + StatsCollector（或已扁平化的 stats dict）统一成扁平 stats dict。"""
+    live = r.get("live_probe") or {}
+    s = r.get("stats", {})
+    if isinstance(s, StatsCollector):
+        out = {
+            "avg_latency_s": live.get("avg_latency_s", round(s.avg_latency, 4)),
+            "error_rate": live.get("error_rate", round(s.error_rate, 4)),
+            "total_requests": live.get("total_requests", s.attempts),
+            "ok_requests": live.get("ok_requests", s.ok_attempts),
+            "failed_requests": live.get("failed_requests", s.failed_attempts),
+            "total_prompt_tokens": live.get("total_prompt_tokens", s.total_prompt_tokens),
+            "total_inputs": live.get("total_inputs"),
+        }
+    else:
+        out = dict(s)
+    for key in ("avg_latency_s", "error_rate", "total_requests", "ok_requests",
+                "failed_requests", "total_prompt_tokens", "total_inputs"):
+        if key in live and live[key] is not None:
+            out[key] = live[key]
+    return out
+
+
 def write_benchmark_reports(per_model, decision, decision_reason):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report = {
@@ -465,36 +634,32 @@ def write_benchmark_reports(per_model, decision, decision_reason):
         "models": {},
     }
     for k, r in per_model.items():
-        live = r.get("live_probe") or {}
-        stats = {
-            "avg_latency_s": live.get("avg_latency_s", round(r["stats"].avg_latency, 4)),
-            "error_rate": live.get("error_rate", round(r["stats"].error_rate, 4)),
-            "total_requests": live.get("total_requests", r["stats"].attempts),
-            "ok_requests": live.get("ok_requests", r["stats"].ok_attempts),
-            "failed_requests": live.get("failed_requests", r["stats"].failed_attempts),
-            "total_prompt_tokens": live.get("total_prompt_tokens", r["stats"].total_prompt_tokens),
-            "total_inputs": live.get("total_inputs"),
-        }
         report["models"][k] = {
             "metrics": r["metrics"],
-            "stats": stats,
-            "corpus_size": r["corpus_size"],
+            "stats": _stats_dict(r),
+            "corpus_size": r.get("corpus_size"),
         }
     (REPORTS_DIR / "embedding_model_benchmark.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     lines = ["# Embedding Model Benchmark", "",
              f"- Generated: {report['generated_at']}",
-             f"- Decision: **{decision}** — {decision_reason}", ""]
+             f"- Decision: **{decision}** — {decision_reason}",
+             "",
+             "> Semantic Neighbor 语义 = **同义/同类（alternative, same-class）**，",
+             "> 由 embedding 相似度 + 元数据节点归属推导，**不是**标签共现（co-occurrence/NPMI）。",
+             "> neighbor 指标为修正后的真实口径：Must-Include Recall@10 / Same-Slot Purity@10 /",
+             "> Must-Avoid Violation Rate（旧版 precision@10=found/10 已被移除）。",
+             ""]
     for k, r in per_model.items():
         m = r["metrics"]
         s = report["models"][k]["stats"]
         lines += [
             f"## {k}",
-            f"- corpus_size: {r['corpus_size']}",
+            f"- corpus_size: {r.get('corpus_size')}",
             f"- zh→en Recall@1/5/10: {m['zh_to_en']['recall_1']} / {m['zh_to_en']['recall_5']} / {m['zh_to_en']['recall_10']}",
             f"- slot Top1 / Top3: {m['slot']['top1']} / {m['slot']['top3']}",
-            f"- neighbor Precision@10: {m['neighbor']['precision_10']} (must_avoid violation {m['neighbor']['must_avoid_violation_rate']})",
+            f"- neighbor Must-Include Recall@10: {m['neighbor']['must_include_recall_10']} | Same-Slot Purity@10: {m['neighbor']['same_slot_purity_10']} | must_avoid violation rate: {m['neighbor']['must_avoid_violation_rate']}",
             f"- avg latency: {s['avg_latency_s']:.4f}s | error rate: {s['error_rate']:.4f} | requests: {s['total_requests']} (ok {s['ok_requests']}) | prompt tokens: {s['total_prompt_tokens']}",
             "",
         ]
@@ -508,6 +673,14 @@ def write_review_report(tag_rows, neighbors, sample_tags, validation_tags, bad_n
                         node_family, slot_defs):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     lines = ["# Embedding Prior Review", ""]
+
+    lines += [
+        "> **Semantic Neighbor 语义 = 同义/同类（alternative, same-class）**，",
+        "> 由 embedding 相似度 + 元数据节点归属推导，**不是**标签共现（co-occurrence/NPMI）。",
+        "> 邻居表 `prior_semantic_neighbor` 的 `relation_type`（same_slot/same_parent/cross_slot）",
+        "> 表达「同槽位/同父槽位/跨槽位」的语义替代关系，不表示「常与之一同出现」。",
+        "",
+    ]
 
     lines += ["## 1. Semantic Neighbor Top-10 Validation (§49)", ""]
     for t in validation_tags:
@@ -737,6 +910,96 @@ def dry_run(args):
     return
 
 
+def recompute_report_from_prior(args):
+    """离线重算 benchmark 报告的 neighbor 段（§5.4/§5.5，零 API）。
+
+    - ``BAAI/bge-m3``：直接从 ``data/offline_prompt_prior.sqlite`` 的
+      ``prior_semantic_neighbor`` 行读取 Top-10 近邻与 relation_type（§5.4 首选路径）。
+    - 其他模型：从 ``.build-cache/embedding-cache.sqlite`` 载入已缓存 embedding 重建
+      矩阵，元数据优先节点解析得到 relation_type。
+    绝不因此调用 API；缓存命中缺失（data drift）时跳过该 tag 并在报告中记录
+    ``cache_misses``。保留旧报告的 zh_to_en / slot / stats / corpus_size，仅替换
+    neighbor 段与决策理由（决策保持 bge-m3，§5.3）。
+    """
+    fixture = json.loads(Path(BENCHMARK_FIXTURE).read_text(encoding="utf-8"))
+    c_entries = fixture.get("C_tag_neighbors", [])
+    seed_map, parent_map = load_navigation()
+    conn = db.get_conn()
+    try:
+        adult_set = tag_enrichment.build_adult_set(conn)
+    finally:
+        conn.close()
+    slot_defs = semantic_slots.load_slots(SLOTS_PATH)
+
+    old_path = REPORTS_DIR / "embedding_model_benchmark.json"
+    if not old_path.exists():
+        raise SystemExit(f"[recompute] missing {old_path}")
+    old = json.loads(old_path.read_text(encoding="utf-8"))
+
+    cache = EmbeddingCache(args.cache_path)
+    corpus_state = {}
+
+    def _embed_from_cache(texts, model):
+        """返回 (vectors, usage)；命中缺失（drift）时跳过该条（绝不调 API）。"""
+        hits, miss = cache.get_cached(texts, model, args.pipeline_version)
+        dropped = len(miss)
+        if dropped:
+            print(f"[recompute] WARN: {dropped} cache miss for {model} (data drift), "
+                  f"skipping those tags — no API call", flush=True)
+        vectors = [np.asarray(v, dtype=np.float32) for v in hits if v is not None]
+        return vectors, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _corpus_for(model):
+        if "matrix" not in corpus_state:
+            records = enumerate_corpus(args.limit, retain_tags=set(seed_map))
+            tag_keys = [k for k, _ in records]
+            metas = {k: m for k, m in records}
+            enhanced = [enhanced_text_of(metas[k]) for k in tag_keys]
+            hits, _ = cache.get_cached(enhanced, model, args.pipeline_version)
+            dropped = sum(1 for v in hits if v is None)
+            # 对齐 keys 与 vectors：只有命中的 tag 才进入矩阵
+            kept_keys, kept_vecs = [], []
+            for k, v in zip(tag_keys, hits):
+                if v is not None:
+                    kept_keys.append(k)
+                    kept_vecs.append(np.asarray(v, dtype=np.float32))
+            matrix = np.vstack(kept_vecs).astype(np.float32)
+            slot_vectors, _ = semantic_slots.embed_slot_vectors(
+                slot_defs, lambda texts: _embed_from_cache(texts, model))
+            corpus_state.update(tag_keys=kept_keys, metas=metas, matrix=matrix,
+                                slot_vectors=slot_vectors, cache_misses=dropped)
+        return corpus_state
+
+    per_model = {}
+    for model, old_model in old.get("models", {}).items():
+        metrics = dict(old_model.get("metrics", {}))
+        if model == "BAAI/bge-m3":
+            neighbor = compute_c_metrics_from_artifact(Path(args.output), c_entries)
+        else:
+            st = _corpus_for(model)
+            neighbor = compute_corrected_c_metrics(
+                st["tag_keys"], st["matrix"], st["slot_vectors"], seed_map,
+                parent_map, adult_set, st["metas"], args, c_entries)
+            neighbor["cache_misses"] = st.get("cache_misses", 0)
+        metrics["neighbor"] = neighbor
+        per_model[model] = {
+            "metrics": metrics,
+            "stats": old_model.get("stats", {}),
+            "corpus_size": old_model.get("corpus_size"),
+        }
+        print(f"[recompute] {model}: {neighbor}", flush=True)
+
+    decision = old.get("decision", {}).get("model", "BAAI/bge-m3")
+    m = per_model[decision]["metrics"]
+    comp = (0.4 * m["zh_to_en"]["recall_10"] + 0.3 * m["slot"]["top1"]
+            + 0.3 * m["neighbor"]["must_include_recall_10"])
+    lat = per_model[decision]["stats"].get("avg_latency_s", 0.0)
+    reason = (f"composite={comp:.4f} (0.4*zh_recall10 + 0.3*slot_top1 + 0.3*neighbor_recall10), "
+              f"avg_latency={lat:.4f}s")
+    write_benchmark_reports(per_model, decision, reason)
+    print(f"[recompute] decision kept as {decision} — {reason}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="SiliconFlow embedding semantic prior build")
     ap.add_argument("--model", default="BAAI/bge-m3")
@@ -749,6 +1012,8 @@ def main():
     ap.add_argument("--output", default=str(DEFAULT_OUTPUT))
     ap.add_argument("--limit", type=int, default=0, help="0=full corpus; N>0=top-N by post_count")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--recompute-report", action="store_true",
+                    help="从离线制品/缓存重算 benchmark 报告 neighbor 段（零 API，§5.4）")
     ap.add_argument("--request-concurrency", type=int, default=3)
     ap.add_argument("--pipeline-version", default=DEFAULT_PIPELINE_VERSION)
     ap.add_argument("--min-similarity", type=float, default=semantic_slots.DEFAULT_MIN_SIMILARITY)
@@ -759,6 +1024,10 @@ def main():
 
     if args.dry_run:
         dry_run(args)
+        return
+
+    if args.recompute_report:
+        recompute_report_from_prior(args)
         return
 
     slot_defs = semantic_slots.load_slots(SLOTS_PATH)
@@ -789,7 +1058,9 @@ def main():
             def embed_fn(texts):
                 return embed_texts_cached(texts, model, cache, args, stats)
 
-            metrics = run_benchmark(model, args, tag_keys, matrix, slot_defs, embed_fn)
+            metrics = run_benchmark(model, args, tag_keys, matrix, slot_defs, embed_fn,
+                                    seed_map=seed_map, parent_map=parent_map,
+                                    adult_set=adult_set, metas=metas)
             live = probe_live(model, args)
             per_model[model] = {"metrics": metrics, "stats": stats,
                                 "live_probe": live, "corpus_size": len(tag_keys)}
@@ -797,7 +1068,7 @@ def main():
             print(f"[benchmark] {model} live probe: {live}", flush=True)
 
         decision, score, latency = model_decision(per_model, models)
-        reason = (f"composite={score:.4f} (0.4*zh_recall10 + 0.3*slot_top1 + 0.3*neighbor_prec10), "
+        reason = (f"composite={score:.4f} (0.4*zh_recall10 + 0.3*slot_top1 + 0.3*neighbor_recall10), "
                   f"avg_latency={latency:.4f}s")
         if args.compare_model:
             write_benchmark_reports(per_model, decision, reason)
