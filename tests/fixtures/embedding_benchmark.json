@@ -1,0 +1,2896 @@
+{
+ "_comment": "SiliconFlow embedding benchmark fixtures. Tags verified against data/tags.sqlite; missing targets are reported (not fatal).",
+ "A_zh_to_en": [
+  {
+   "query_zh": "蓝眼睛",
+   "accepted_targets": [
+    "blue eyes"
+   ]
+  },
+  {
+   "query_zh": "红眼睛",
+   "accepted_targets": [
+    "red eyes"
+   ]
+  },
+  {
+   "query_zh": "绿眼睛",
+   "accepted_targets": [
+    "green eyes"
+   ]
+  },
+  {
+   "query_zh": "棕眼睛",
+   "accepted_targets": [
+    "brown eyes"
+   ]
+  },
+  {
+   "query_zh": "黄眼睛",
+   "accepted_targets": [
+    "yellow eyes"
+   ]
+  },
+  {
+   "query_zh": "紫眼睛",
+   "accepted_targets": [
+    "purple eyes"
+   ]
+  },
+  {
+   "query_zh": "粉眼睛",
+   "accepted_targets": [
+    "pink eyes"
+   ]
+  },
+  {
+   "query_zh": "灰眼睛",
+   "accepted_targets": [
+    "grey eyes"
+   ]
+  },
+  {
+   "query_zh": "黑眼睛",
+   "accepted_targets": [
+    "black eyes"
+   ]
+  },
+  {
+   "query_zh": "橙眼睛",
+   "accepted_targets": [
+    "orange eyes"
+   ]
+  },
+  {
+   "query_zh": "水色眼睛",
+   "accepted_targets": [
+    "aqua eyes"
+   ]
+  },
+  {
+   "query_zh": "异色瞳",
+   "accepted_targets": [
+    "heterochromia"
+   ]
+  },
+  {
+   "query_zh": "闭眼",
+   "accepted_targets": [
+    "closed eyes"
+   ]
+  },
+  {
+   "query_zh": "半闭眼",
+   "accepted_targets": [
+    "half-closed eyes"
+   ]
+  },
+  {
+   "query_zh": "发光眼",
+   "accepted_targets": [
+    "glowing eyes"
+   ]
+  },
+  {
+   "query_zh": "多色眼",
+   "accepted_targets": [
+    "multicolored eyes"
+   ]
+  },
+  {
+   "query_zh": "长发",
+   "accepted_targets": [
+    "long hair"
+   ]
+  },
+  {
+   "query_zh": "短发",
+   "accepted_targets": [
+    "short hair"
+   ]
+  },
+  {
+   "query_zh": "马尾",
+   "accepted_targets": [
+    "ponytail"
+   ]
+  },
+  {
+   "query_zh": "双马尾",
+   "accepted_targets": [
+    "twintails"
+   ]
+  },
+  {
+   "query_zh": "侧马尾",
+   "accepted_targets": [
+    "side ponytail"
+   ]
+  },
+  {
+   "query_zh": "辫子",
+   "accepted_targets": [
+    "braid"
+   ]
+  },
+  {
+   "query_zh": "金发",
+   "accepted_targets": [
+    "blonde hair"
+   ]
+  },
+  {
+   "query_zh": "黑发",
+   "accepted_targets": [
+    "black hair"
+   ]
+  },
+  {
+   "query_zh": "棕发",
+   "accepted_targets": [
+    "brown hair"
+   ]
+  },
+  {
+   "query_zh": "红发",
+   "accepted_targets": [
+    "red hair"
+   ]
+  },
+  {
+   "query_zh": "粉发",
+   "accepted_targets": [
+    "pink hair"
+   ]
+  },
+  {
+   "query_zh": "白发",
+   "accepted_targets": [
+    "white hair"
+   ]
+  },
+  {
+   "query_zh": "银发",
+   "accepted_targets": [
+    "silver hair"
+   ]
+  },
+  {
+   "query_zh": "绿发",
+   "accepted_targets": [
+    "green hair"
+   ]
+  },
+  {
+   "query_zh": "蓝发",
+   "accepted_targets": [
+    "blue hair"
+   ]
+  },
+  {
+   "query_zh": "紫发",
+   "accepted_targets": [
+    "purple hair"
+   ]
+  },
+  {
+   "query_zh": "灰发",
+   "accepted_targets": [
+    "grey hair"
+   ]
+  },
+  {
+   "query_zh": "波波头",
+   "accepted_targets": [
+    "bob cut"
+   ]
+  },
+  {
+   "query_zh": "姬发式",
+   "accepted_targets": [
+    "hime cut"
+   ]
+  },
+  {
+   "query_zh": "呆毛",
+   "accepted_targets": [
+    "ahoge"
+   ]
+  },
+  {
+   "query_zh": "发髻",
+   "accepted_targets": [
+    "hair bun"
+   ]
+  },
+  {
+   "query_zh": "发带",
+   "accepted_targets": [
+    "hair ribbon"
+   ]
+  },
+  {
+   "query_zh": "发饰",
+   "accepted_targets": [
+    "hair ornament"
+   ]
+  },
+  {
+   "query_zh": "法式辫",
+   "accepted_targets": [
+    "french braid"
+   ]
+  },
+  {
+   "query_zh": "微笑",
+   "accepted_targets": [
+    "smile"
+   ]
+  },
+  {
+   "query_zh": "脸红",
+   "accepted_targets": [
+    "blush"
+   ]
+  },
+  {
+   "query_zh": "哭泣",
+   "accepted_targets": [
+    "crying"
+   ]
+  },
+  {
+   "query_zh": "生气",
+   "accepted_targets": [
+    "angry"
+   ]
+  },
+  {
+   "query_zh": "悲伤",
+   "accepted_targets": [
+    "sad"
+   ]
+  },
+  {
+   "query_zh": "开心",
+   "accepted_targets": [
+    "happy"
+   ]
+  },
+  {
+   "query_zh": "惊讶",
+   "accepted_targets": [
+    "surprised"
+   ]
+  },
+  {
+   "query_zh": "尴尬",
+   "accepted_targets": [
+    "embarrassed"
+   ]
+  },
+  {
+   "query_zh": "害羞的表情",
+   "accepted_targets": [
+    "blush",
+    "shy",
+    "embarrassed"
+   ]
+  },
+  {
+   "query_zh": "严肃",
+   "accepted_targets": [
+    "serious"
+   ]
+  },
+  {
+   "query_zh": "露齿笑",
+   "accepted_targets": [
+    "grin"
+   ]
+  },
+  {
+   "query_zh": "皱眉",
+   "accepted_targets": [
+    "frown"
+   ]
+  },
+  {
+   "query_zh": "吐舌",
+   "accepted_targets": [
+    "tongue out"
+   ]
+  },
+  {
+   "query_zh": "泪水",
+   "accepted_targets": [
+    "tears"
+   ]
+  },
+  {
+   "query_zh": "闭嘴",
+   "accepted_targets": [
+    "closed mouth"
+   ]
+  },
+  {
+   "query_zh": "撅嘴",
+   "accepted_targets": [
+    "pout"
+   ]
+  },
+  {
+   "query_zh": "坏笑",
+   "accepted_targets": [
+    "smirk"
+   ]
+  },
+  {
+   "query_zh": "大笑",
+   "accepted_targets": [
+    "laughing"
+   ]
+  },
+  {
+   "query_zh": "困倦",
+   "accepted_targets": [
+    "sleepy"
+   ]
+  },
+  {
+   "query_zh": "张嘴",
+   "accepted_targets": [
+    "open mouth"
+   ]
+  },
+  {
+   "query_zh": "跪着",
+   "accepted_targets": [
+    "kneeling"
+   ]
+  },
+  {
+   "query_zh": "站立",
+   "accepted_targets": [
+    "standing"
+   ]
+  },
+  {
+   "query_zh": "坐着",
+   "accepted_targets": [
+    "sitting"
+   ]
+  },
+  {
+   "query_zh": "躺着",
+   "accepted_targets": [
+    "lying"
+   ]
+  },
+  {
+   "query_zh": "蹲着",
+   "accepted_targets": [
+    "squatting"
+   ]
+  },
+  {
+   "query_zh": "举手",
+   "accepted_targets": [
+    "hands up"
+   ]
+  },
+  {
+   "query_zh": "双臂上举",
+   "accepted_targets": [
+    "arms up"
+   ]
+  },
+  {
+   "query_zh": "双手叉腰",
+   "accepted_targets": [
+    "hands on hips"
+   ]
+  },
+  {
+   "query_zh": "交叉双臂",
+   "accepted_targets": [
+    "crossed arms"
+   ]
+  },
+  {
+   "query_zh": "前倾",
+   "accepted_targets": [
+    "leaning forward"
+   ]
+  },
+  {
+   "query_zh": "回望",
+   "accepted_targets": [
+    "looking back"
+   ]
+  },
+  {
+   "query_zh": "看向观众",
+   "accepted_targets": [
+    "looking at viewer"
+   ]
+  },
+  {
+   "query_zh": "看向别处",
+   "accepted_targets": [
+    "looking away"
+   ]
+  },
+  {
+   "query_zh": "向上看",
+   "accepted_targets": [
+    "looking up"
+   ]
+  },
+  {
+   "query_zh": "向下看",
+   "accepted_targets": [
+    "looking down"
+   ]
+  },
+  {
+   "query_zh": "走路",
+   "accepted_targets": [
+    "walking"
+   ]
+  },
+  {
+   "query_zh": "奔跑",
+   "accepted_targets": [
+    "running"
+   ]
+  },
+  {
+   "query_zh": "白色连衣裙",
+   "accepted_targets": [
+    "white dress"
+   ]
+  },
+  {
+   "query_zh": "连衣裙",
+   "accepted_targets": [
+    "dress"
+   ]
+  },
+  {
+   "query_zh": "裙子",
+   "accepted_targets": [
+    "skirt"
+   ]
+  },
+  {
+   "query_zh": "校服",
+   "accepted_targets": [
+    "school uniform"
+   ]
+  },
+  {
+   "query_zh": "白衬衫",
+   "accepted_targets": [
+    "white shirt"
+   ]
+  },
+  {
+   "query_zh": "T恤",
+   "accepted_targets": [
+    "t-shirt"
+   ]
+  },
+  {
+   "query_zh": "女士衬衫",
+   "accepted_targets": [
+    "blouse"
+   ]
+  },
+  {
+   "query_zh": "毛衣",
+   "accepted_targets": [
+    "sweater"
+   ]
+  },
+  {
+   "query_zh": "连帽卫衣",
+   "accepted_targets": [
+    "hoodie"
+   ]
+  },
+  {
+   "query_zh": "短裤",
+   "accepted_targets": [
+    "shorts"
+   ]
+  },
+  {
+   "query_zh": "裤子",
+   "accepted_targets": [
+    "pants"
+   ]
+  },
+  {
+   "query_zh": "牛仔裤",
+   "accepted_targets": [
+    "jeans"
+   ]
+  },
+  {
+   "query_zh": "夹克",
+   "accepted_targets": [
+    "jacket"
+   ]
+  },
+  {
+   "query_zh": "外套",
+   "accepted_targets": [
+    "coat"
+   ]
+  },
+  {
+   "query_zh": "西装",
+   "accepted_targets": [
+    "suit"
+   ]
+  },
+  {
+   "query_zh": "鞋子",
+   "accepted_targets": [
+    "shoes"
+   ]
+  },
+  {
+   "query_zh": "靴子",
+   "accepted_targets": [
+    "boots"
+   ]
+  },
+  {
+   "query_zh": "运动鞋",
+   "accepted_targets": [
+    "sneakers"
+   ]
+  },
+  {
+   "query_zh": "赤脚",
+   "accepted_targets": [
+    "barefoot"
+   ]
+  },
+  {
+   "query_zh": "泳装",
+   "accepted_targets": [
+    "swimsuit"
+   ]
+  },
+  {
+   "query_zh": "比基尼",
+   "accepted_targets": [
+    "bikini"
+   ]
+  },
+  {
+   "query_zh": "和服",
+   "accepted_targets": [
+    "kimono"
+   ]
+  },
+  {
+   "query_zh": "睡衣",
+   "accepted_targets": [
+    "pajamas"
+   ]
+  },
+  {
+   "query_zh": "围裙",
+   "accepted_targets": [
+    "apron"
+   ]
+  },
+  {
+   "query_zh": "眼镜",
+   "accepted_targets": [
+    "glasses"
+   ]
+  },
+  {
+   "query_zh": "耳环",
+   "accepted_targets": [
+    "earrings"
+   ]
+  },
+  {
+   "query_zh": "项链",
+   "accepted_targets": [
+    "necklace"
+   ]
+  },
+  {
+   "query_zh": "颈圈",
+   "accepted_targets": [
+    "choker"
+   ]
+  },
+  {
+   "query_zh": "丝带",
+   "accepted_targets": [
+    "ribbon"
+   ]
+  },
+  {
+   "query_zh": "围巾",
+   "accepted_targets": [
+    "scarf"
+   ]
+  },
+  {
+   "query_zh": "棒球帽",
+   "accepted_targets": [
+    "cap"
+   ]
+  },
+  {
+   "query_zh": "高礼帽",
+   "accepted_targets": [
+    "top hat"
+   ]
+  },
+  {
+   "query_zh": "手套",
+   "accepted_targets": [
+    "gloves"
+   ]
+  },
+  {
+   "query_zh": "手表",
+   "accepted_targets": [
+    "watch"
+   ]
+  },
+  {
+   "query_zh": "戒指",
+   "accepted_targets": [
+    "ring"
+   ]
+  },
+  {
+   "query_zh": "腰带",
+   "accepted_targets": [
+    "belt"
+   ]
+  },
+  {
+   "query_zh": "背包",
+   "accepted_targets": [
+    "backpack"
+   ]
+  },
+  {
+   "query_zh": "发夹",
+   "accepted_targets": [
+    "hairclip"
+   ]
+  },
+  {
+   "query_zh": "皇冠",
+   "accepted_targets": [
+    "crown"
+   ]
+  },
+  {
+   "query_zh": "头带",
+   "accepted_targets": [
+    "headband"
+   ]
+  },
+  {
+   "query_zh": "雀斑",
+   "accepted_targets": [
+    "freckles"
+   ]
+  },
+  {
+   "query_zh": "伤疤",
+   "accepted_targets": [
+    "scar"
+   ]
+  },
+  {
+   "query_zh": "痣",
+   "accepted_targets": [
+    "mole"
+   ]
+  },
+  {
+   "query_zh": "卧室",
+   "accepted_targets": [
+    "bedroom"
+   ]
+  },
+  {
+   "query_zh": "咖啡馆",
+   "accepted_targets": [
+    "cafe"
+   ]
+  },
+  {
+   "query_zh": "教室",
+   "accepted_targets": [
+    "classroom"
+   ]
+  },
+  {
+   "query_zh": "厨房",
+   "accepted_targets": [
+    "kitchen"
+   ]
+  },
+  {
+   "query_zh": "浴室",
+   "accepted_targets": [
+    "bathroom"
+   ]
+  },
+  {
+   "query_zh": "图书馆",
+   "accepted_targets": [
+    "library"
+   ]
+  },
+  {
+   "query_zh": "学校",
+   "accepted_targets": [
+    "school"
+   ]
+  },
+  {
+   "query_zh": "室内",
+   "accepted_targets": [
+    "indoors"
+   ]
+  },
+  {
+   "query_zh": "森林",
+   "accepted_targets": [
+    "forest"
+   ]
+  },
+  {
+   "query_zh": "海滩",
+   "accepted_targets": [
+    "beach"
+   ]
+  },
+  {
+   "query_zh": "街道",
+   "accepted_targets": [
+    "street"
+   ]
+  },
+  {
+   "query_zh": "城市",
+   "accepted_targets": [
+    "city"
+   ]
+  },
+  {
+   "query_zh": "山",
+   "accepted_targets": [
+    "mountain"
+   ]
+  },
+  {
+   "query_zh": "天空",
+   "accepted_targets": [
+    "sky"
+   ]
+  },
+  {
+   "query_zh": "公园",
+   "accepted_targets": [
+    "park"
+   ]
+  },
+  {
+   "query_zh": "花园",
+   "accepted_targets": [
+    "garden"
+   ]
+  },
+  {
+   "query_zh": "河流",
+   "accepted_targets": [
+    "river"
+   ]
+  },
+  {
+   "query_zh": "湖泊",
+   "accepted_targets": [
+    "lake"
+   ]
+  },
+  {
+   "query_zh": "大海",
+   "accepted_targets": [
+    "sea"
+   ]
+  },
+  {
+   "query_zh": "屋顶",
+   "accepted_targets": [
+    "rooftop"
+   ]
+  },
+  {
+   "query_zh": "火车站",
+   "accepted_targets": [
+    "train station"
+   ]
+  },
+  {
+   "query_zh": "神社",
+   "accepted_targets": [
+    "shrine"
+   ]
+  },
+  {
+   "query_zh": "室外",
+   "accepted_targets": [
+    "outdoors"
+   ]
+  },
+  {
+   "query_zh": "阳光",
+   "accepted_targets": [
+    "sunlight"
+   ]
+  },
+  {
+   "query_zh": "月光",
+   "accepted_targets": [
+    "moonlight"
+   ]
+  },
+  {
+   "query_zh": "黄金时刻",
+   "accepted_targets": [
+    "golden hour"
+   ]
+  },
+  {
+   "query_zh": "霓虹灯",
+   "accepted_targets": [
+    "neon lights"
+   ]
+  },
+  {
+   "query_zh": "烛光",
+   "accepted_targets": [
+    "candlelight"
+   ]
+  },
+  {
+   "query_zh": "轮廓光",
+   "accepted_targets": [
+    "rim light"
+   ]
+  },
+  {
+   "query_zh": "夜晚",
+   "accepted_targets": [
+    "night"
+   ]
+  },
+  {
+   "query_zh": "白天",
+   "accepted_targets": [
+    "day"
+   ]
+  },
+  {
+   "query_zh": "日落",
+   "accepted_targets": [
+    "sunset"
+   ]
+  },
+  {
+   "query_zh": "黄昏",
+   "accepted_targets": [
+    "dusk"
+   ]
+  },
+  {
+   "query_zh": "黎明",
+   "accepted_targets": [
+    "dawn"
+   ]
+  },
+  {
+   "query_zh": "烟花",
+   "accepted_targets": [
+    "fireworks"
+   ]
+  },
+  {
+   "query_zh": "灯笼",
+   "accepted_targets": [
+    "lantern"
+   ]
+  },
+  {
+   "query_zh": "星光",
+   "accepted_targets": [
+    "starlight"
+   ]
+  },
+  {
+   "query_zh": "冬天",
+   "accepted_targets": [
+    "winter"
+   ]
+  },
+  {
+   "query_zh": "夏天",
+   "accepted_targets": [
+    "summer"
+   ]
+  },
+  {
+   "query_zh": "春天",
+   "accepted_targets": [
+    "spring"
+   ]
+  },
+  {
+   "query_zh": "秋天",
+   "accepted_targets": [
+    "autumn"
+   ]
+  },
+  {
+   "query_zh": "雪",
+   "accepted_targets": [
+    "snow"
+   ]
+  },
+  {
+   "query_zh": "雨",
+   "accepted_targets": [
+    "rain"
+   ]
+  },
+  {
+   "query_zh": "多云",
+   "accepted_targets": [
+    "cloudy"
+   ]
+  },
+  {
+   "query_zh": "星空",
+   "accepted_targets": [
+    "starry sky"
+   ]
+  },
+  {
+   "query_zh": "闪电",
+   "accepted_targets": [
+    "lightning"
+   ]
+  },
+  {
+   "query_zh": "雾",
+   "accepted_targets": [
+    "fog"
+   ]
+  },
+  {
+   "query_zh": "杰作",
+   "accepted_targets": [
+    "masterpiece"
+   ]
+  },
+  {
+   "query_zh": "最佳画质",
+   "accepted_targets": [
+    "best quality"
+   ]
+  },
+  {
+   "query_zh": "动漫风格",
+   "accepted_targets": [
+    "anime style"
+   ]
+  },
+  {
+   "query_zh": "线稿",
+   "accepted_targets": [
+    "lineart"
+   ]
+  },
+  {
+   "query_zh": "平涂",
+   "accepted_targets": [
+    "flat color"
+   ]
+  },
+  {
+   "query_zh": "水彩",
+   "accepted_targets": [
+    "watercolor"
+   ]
+  },
+  {
+   "query_zh": "素描",
+   "accepted_targets": [
+    "sketch"
+   ]
+  },
+  {
+   "query_zh": "像素画",
+   "accepted_targets": [
+    "pixel art"
+   ]
+  },
+  {
+   "query_zh": "油画",
+   "accepted_targets": [
+    "oil painting"
+   ]
+  },
+  {
+   "query_zh": "单色",
+   "accepted_targets": [
+    "monochrome"
+   ]
+  },
+  {
+   "query_zh": "鲜艳色",
+   "accepted_targets": [
+    "vivid colors"
+   ]
+  },
+  {
+   "query_zh": "粉彩色",
+   "accepted_targets": [
+    "pastel colors"
+   ]
+  },
+  {
+   "query_zh": "肖像",
+   "accepted_targets": [
+    "portrait"
+   ]
+  },
+  {
+   "query_zh": "特写",
+   "accepted_targets": [
+    "close-up"
+   ]
+  },
+  {
+   "query_zh": "全身",
+   "accepted_targets": [
+    "full body"
+   ]
+  },
+  {
+   "query_zh": "牛仔镜头",
+   "accepted_targets": [
+    "cowboy shot"
+   ]
+  },
+  {
+   "query_zh": "俯视",
+   "accepted_targets": [
+    "from above"
+   ]
+  },
+  {
+   "query_zh": "仰视",
+   "accepted_targets": [
+    "from below"
+   ]
+  },
+  {
+   "query_zh": "倾斜角度",
+   "accepted_targets": [
+    "dutch angle"
+   ]
+  },
+  {
+   "query_zh": "广角",
+   "accepted_targets": [
+    "wide shot"
+   ]
+  },
+  {
+   "query_zh": "侧脸",
+   "accepted_targets": [
+    "profile"
+   ]
+  },
+  {
+   "query_zh": "四分之三侧",
+   "accepted_targets": [
+    "three-quarter view"
+   ]
+  },
+  {
+   "query_zh": "面部特写",
+   "accepted_targets": [
+    "face focus"
+   ]
+  },
+  {
+   "query_zh": "上半身",
+   "accepted_targets": [
+    "upper body"
+   ]
+  },
+  {
+   "query_zh": "露肩",
+   "accepted_targets": [
+    "bare shoulders"
+   ]
+  },
+  {
+   "query_zh": "苗条",
+   "accepted_targets": [
+    "slim"
+   ]
+  },
+  {
+   "query_zh": "丰满",
+   "accepted_targets": [
+    "curvy"
+   ]
+  },
+  {
+   "query_zh": "肌肉发达",
+   "accepted_targets": [
+    "muscular"
+   ]
+  },
+  {
+   "query_zh": "高大",
+   "accepted_targets": [
+    "tall"
+   ]
+  },
+  {
+   "query_zh": "娇小",
+   "accepted_targets": [
+    "petite"
+   ]
+  },
+  {
+   "query_zh": "矮小",
+   "accepted_targets": [
+    "short"
+   ]
+  },
+  {
+   "query_zh": "平胸",
+   "accepted_targets": [
+    "flat chest"
+   ]
+  },
+  {
+   "query_zh": "苍白皮肤",
+   "accepted_targets": [
+    "pale skin"
+   ]
+  },
+  {
+   "query_zh": "床",
+   "accepted_targets": [
+    "bed"
+   ]
+  },
+  {
+   "query_zh": "枕头",
+   "accepted_targets": [
+    "pillow"
+   ]
+  },
+  {
+   "query_zh": "灯",
+   "accepted_targets": [
+    "lamp"
+   ]
+  },
+  {
+   "query_zh": "桌子",
+   "accepted_targets": [
+    "table"
+   ]
+  },
+  {
+   "query_zh": "椅子",
+   "accepted_targets": [
+    "chair"
+   ]
+  },
+  {
+   "query_zh": "雨伞",
+   "accepted_targets": [
+    "umbrella"
+   ]
+  },
+  {
+   "query_zh": "镜子",
+   "accepted_targets": [
+    "mirror"
+   ]
+  },
+  {
+   "query_zh": "书架",
+   "accepted_targets": [
+    "bookshelf"
+   ]
+  },
+  {
+   "query_zh": "花",
+   "accepted_targets": [
+    "flower"
+   ]
+  },
+  {
+   "query_zh": "窗户",
+   "accepted_targets": [
+    "window"
+   ]
+  },
+  {
+   "query_zh": "门",
+   "accepted_targets": [
+    "door"
+   ]
+  },
+  {
+   "query_zh": "书",
+   "accepted_targets": [
+    "book"
+   ]
+  },
+  {
+   "query_zh": "杯子",
+   "accepted_targets": [
+    "cup"
+   ]
+  },
+  {
+   "query_zh": "盘子",
+   "accepted_targets": [
+    "plate"
+   ]
+  },
+  {
+   "query_zh": "靠垫",
+   "accepted_targets": [
+    "cushion"
+   ]
+  },
+  {
+   "query_zh": "窗帘",
+   "accepted_targets": [
+    "curtains"
+   ]
+  },
+  {
+   "query_zh": "泰迪熊",
+   "accepted_targets": [
+    "teddy bear"
+   ]
+  },
+  {
+   "query_zh": "单人",
+   "accepted_targets": [
+    "solo"
+   ]
+  },
+  {
+   "query_zh": "一个女孩",
+   "accepted_targets": [
+    "1girl"
+   ]
+  }
+ ],
+ "B_tag_to_slot": [
+  {
+   "tag": "blue eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "red eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "green eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "brown eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "yellow eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "purple eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "pink eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "grey eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "black eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "orange eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "aqua eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "heterochromia",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "closed eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "half-closed eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "glowing eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "multicolored eyes",
+   "expected_slot": "eyes"
+  },
+  {
+   "tag": "ponytail",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "twintails",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "side ponytail",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "braid",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "long hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "short hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "blonde hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "black hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "brown hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "red hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "blue hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "pink hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "white hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "silver hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "green hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "purple hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "grey hair",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "bob cut",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "hime cut",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "ahoge",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "hair bun",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "french braid",
+   "expected_slot": "hair"
+  },
+  {
+   "tag": "blush",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "smile",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "open mouth",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "crying",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "angry",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "sad",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "happy",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "surprised",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "embarrassed",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "shy",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "serious",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "grin",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "frown",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "tongue out",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "tears",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "closed mouth",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "pout",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "smirk",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "laughing",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "sleepy",
+   "expected_slot": "expression"
+  },
+  {
+   "tag": "kneeling",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "standing",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "sitting",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "lying",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "crouching",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "squatting",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "hands up",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "arms up",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "hands on hips",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "crossed arms",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "leaning forward",
+   "expected_slot": "pose"
+  },
+  {
+   "tag": "looking at viewer",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "looking away",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "looking up",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "looking down",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "looking back",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "walking",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "running",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "holding",
+   "expected_slot": "action"
+  },
+  {
+   "tag": "full body",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "bare shoulders",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "barefoot",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "slim",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "curvy",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "muscular",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "tall",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "petite",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "short",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "flat chest",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "pale skin",
+   "expected_slot": "body"
+  },
+  {
+   "tag": "scar",
+   "expected_slot": "face"
+  },
+  {
+   "tag": "freckles",
+   "expected_slot": "face"
+  },
+  {
+   "tag": "mole",
+   "expected_slot": "face"
+  },
+  {
+   "tag": "eyebrows",
+   "expected_slot": "face"
+  },
+  {
+   "tag": "white dress",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "dress",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "skirt",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "school uniform",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "white shirt",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "t-shirt",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "blouse",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "sweater",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "hoodie",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "shorts",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "pants",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "jeans",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "jacket",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "coat",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "suit",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "shoes",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "boots",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "sneakers",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "swimsuit",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "bikini",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "kimono",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "pajamas",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "apron",
+   "expected_slot": "clothing"
+  },
+  {
+   "tag": "glasses",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "earrings",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "necklace",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "choker",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "ribbon",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "scarf",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "cap",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "top hat",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "gloves",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "watch",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "ring",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "belt",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "backpack",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "hairclip",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "crown",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "headband",
+   "expected_slot": "accessory"
+  },
+  {
+   "tag": "bedroom",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "cafe",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "classroom",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "kitchen",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "bathroom",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "library",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "school",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "indoors",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "forest",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "beach",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "street",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "city",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "mountain",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "sky",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "park",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "garden",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "river",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "lake",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "sea",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "rooftop",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "train station",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "shrine",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "outdoors",
+   "expected_slot": "scene"
+  },
+  {
+   "tag": "sunlight",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "moonlight",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "golden hour",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "neon lights",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "candlelight",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "rim light",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "dusk",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "dawn",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "fireworks",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "lantern",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "starlight",
+   "expected_slot": "lighting"
+  },
+  {
+   "tag": "night",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "day",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "sunset",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "winter",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "summer",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "spring",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "autumn",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "snow",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "rain",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "cloudy",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "starry sky",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "lightning",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "fog",
+   "expected_slot": "time_weather"
+  },
+  {
+   "tag": "portrait",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "close-up",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "full body",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "cowboy shot",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "from above",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "from below",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "dutch angle",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "wide shot",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "profile",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "three-quarter view",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "face focus",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "upper body",
+   "expected_slot": "composition"
+  },
+  {
+   "tag": "anime style",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "lineart",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "flat color",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "watercolor",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "sketch",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "pixel art",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "oil painting",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "monochrome",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "vivid colors",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "pastel colors",
+   "expected_slot": "style"
+  },
+  {
+   "tag": "masterpiece",
+   "expected_slot": "quality"
+  },
+  {
+   "tag": "best quality",
+   "expected_slot": "quality"
+  },
+  {
+   "tag": "solo",
+   "expected_slot": "identity"
+  },
+  {
+   "tag": "1girl",
+   "expected_slot": "identity"
+  },
+  {
+   "tag": "couple",
+   "expected_slot": "identity"
+  },
+  {
+   "tag": "crowd",
+   "expected_slot": "identity"
+  },
+  {
+   "tag": "bed",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "pillow",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "lamp",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "table",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "chair",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "umbrella",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "mirror",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "bookshelf",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "flower",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "window",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "door",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "book",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "cup",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "plate",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "cushion",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "curtains",
+   "expected_slot": "objects"
+  },
+  {
+   "tag": "teddy bear",
+   "expected_slot": "objects"
+  }
+ ],
+ "C_tag_neighbors": [
+  {
+   "tag": "blue eyes",
+   "must_include": [
+    "aqua eyes",
+    "green eyes",
+    "red eyes",
+    "purple eyes"
+   ],
+   "must_avoid": [
+    "long hair"
+   ]
+  },
+  {
+   "tag": "red eyes",
+   "must_include": [
+    "blue eyes",
+    "green eyes",
+    "yellow eyes"
+   ],
+   "must_avoid": [
+    "blonde hair"
+   ]
+  },
+  {
+   "tag": "ponytail",
+   "must_include": [
+    "twintails",
+    "side ponytail",
+    "braid",
+    "hair bun"
+   ],
+   "must_avoid": [
+    "blue eyes"
+   ]
+  },
+  {
+   "tag": "twintails",
+   "must_include": [
+    "ponytail",
+    "side ponytail",
+    "braid"
+   ],
+   "must_avoid": [
+    "smile"
+   ]
+  },
+  {
+   "tag": "braid",
+   "must_include": [
+    "ponytail",
+    "twintails",
+    "side ponytail"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "long hair",
+   "must_include": [
+    "short hair",
+    "blonde hair",
+    "black hair"
+   ],
+   "must_avoid": [
+    "blue eyes"
+   ]
+  },
+  {
+   "tag": "blonde hair",
+   "must_include": [
+    "black hair",
+    "brown hair",
+    "red hair"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "blush",
+   "must_include": [
+    "smile",
+    "embarrassed",
+    "shy"
+   ],
+   "must_avoid": [
+    "angry"
+   ]
+  },
+  {
+   "tag": "smile",
+   "must_include": [
+    "grin",
+    "open mouth",
+    "laughing"
+   ],
+   "must_avoid": [
+    "crying"
+   ]
+  },
+  {
+   "tag": "crying",
+   "must_include": [
+    "tears",
+    "sad",
+    "open mouth"
+   ],
+   "must_avoid": [
+    "smile"
+   ]
+  },
+  {
+   "tag": "angry",
+   "must_include": [
+    "frown",
+    "serious",
+    "open mouth"
+   ],
+   "must_avoid": [
+    "smile"
+   ]
+  },
+  {
+   "tag": "kneeling",
+   "must_include": [
+    "squatting",
+    "sitting",
+    "crouching"
+   ],
+   "must_avoid": [
+    "standing"
+   ]
+  },
+  {
+   "tag": "standing",
+   "must_include": [
+    "sitting",
+    "walking",
+    "full body"
+   ],
+   "must_avoid": [
+    "lying"
+   ]
+  },
+  {
+   "tag": "sitting",
+   "must_include": [
+    "standing",
+    "kneeling",
+    "chair"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "lying",
+   "must_include": [
+    "sitting",
+    "bed",
+    "sleepy"
+   ],
+   "must_avoid": [
+    "standing"
+   ]
+  },
+  {
+   "tag": "looking at viewer",
+   "must_include": [
+    "looking away",
+    "face focus",
+    "close-up"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "holding",
+   "must_include": [
+    "reaching",
+    "hands up"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "white dress",
+   "must_include": [
+    "dress",
+    "skirt",
+    "school uniform"
+   ],
+   "must_avoid": [
+    "swimsuit"
+   ]
+  },
+  {
+   "tag": "school uniform",
+   "must_include": [
+    "white shirt",
+    "skirt",
+    "shirt"
+   ],
+   "must_avoid": [
+    "kimono"
+   ]
+  },
+  {
+   "tag": "dress",
+   "must_include": [
+    "skirt",
+    "white dress",
+    "school uniform"
+   ],
+   "must_avoid": [
+    "pants"
+   ]
+  },
+  {
+   "tag": "skirt",
+   "must_include": [
+    "dress",
+    "shorts",
+    "pants"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "swimsuit",
+   "must_include": [
+    "bikini",
+    "beach",
+    "wet"
+   ],
+   "must_avoid": [
+    "winter"
+   ]
+  },
+  {
+   "tag": "kimono",
+   "must_include": [
+    "school uniform",
+    "dress",
+    "apron"
+   ],
+   "must_avoid": [
+    "swimsuit"
+   ]
+  },
+  {
+   "tag": "glasses",
+   "must_include": [
+    "headband",
+    "mole",
+    "scar"
+   ],
+   "must_avoid": [
+    "blue eyes"
+   ]
+  },
+  {
+   "tag": "earrings",
+   "must_include": [
+    "necklace",
+    "choker",
+    "ring"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "bedroom",
+   "must_include": [
+    "bed",
+    "pillow",
+    "indoors",
+    "curtains"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "cafe",
+   "must_include": [
+    "indoors",
+    "table",
+    "cup"
+   ],
+   "must_avoid": [
+    "beach"
+   ]
+  },
+  {
+   "tag": "classroom",
+   "must_include": [
+    "school",
+    "chair",
+    "desk"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "kitchen",
+   "must_include": [
+    "indoors",
+    "table",
+    "apron"
+   ],
+   "must_avoid": [
+    "beach"
+   ]
+  },
+  {
+   "tag": "bathroom",
+   "must_include": [
+    "indoors",
+    "mirror",
+    "wet"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "forest",
+   "must_include": [
+    "outdoors",
+    "tree",
+    "sky"
+   ],
+   "must_avoid": [
+    "bedroom"
+   ]
+  },
+  {
+   "tag": "beach",
+   "must_include": [
+    "outdoors",
+    "sea",
+    "sky"
+   ],
+   "must_avoid": [
+    "bedroom"
+   ]
+  },
+  {
+   "tag": "street",
+   "must_include": [
+    "city",
+    "outdoors",
+    "building"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "city",
+   "must_include": [
+    "street",
+    "building",
+    "neon lights"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "park",
+   "must_include": [
+    "outdoors",
+    "tree",
+    "garden"
+   ],
+   "must_avoid": [
+    "bedroom"
+   ]
+  },
+  {
+   "tag": "moonlight",
+   "must_include": [
+    "night",
+    "starlight",
+    "candlelight"
+   ],
+   "must_avoid": [
+    "sunlight"
+   ]
+  },
+  {
+   "tag": "sunlight",
+   "must_include": [
+    "day",
+    "golden hour",
+    "sky"
+   ],
+   "must_avoid": [
+    "moonlight"
+   ]
+  },
+  {
+   "tag": "golden hour",
+   "must_include": [
+    "sunset",
+    "sunlight",
+    "dusk"
+   ],
+   "must_avoid": [
+    "night"
+   ]
+  },
+  {
+   "tag": "neon lights",
+   "must_include": [
+    "night",
+    "city",
+    "lantern"
+   ],
+   "must_avoid": [
+    "sunlight"
+   ]
+  },
+  {
+   "tag": "night",
+   "must_include": [
+    "moonlight",
+    "starlight",
+    "dark"
+   ],
+   "must_avoid": [
+    "day"
+   ]
+  },
+  {
+   "tag": "sunset",
+   "must_include": [
+    "dusk",
+    "golden hour",
+    "sky"
+   ],
+   "must_avoid": [
+    "dawn"
+   ]
+  },
+  {
+   "tag": "winter",
+   "must_include": [
+    "snow",
+    "cold",
+    "autumn"
+   ],
+   "must_avoid": [
+    "summer"
+   ]
+  },
+  {
+   "tag": "summer",
+   "must_include": [
+    "beach",
+    "sunlight",
+    "spring"
+   ],
+   "must_avoid": [
+    "winter"
+   ]
+  },
+  {
+   "tag": "rain",
+   "must_include": [
+    "cloudy",
+    "umbrella",
+    "wet"
+   ],
+   "must_avoid": [
+    "sunlight"
+   ]
+  },
+  {
+   "tag": "snow",
+   "must_include": [
+    "winter",
+    "ice",
+    "cold"
+   ],
+   "must_avoid": [
+    "summer"
+   ]
+  },
+  {
+   "tag": "masterpiece",
+   "must_include": [
+    "best quality",
+    "ultra detailed",
+    "high quality"
+   ],
+   "must_avoid": [
+    "bad quality"
+   ]
+  },
+  {
+   "tag": "best quality",
+   "must_include": [
+    "masterpiece",
+    "ultra detailed"
+   ],
+   "must_avoid": [
+    "bad anatomy"
+   ]
+  },
+  {
+   "tag": "anime style",
+   "must_include": [
+    "lineart",
+    "flat color",
+    "sketch"
+   ],
+   "must_avoid": [
+    "oil painting"
+   ]
+  },
+  {
+   "tag": "portrait",
+   "must_include": [
+    "close-up",
+    "face focus",
+    "upper body"
+   ],
+   "must_avoid": [
+    "full body"
+   ]
+  },
+  {
+   "tag": "full body",
+   "must_include": [
+    "portrait",
+    "standing",
+    "cowboy shot"
+   ],
+   "must_avoid": [
+    "close-up"
+   ]
+  },
+  {
+   "tag": "close-up",
+   "must_include": [
+    "face focus",
+    "portrait",
+    "upper body"
+   ],
+   "must_avoid": [
+    "full body"
+   ]
+  },
+  {
+   "tag": "from above",
+   "must_include": [
+    "from below",
+    "dutch angle",
+    "wide shot"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "solo",
+   "must_include": [
+    "1girl",
+    "single",
+    "alone"
+   ],
+   "must_avoid": [
+    "multiple girls"
+   ]
+  },
+  {
+   "tag": "1girl",
+   "must_include": [
+    "solo",
+    "female focus"
+   ],
+   "must_avoid": [
+    "multiple girls"
+   ]
+  },
+  {
+   "tag": "couple",
+   "must_include": [
+    "1boy",
+    "1girl",
+    "duo"
+   ],
+   "must_avoid": [
+    "solo"
+   ]
+  },
+  {
+   "tag": "bed",
+   "must_include": [
+    "pillow",
+    "bedroom",
+    "cushion"
+   ],
+   "must_avoid": [
+    "beach"
+   ]
+  },
+  {
+   "tag": "pillow",
+   "must_include": [
+    "bed",
+    "cushion",
+    "bedroom"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "umbrella",
+   "must_include": [
+    "rain",
+    "wet",
+    "holding"
+   ],
+   "must_avoid": [
+    "sunlight"
+   ]
+  },
+  {
+   "tag": "mirror",
+   "must_include": [
+    "bathroom",
+    "window",
+    "reflection"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "moonlight",
+   "must_include": [
+    "night",
+    "starlight",
+    "candlelight"
+   ],
+   "must_avoid": [
+    "sunlight"
+   ]
+  },
+  {
+   "tag": "french braid",
+   "must_include": [
+    "braid",
+    "side ponytail",
+    "ponytail"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "teddy bear",
+   "must_include": [
+    "pillow",
+    "cushion",
+    "bed"
+   ],
+   "must_avoid": [
+    "forest"
+   ]
+  },
+  {
+   "tag": "hime cut",
+   "must_include": [
+    "long hair",
+    "bob cut",
+    "black hair"
+   ],
+   "must_avoid": []
+  },
+  {
+   "tag": "ahoge",
+   "must_include": [
+    "bangs",
+    "long hair"
+   ],
+   "must_avoid": []
+  }
+ ]
+}

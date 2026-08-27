@@ -45,6 +45,9 @@ outputs/
 .pytest_cache/
 待清理/
 
+# Build-time embedding cache (SiliconFlow offline pipeline, regenerable)
+.build-cache/
+
 # Debug scripts & test artifacts (payload JSON, test images)
 debug/
 
