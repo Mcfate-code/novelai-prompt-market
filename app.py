@@ -2876,7 +2876,9 @@ def recommendations(body: RecommendRequest):
             seeds: list[str] = []
             for n in ancestors + [node]:
                 seeds.extend(n.get("seed_tags") or [])
-            semantic_node = {"seed_tags": seeds}
+            # Include node_id so the active-node 0.15 intent bonus in
+            # recommend_v3's _v3_sort actually applies (spec 4.7).
+            semantic_node = {"node_id": node_id, "seed_tags": seeds}
 
         raw_target = (getattr(body, "target", "") or "").strip().lower()
         active_target = (getattr(body, "active_target", "") or "").strip().lower() or raw_target

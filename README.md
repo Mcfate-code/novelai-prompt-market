@@ -50,6 +50,7 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 ### 推荐与冲突提示
 
 - 推荐由 Recommendation V2 多源确定性引擎提供：全局关联（远程可注入，失败回退本地）/ 本地共现（`tag_cooccurrence`）/ 个人最近使用（`recent_tags.use_count`）/ 语义节点 seed / 成人场景上下文（`mode=adult`）。
+- 语义相似替代项（embedding 邻居，如 blue eyes → red eyes、ponytail → short ponytail）作为独立的 `semantic_alternative` 源以「相似/替代」形式展示，**不进入**默认「Next Step」加法推荐列表（同槽位替代优先于叠加共现）。
 - 冲突规则（`tag_conflict`，如长发/短发、睁眼/闭眼）给出提示；严格互斥组（`SET_EXCLUSIVE_GROUP`）原子处理，普通冲突仍 warning-only。
 - 推荐与冲突只用于提示，**不自动改写 Prompt**（点击 `+` 才 ADD_TAG）。
 

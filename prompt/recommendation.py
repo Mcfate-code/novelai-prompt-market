@@ -21,6 +21,31 @@ ADULT_STAGES = ("PREPARATION", "FOREPLAY", "MAIN_ACT", "CLIMAX", "AFTERMATH")
 GROUPS = ("General", "角色", "外观", "服装", "动作", "环境", "物体", "光照", "构图", "画风")
 ADULT_GROUPS = ("主要行为", "体位", "辅助行为", "玩法", "角色状态", "身体焦点", "当前阶段", "下一阶段", "构图")
 
+# Phase 4 source contract (spec 4.4). ``semantic_alternative`` carries the
+# embedding-derived same-class neighbours (e.g. blue eyes -> red eyes) and is
+# surfaced ONLY as 相似/替代 alternatives — it never joins the additive
+# "Next Step" RRF ranking. The additive sources keep their legacy names for
+# backward compatibility with existing consumers/tests:
+#   global_related     ~ public_association (global NPMI / remote related)
+#   local_cooccurrence ~ personal_scoped (personal learned co-occurrence)
+#   personal_recent    ~ personal_scoped (personal recent usage)
+#   semantic_context   ~ context_association + slot_candidate
+#   adult_context      ~ adult_context (unchanged)
+ADDITIVE_SOURCES = ("global_related", "local_cooccurrence", "personal_recent", "semantic_context", "adult_context")
+ALTERNATIVE_SOURCES = ("semantic_alternative",)
+SOURCE_NAMES = ADDITIVE_SOURCES + ALTERNATIVE_SOURCES
+
+# Human-facing source labels — the raw source identifiers are never exposed to
+# users in ``reason`` (spec 4.9).
+SOURCE_LABELS = {
+    "global_related": "全局关联",
+    "local_cooccurrence": "本地共现",
+    "personal_recent": "个人最近使用",
+    "semantic_context": "语义节点",
+    "adult_context": "场景上下文",
+    "semantic_alternative": "相似替代",
+}
+
 
 def reciprocal_rank_fusion(rankings: Mapping[str, Sequence[str]], k: int = RRF_K) -> dict[str, float]:
     """Fuse independently ranked source lists without mixing raw scales."""
@@ -37,6 +62,55 @@ def reciprocal_rank_fusion(rankings: Mapping[str, Sequence[str]], k: int = RRF_K
 
 def _norm(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().replace("_", " ").split())
+
+
+def _same_slot_neighbor(item: Any) -> bool:
+    """True when a neighbour row is a same-slot alternative (a replacement for
+    the current tag), not a co-addable tag.  Determined by ``relation_type`` or
+    by equal src/dst node ids (spec 4.2)."""
+    if not isinstance(item, Mapping):
+        return False
+    if item.get("relation_type") == "same_slot":
+        return True
+    src = item.get("src_node")
+    dst = item.get("dst_node")
+    return bool(src and dst and _norm(src) == _norm(dst))
+
+
+_SLOT_ZH_CACHE: dict[str, str] | None = None
+_SLOT_ZH_EXTRAS = (
+    ("base_subject_count", "主体/人数"),
+    ("scene_participants", "人物"),
+    ("scene_primary_act", "主要行为"),
+    ("scene_interaction", "互动关系"),
+    ("scene_stage", "阶段"),
+    ("scene_position", "体位"),
+    ("scene_character_state", "角色状态"),
+    ("scene_additional_activities", "附加活动"),
+    ("scene_body_focus", "身体焦点"),
+    ("scene_composition", "构图"),
+    ("scene_environment", "环境"),
+)
+
+
+def _slot_zh(node_id: Any) -> str:
+    """Return the Chinese label for a semantic slot node, for human reasons."""
+    global _SLOT_ZH_CACHE
+    if _SLOT_ZH_CACHE is None:
+        _SLOT_ZH_CACHE = {}
+        try:
+            import json
+            from pathlib import Path
+            cfg = Path(__file__).resolve().parent.parent / "config" / "semantic_slots.json"
+            for slot in json.loads(cfg.read_text(encoding="utf-8")):
+                nid = slot.get("node_id")
+                if nid:
+                    _SLOT_ZH_CACHE[nid] = slot.get("zh", nid)
+        except Exception:
+            pass
+        for nid, zh in _SLOT_ZH_EXTRAS:
+            _SLOT_ZH_CACHE.setdefault(nid, zh)
+    return _SLOT_ZH_CACHE.get(str(node_id or ""), str(node_id or ""))
 
 
 def _as_items(value: Any) -> list[dict[str, Any]]:
@@ -83,7 +157,9 @@ class RecommendationService:
     hard filtering and context reranking, never as a raw score input.
     """
 
-    SOURCE_NAMES = ("global_related", "local_cooccurrence", "personal_recent", "semantic_context", "adult_context")
+    SOURCE_NAMES = SOURCE_NAMES
+    ADDITIVE_SOURCES = ADDITIVE_SOURCES
+    ALTERNATIVE_SOURCES = ALTERNATIVE_SOURCES
 
     def __init__(self, conn=None, *, sources: Mapping[str, Any] | None = None,
                  related_source: Callable | None = None, semantic_source: Callable | None = None,
@@ -99,6 +175,9 @@ class RecommendationService:
         self.adolescent_mode = adolescent_mode
         self.navigation = navigation or {}
         self.rrf_k = int(rrf_k)
+        # Optional debug sink (spec 4.8): records prior-failure reasons without
+        # ever surfacing stack traces to the normal UI.  Off by default.
+        self.debug_reasons: list[tuple[str, str]] | None = None
 
     def recommend(self, *, tags: Sequence[str] = (), target: str = "", node_id: str = "",
                   limit: int = 20, mode: str = "general", participant_count=None,
@@ -123,7 +202,7 @@ class RecommendationService:
         candidates = self._collect(ctx)
         candidates = {tag: item for tag, item in candidates.items() if self._allowed(item, ctx, normalized)}
         rankings = {}
-        for source in self.SOURCE_NAMES:
+        for source in self.ADDITIVE_SOURCES:
             values = [tag for tag, item in candidates.items() if source in item["sources"]]
             rankings[source] = sorted(values, key=lambda tag: source_sort(source, candidates[tag], tag))
         fused = reciprocal_rank_fusion(rankings, self.rrf_k)
@@ -175,18 +254,35 @@ class RecommendationService:
                 state = None
         state_dict = asdict(state) if is_dataclass(state) else (state if isinstance(state, Mapping) else {})
         missing = self._v3_missing(state, state_dict, active_target or target)
-        rankings, candidates = self._v3_collect(ctx, missing, state_dict, use_prior=had_explicit_state)
+        rankings, candidates, same_slot = self._v3_collect(ctx, missing, state_dict, use_prior=had_explicit_state)
         if ctx.mode != "adult":
             candidates = {tag: item for tag, item in candidates.items() if "adult_context" not in item["sources"]}
         candidates = {tag: item for tag, item in candidates.items()
                       if self._allowed(item, ctx, normalized)}
-        rankings = {name: [tag for tag in values if tag in candidates]
-                    for name, values in rankings.items()}
+        # Same-slot semantic alternatives (spec 4.2/4.3) override additive
+        # compatibility: e.g. "red eyes" is a replacement for an already-present
+        # "blue eyes", never a co-addable "Next Step" tag.
+        for tag in same_slot:
+            entry = candidates.get(tag)
+            if entry is None:
+                continue
+            for source in self.ADDITIVE_SOURCES:
+                entry["sources"].discard(source)
+                if tag in rankings.get(source, ()):
+                    rankings[source].remove(tag)
+        # Split semantic alternatives out of the additive "Next Step" pipeline.
+        alternative_items = {tag: item for tag, item in candidates.items()
+                             if any(s in self.ALTERNATIVE_SOURCES for s in item["sources"])
+                             and not any(s in self.ADDITIVE_SOURCES for s in item["sources"])}
+        additive = {tag: item for tag, item in candidates.items() if tag not in alternative_items}
+        rankings = {name: [tag for tag in values if tag in additive]
+                    for name, values in rankings.items() if name in self.ADDITIVE_SOURCES}
         fused = reciprocal_rank_fusion(rankings, self.rrf_k)
-        ordered = sorted(candidates, key=lambda tag: self._v3_sort(tag, candidates[tag], fused, ctx, missing))
-        selected = self._diversify(ordered, candidates, max(0, min(int(limit), 100)), ctx)
-        output = [self._v3_public_item(tag, candidates[tag], fused.get(tag, 0.0), ctx, missing)
+        ordered = sorted(additive, key=lambda tag: self._v3_sort(tag, additive[tag], fused, ctx, missing))
+        selected = self._diversify(ordered, additive, max(0, min(int(limit), 100)), ctx)
+        output = [self._v3_public_item(tag, additive[tag], fused.get(tag, 0.0), ctx, missing)
                   for tag in selected]
+        alternatives = self._v3_alternatives(alternative_items, ctx, missing)
         next_steps = []
         for slot in missing[:max(1, min(5, int(limit) if limit else 5))]:
             slot_id = slot.get("node_id", "") if isinstance(slot, Mapping) else getattr(slot, "node_id", "")
@@ -203,10 +299,13 @@ class RecommendationService:
         contextual = [i for i in output if i.get("scene_context")]
         related = [i for i in output if not i.get("scene_context") and i.get("slot") is None]
         groups = self._v3_groups(output)
-        return {"next_steps": next_steps, "current_node": current_node,
-                "contextual": contextual, "related": related,
-                "groups": groups, "recommendations": output,
-                "count": len(output), "section": groups}
+        result = {"next_steps": next_steps, "current_node": current_node,
+                  "contextual": contextual, "related": related,
+                  "groups": groups, "recommendations": output,
+                  "count": len(output), "section": groups}
+        if alternatives:
+            result["alternatives"] = alternatives
+        return result
 
     def _v3_empty(self, ctx):
         return {"next_steps": [], "current_node": None, "contextual": [], "related": [],
@@ -231,29 +330,57 @@ class RecommendationService:
     def _v3_collect(self, ctx, missing, state_dict, *, use_prior=False):
         rankings = {name: [] for name in self.SOURCE_NAMES}
         candidates = {}
+        same_slot: set[str] = set()
         # The offline prior is an optional adapter.  It is never required for V3.
-        try:
-            if not use_prior:
-                raise RuntimeError("offline prior requires explicit semantic context")
-            from prompt import prior as prior_mod
-            prior = prior_mod.get_prior()
-            adult = ctx.mode == "adult"
-            for tag in ctx.tags:
-                for source, getter in (("global_related", lambda: prior.related_tags(tag, adult=adult)),
-                                       ("semantic_context", lambda: prior.semantic_neighbors(tag, adult=adult))):
-                    for raw in getter() or []:
-                        self._v3_add(candidates, rankings, source, raw, ctx)
-                for raw in prior.context_candidates(tag, adult=adult) or []:
-                    self._v3_add(candidates, rankings, "semantic_context", raw, ctx)
-            nodes = [s.get("node_id") for s in missing if s.get("node_id")]
-            for node in nodes:
-                for raw in prior.slot_candidates(node, context=self._context_map(ctx), adult=adult) or []:
-                    self._v3_add(candidates, rankings, "semantic_context", {**raw, "slot": node}, ctx)
-            for raw in prior.next_slot_prior([s.get("node_id") for s in self._filled_slots(state_dict)], adult=adult) or []:
-                for candidate in prior.slot_candidates(raw.get("node_id", ""), context=self._context_map(ctx), adult=adult) or []:
-                    self._v3_add(candidates, rankings, "semantic_context", {**candidate, "slot": raw.get("node_id")}, ctx)
-        except Exception:
-            pass
+        # Each prior family degrades independently (spec 4.8): a failure in the
+        # embedding/neighbour prior must not disable the context / slot /
+        # next-slot priors, and vice versa.  Failures are recorded for debug only.
+        if use_prior:
+            prior = None
+            try:
+                from prompt import prior as prior_mod
+                prior = prior_mod.get_prior()
+            except Exception as exc:
+                self._record_debug("prior_unavailable", exc)
+            if prior is not None:
+                adult = ctx.mode == "adult"
+                for tag in ctx.tags:
+                    # 1. public NPMI association (prompt compatibility)
+                    try:
+                        for raw in prior.related_tags(tag, adult=adult) or []:
+                            self._v3_add(candidates, rankings, "global_related", raw, ctx)
+                    except Exception as exc:
+                        self._record_debug("related_prior", exc)
+                    # 2. embedding neighbours (semantic similarity) — NOT additive
+                    try:
+                        for raw in prior.semantic_neighbors(tag, adult=adult) or []:
+                            self._v3_add(candidates, rankings, "semantic_alternative", raw, ctx)
+                            if _same_slot_neighbor(raw):
+                                same_slot.add(_norm(raw.get("tag") or raw.get("prompt_tag")))
+                    except Exception as exc:
+                        self._record_debug("semantic_prior", exc)
+                    # 3. context association
+                    try:
+                        for raw in prior.context_candidates(tag, adult=adult) or []:
+                            self._v3_add(candidates, rankings, "semantic_context", raw, ctx)
+                    except Exception as exc:
+                        self._record_debug("context_prior", exc)
+                # 4. missing-slot candidates
+                nodes = [s.get("node_id") for s in missing if s.get("node_id")]
+                for node in nodes:
+                    try:
+                        for raw in prior.slot_candidates(node, context=self._context_map(ctx), adult=adult) or []:
+                            self._v3_add(candidates, rankings, "semantic_context", {**raw, "slot": node}, ctx)
+                    except Exception as exc:
+                        self._record_debug("slot_prior", exc)
+                # 5. next-slot transition prior
+                try:
+                    filled = [s.get("node_id") for s in self._filled_slots(state_dict)]
+                    for raw in prior.next_slot_prior(filled, adult=adult) or []:
+                        for candidate in prior.slot_candidates(raw.get("node_id", ""), context=self._context_map(ctx), adult=adult) or []:
+                            self._v3_add(candidates, rankings, "semantic_context", {**candidate, "slot": raw.get("node_id")}, ctx)
+                except Exception as exc:
+                    self._record_debug("next_slot_prior", exc)
         for source in self.SOURCE_NAMES:
             if source == "adult_context" and ctx.mode != "adult":
                 continue
@@ -261,6 +388,8 @@ class RecommendationService:
                 continue
             for raw in _as_items(self._source(source, ctx)):
                 self._v3_add(candidates, rankings, source, raw, ctx)
+                if source == "semantic_alternative" and _same_slot_neighbor(raw):
+                    same_slot.add(_norm(raw.get("tag") or raw.get("prompt_tag")))
         # Apply DB metadata after all adapters have contributed.  Prior rows are
         # deliberately allowed to be sparse, but a known tag must still obey
         # target/section/safety filters just like a V2 candidate.
@@ -279,7 +408,16 @@ class RecommendationService:
                         entry["meta"].setdefault("sections", {classify_prompt_section(self.conn, tag)})
                 except Exception:
                     pass
-        return rankings, candidates
+        return rankings, candidates, same_slot
+
+    def _record_debug(self, key: str, exc: Exception) -> None:
+        """Record a prior-family failure reason for debug mode only (spec 4.8).
+        The normal UI never surfaces stack traces."""
+        if self.debug_reasons is not None:
+            try:
+                self.debug_reasons.append((key, repr(exc)))
+            except Exception:
+                pass
 
     @staticmethod
     def _context_map(ctx):
@@ -315,7 +453,10 @@ class RecommendationService:
         missing_ids = {s.get("node_id") for s in missing}
         slot = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
         gap = 1 if slot in missing_ids else 0
-        intent_node = (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
+        # Single intent authority (spec 4.7): the active node id.  ``ctx.node_id``
+        # is authoritative; fall back to the injected semantic_node["node_id"] so
+        # the 0.15 intent bonus for the actively-edited node actually applies.
+        intent_node = ctx.node_id or (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
         intent = 1 if intent_node and slot == intent_node else int(bool(ctx.last_added_tag and _norm(meta.get("related_to")) == ctx.last_added_tag))
         scene = 0
         for field, actual in (("scene", ctx.primary_scene_type), ("primary_act", ctx.primary_act),
@@ -338,11 +479,50 @@ class RecommendationService:
     def _v3_public_item(self, tag, item, score, ctx, missing):
         public = self._public_item(tag, item, score, ctx)
         meta = item["meta"]
-        public["slot"] = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
+        slot = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
+        public["slot"] = slot
         public["target"] = meta.get("target", ctx.target or "base")
         public["scene_context"] = any(meta.get(k) is not None for k in ("scene", "primary_act", "stage", "position", "body_focus", "activity", "participant_count", "composition", "environment"))
-        public["reason"] = "；".join(x for x in ("补齐当前槽位" if public["slot"] else "与当前标签相关", "匹配当前场景" if public["scene_context"] else "") if x)
+        # Human-meaningful reason (spec 4.9); never exposes raw source names.
+        intent_node = ctx.node_id or (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
+        parts: list[str] = []
+        if slot and slot == intent_node:
+            parts.append(f"正在编辑{_slot_zh(slot)}")
+        elif slot:
+            prefix = "当前角色还没有" if str(slot).startswith("char_") else "当前画面还没有"
+            parts.append(f"{prefix}{_slot_zh(slot)}，补齐当前槽位")
+        else:
+            parts.append("与当前标签相关")
+        if public["scene_context"]:
+            if ctx.mode == "adult" and ctx.stage:
+                parts.append(f"当前阶段 {ctx.stage}")
+            elif ctx.primary_scene_type:
+                parts.append(f"当前场景为 {ctx.primary_scene_type}")
+            elif ctx.environment:
+                parts.append(f"当前场景为 {ctx.environment}")
+            else:
+                parts.append("匹配当前场景")
+        public["reason"] = "；".join(parts)
         return public
+
+    def _v3_alternatives(self, alternative_items, ctx, missing):
+        """Surface same-class semantic alternatives (相似/替代) separately from
+        the additive "Next Step" list (spec 4.5/4.6)."""
+        out = []
+        for tag, item in alternative_items.items():
+            meta = item["meta"]
+            node = meta.get("src_node") or meta.get("dst_node") or meta.get("node_id")
+            if not node:
+                node = ctx.node_id or (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
+            pub = self._public_item(tag, item, 0.0, ctx)
+            pub["reason"] = f"这是{_slot_zh(node)}的相似替代项" if node else "这是相似替代项"
+            pub["slot"] = node
+            pub["target"] = ctx.target or "base"
+            pub["scene_context"] = False
+            pub["similarity"] = float(meta.get("similarity", meta.get("semantic_priority", 0)) or 0)
+            out.append(pub)
+        out.sort(key=lambda i: (-float(i.get("similarity", 0.0) or 0.0), i["tag"]))
+        return out
 
     @staticmethod
     def _v3_groups(output):
@@ -352,7 +532,7 @@ class RecommendationService:
 
     def _collect(self, ctx: RecommendationContext) -> dict[str, dict[str, Any]]:
         collected: dict[str, dict[str, Any]] = {}
-        for source in self.SOURCE_NAMES:
+        for source in self.ADDITIVE_SOURCES:
             raw = self._source(source, ctx)
             for item in _as_items(raw):
                 tag = _norm(item.get("tag") or item.get("prompt_tag"))
@@ -418,7 +598,13 @@ class RecommendationService:
         if name == "personal_recent":
             return [{"tag": row["tag_name"], "use_count": row["use_count"]}
                     for row in self.conn.execute("SELECT tag_name, use_count FROM recent_tags ORDER BY use_count DESC, last_used_at DESC")]
-        return self._semantic_items(ctx) if name == "semantic_context" else self._adult_items(ctx)
+        if name == "semantic_context":
+            return self._semantic_items(ctx)
+        if name == "adult_context":
+            return self._adult_items(ctx)
+        # ``semantic_alternative`` has no local connector: alternatives are only
+        # contributed by the prior adapter (V3) or an explicitly injected source.
+        return []
 
     def _semantic_items(self, ctx):
         node = ctx.semantic_node
@@ -504,7 +690,7 @@ class RecommendationService:
     def _public_item(self, tag, item, score, ctx):
         meta = item["meta"]
         sources = [name for name in self.SOURCE_NAMES if name in item["sources"]]
-        reason = "、".join({"global_related": "全局关联", "local_cooccurrence": "本地共现", "personal_recent": "个人最近使用", "semantic_context": "语义节点", "adult_context": "场景上下文"}[s] for s in sources)
+        reason = "、".join(SOURCE_LABELS[s] for s in sources if s in SOURCE_LABELS)
         return {"tag": meta.get("prompt_tag", tag), "canonical": meta.get("canonical", tag.replace(" ", "_")),
                 "zh": meta.get("zh", ""), "group": self._group(item, ctx), "reason": reason or "本地候选",
                 "sources": sources, "source": sources, "post_count": int(meta.get("post_count", 0) or 0),
@@ -527,6 +713,8 @@ def source_sort(source, item, tag):
         return (-int(meta.get("semantic_priority", meta.get("priority", 0)) or 0), tag)
     if source == "adult_context":
         return (-int(meta.get("context_priority", meta.get("priority", 0)) or 0), tag)
+    if source == "semantic_alternative":
+        return (-float(meta.get("similarity", meta.get("semantic_priority", 0)) or 0), tag)
     return item_sort(item, tag)
 
 
@@ -547,4 +735,5 @@ def _participant_ok(meta, count):
     return not (minimum is not None and count < int(minimum) or maximum is not None and count > int(maximum))
 
 
-__all__ = ["RecommendationService", "RecommendationContext", "reciprocal_rank_fusion", "RRF_K"]
+__all__ = ["RecommendationService", "RecommendationContext", "reciprocal_rank_fusion", "RRF_K",
+           "ADDITIVE_SOURCES", "ALTERNATIVE_SOURCES", "SOURCE_NAMES", "SOURCE_LABELS"]

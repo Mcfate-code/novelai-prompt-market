@@ -172,7 +172,7 @@ def _resolve_semantic_node(tag: str, conn: sqlite3.Connection | None = None) -> 
     1. slot keywords_en (most precise fine-grained node)
     2. prior.semantic_node_for_tag
     3. nav_seeds
-    4. DB category (4 or 3 -> char_identity)
+    4. DB category (4 -> char_identity; 3 is copyright/franchise, not identity)
     5. section fallback (classify_tag -> SECTION_NODE_FALLBACK)
     6. None
     """
@@ -195,14 +195,15 @@ def _resolve_semantic_node(tag: str, conn: sqlite3.Connection | None = None) -> 
     seeds = _load_nav_seeds()
     if key in seeds:
         return (seeds[key], "nav_seed")
-    # 4. DB category
+    # 4. DB category (only 4 -> char_identity; category 3 is copyright/franchise
+    #    context, e.g. "genshin impact", and must NOT map to char_identity)
     if conn is not None:
         try:
             row = conn.execute(
                 "SELECT category FROM tags WHERE lower(prompt_tag)=lower(?) OR lower(danbooru_name)=lower(?) LIMIT 1",
                 (tag, tag),
             ).fetchone()
-            if row and row["category"] in (3, 4):
+            if row and row["category"] == 4:
                 return ("char_identity", "category")
         except Exception:
             pass
