@@ -138,7 +138,7 @@ class Phase2IntegrationTest(unittest.TestCase):
         )
         self.settings_patch.start()
         options = app.nsfw_builder_options()
-        for group in ("scenes", "positions", "clothingStates", "activities", "bodyFocus"):
+        for group in ("scenarios", "positions", "clothingStates", "activities", "bodyFocus"):
             self.assertEqual(options[group], [])
 
     # ---- snapshot 上下文（snapshot context + continue generate no display literals） ----

@@ -481,3 +481,47 @@ test("createNsfwBuilder 返回 NsfwBuilder 实例", () => {
   const builder = createNsfwBuilder({ bridge: makeBridge(), ...OPTIONS });
   assert.ok(builder instanceof NsfwBuilder);
 });
+
+// ---- 10. Phase 7：简化 Scene Composer 信息架构 ----
+
+test("Phase7：移除「主场景」块，dashboard 锚点映射到真实 section id", () => {
+  const doc = setAssistantContext(createEmpty(), { participant_count: "2" });
+  const fullOptions = {
+    ...OPTIONS,
+    primaryActs: [{ key: "kiss", label: "接吻", tag: "kissing" }],
+    environments: [{ key: "night", label: "夜晚", tag: "night" }],
+    compositions: [{ key: "close_up", label: "特写", tag: "close-up" }],
+  };
+  const builder = new NsfwBuilder({ root: minimalRoot(), bridge: makeBridge(doc), ...fullOptions });
+  builder.render();
+  const html = builder.root.innerHTML;
+  assert.ok(!html.includes("主场景"), "主场景块不再渲染");
+  assert.ok(html.includes("环境 / 情境"), "环境/情境保留");
+  for (const id of ["nb-人物", "nb-主要行为", "nb-互动关系", "nb-阶段体位", "nb-角色状态", "nb-镜头环境"]) {
+    assert.ok(html.includes(`id="${id}"`), `存在 section id=${id}`);
+    assert.ok(html.includes(`href="#${id}"`), `dashboard 锚点 href=#${id}`);
+  }
+});
+
+test("Phase7：互动按钮标签随当前 actor/target 选择变化", () => {
+  const doc = setAssistantContext(createEmpty(), { participant_count: "2" });
+  const builder = new NsfwBuilder({ root: minimalRoot(), bridge: makeBridge(doc), ...OPTIONS, interactionActions: [{ key: "kissing", label: "接吻", tag: "kissing" }] });
+  builder.render();
+  assert.ok(builder.root.innerHTML.includes("互动 C1 → C2"), "默认 actor=0,target=1 → C1 → C2");
+  builder.interactionDraft = { actor: 1, target: 0, relation: "mutual" };
+  builder.render();
+  assert.ok(builder.root.innerHTML.includes("互动 C2 → C1"), "draft 改变后标签反映当前选择");
+  assert.ok(!builder.root.innerHTML.includes("互动 C1 → C2"), "不再显示旧的固定标签");
+});
+
+test("Phase7：环境/情境选择写入 Base（route → primary_scene_type / section=scene）", () => {
+  const bridge = makeBridge();
+  const builder = new NsfwBuilder({ bridge, ...OPTIONS, environments: [{ key: "night", label: "夜晚", tag: "night" }] });
+  builder.selectExclusive("scene", "night");
+  const seg = bridge.dispatched.find((a) => a.type === "SET_EXCLUSIVE_GROUP");
+  assert.equal(seg.payload.group, "primary_scene_type");
+  assert.equal(seg.payload.newTag, "night", "环境 tag 解析（不再是空 newTag）");
+  assert.equal(seg.payload.target, "base");
+  assert.ok(seg.payload.members.includes("night"), "members 含环境 tag（原子删除旧条目用）");
+  assert.equal(bridge.getDocument().assistant_context.primary_scene_type, "night");
+});

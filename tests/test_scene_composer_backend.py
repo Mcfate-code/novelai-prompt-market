@@ -45,7 +45,7 @@ class SceneComposerBackendTest(unittest.TestCase):
     def config_tags(self):
         cfg = app._scene_composer_config()
         tags = []
-        for group in ("primary_scenes", "clothing_states", "activities", "body_focus"):
+        for group in ("scenarios", "environments", "clothing_states", "activities", "body_focus"):
             for item in cfg.get(group, []):
                 if isinstance(item, dict) and item.get("tag"):
                     tags.append(item["tag"])
@@ -57,20 +57,19 @@ class SceneComposerBackendTest(unittest.TestCase):
     def test_scenes_are_small_high_level_set(self):
         self.insert_tags(self.config_tags())
         options = self.all_options()
-        scenes = options["scenes"]
-        self.assertLessEqual(len(scenes), 6, "主场景为高层小集合")
-        for scene in scenes:
-            self.assertIn("key", scene)
-            self.assertIn("label", scene)
-            self.assertIn("tag", scene)
+        scenarios = options["scenarios"]
+        self.assertLessEqual(len(scenarios), 6, "环境/情境为高层小集合")
+        for scenario in scenarios:
+            self.assertIn("key", scenario)
+            self.assertIn("label", scenario)
         # 语义 key（非 raw tag），且不是旧的受限分类 section label。
-        config_keys = {s["key"] for s in app._scene_composer_config()["primary_scenes"]}
-        self.assertEqual({s["key"] for s in scenes}, config_keys)
+        config_keys = {s["key"] for s in app._scene_composer_config()["scenarios"]}
+        self.assertEqual({s["key"] for s in scenarios}, config_keys)
         old_section_labels = {"基础性交", "多人成人场景", "女女性行为", "男男性行为", "性交体位", "裸露与脱衣状态"}
-        scene_keys = {s["key"] for s in scenes}
-        scene_labels = {s["label"] for s in scenes}
-        self.assertTrue(scene_keys.isdisjoint(old_section_labels), "scene key 不应是旧受限分类 section label")
-        self.assertTrue(scene_labels.isdisjoint(old_section_labels), "scene label 不应是旧受限分类 section label")
+        scenario_keys = {s["key"] for s in scenarios}
+        scenario_labels = {s["label"] for s in scenarios}
+        self.assertTrue(scenario_keys.isdisjoint(old_section_labels), "scenario key 不应是旧受限分类 section label")
+        self.assertTrue(scenario_labels.isdisjoint(old_section_labels), "scenario label 不应是旧受限分类 section label")
 
     def test_every_returned_tag_exists_in_sqlite(self):
         self.insert_tags(self.config_tags())
@@ -81,7 +80,7 @@ class SceneComposerBackendTest(unittest.TestCase):
 
         conn = self.conn()
         try:
-            for group in ("scenes", "positions", "clothingStates", "activities", "bodyFocus"):
+            for group in ("scenarios", "environments", "positions", "clothingStates", "activities", "bodyFocus"):
                 for item in options[group]:
                     tag = item.get("tag")
                     if tag:
@@ -99,19 +98,19 @@ class SceneComposerBackendTest(unittest.TestCase):
         self.assertNotIn("mating press", returned_positions, "未命中 sqlite 的体位应 drop")
 
     def test_missing_configured_tag_is_dropped(self):
-        # 只插入 config tags 的一个子集：省略 solo（scene）与 lingerie（clothing）。
-        missing = {"solo", "lingerie"}
+        # 只插入 config tags 的一个子集：省略 voyeurism（scenario）与 lingerie（clothing）。
+        missing = {"voyeurism", "lingerie"}
         self.insert_tags([t for t in self.config_tags() if t not in missing])
         options = self.all_options()
 
-        solo_scene = next(s for s in options["scenes"] if s["key"] == "solo_intimate")
-        self.assertEqual(solo_scene["tag"], "", "未命中 sqlite 的 scene tag 应 drop 为空")
+        voyeurism_scenario = next(s for s in options["scenarios"] if s["key"] == "voyeurism")
+        self.assertEqual(voyeurism_scenario["tag"], "", "未命中 sqlite 的 scenario tag 应 drop 为空")
         lingerie = next(c for c in options["clothingStates"] if c["key"] == "lingerie")
         self.assertEqual(lingerie["tag"], "", "未命中 sqlite 的 clothing tag 应 drop 为空")
 
         conn = self.conn()
         try:
-            for group in ("scenes", "positions", "clothingStates", "activities", "bodyFocus"):
+            for group in ("scenarios", "environments", "positions", "clothingStates", "activities", "bodyFocus"):
                 for item in options[group]:
                     if item.get("tag"):
                         self.assertTrue(app._scene_tag_in_sqlite(conn, item["tag"]))
@@ -126,7 +125,7 @@ class SceneComposerBackendTest(unittest.TestCase):
         )
         self.settings_patch.start()
         options = self.all_options()
-        for group in ("participants", "scenes", "stages", "positions", "clothingStates", "activities", "bodyFocus"):
+        for group in ("participants", "scenarios", "environments", "stages", "positions", "clothingStates", "activities", "bodyFocus"):
             self.assertEqual(options[group], [], f"{group} 青少年模式下应为空")
 
     def test_recommend_request_accepts_new_fields(self):

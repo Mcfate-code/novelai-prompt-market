@@ -157,8 +157,8 @@ PromptBridge 与 Tag Assistant 同源（`getDocument()` / `getActiveTarget()` / 
 - **人数行为**：仅支持 1/2/3，人数与 Character 槽通过单个原子 action 同步；减少时非空尾部角色会阻止并提示。当前 SQLite 不含已验证的 `<N>people` / `<N>persons` / `<N>characters` 精确非性别人数标签，因此只同步结构状态、不猜性别、不发明 Base tag，Semantic State 将 Participants 标记为 partial。
 
 - **唯一权威状态**：`PromptDocument.assistant_context` 是唯一场景上下文；组件无 `this.selections` / 无业务副本，每次刷新从 `bridge.getDocument().assistant_context` 水合（`currentContext()` / `_hydrateContext()` 是唯一水合路径）。
-- **高层主场景**：主场景为 ≤6 个高层语义项（单人亲密 / 伴侣亲密 / 多人互动 / 情境 / 前戏向，带已校验 canonical tag），取代旧的 restricted-taxonomy 整面候选；`minParticipants` 用于人数兼容。
-- **UI 分区（渲染顺序）**：人数 → 主场景 → 阶段（`PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，语义标识而非 canonical tag）→ 角色（**每个角色一条服装子组，全部同时可见**）→ 体位 → 附加活动 → 身体聚焦 → 推荐（分组展示）。
+- **环境/情境**：环境/情境为场景候选（`scenarios` 卧室/户外/旁观 + `environments` 白天/夜晚，带已校验 canonical tag，route → Base、section=scene），取代旧的高层「主场景」概念（该概念无独立语义，已删除）；`minParticipants` 用于人数兼容。
+- **UI 分区（渲染顺序）**：人数 → 主要行为 → 互动关系 → 阶段（`PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，语义标识而非 canonical tag）→ 角色（**每个角色一条服装子组，全部同时可见**）→ 体位 → 附加活动 → 身体聚焦 → 镜头环境（构图 + 环境/情境）→ 推荐（分组展示）。
 - **人数增减策略**：`selectParticipants` 增多时 dispatch 单个 `SET_EXCLUSIVE_GROUP(participant_count)` + `SCENE_PROPOSAL{kind:"sync_participants"}`；减少时检查尾部角色：尾部全空则允许并附 `autoRemovableEmptyIndices`；任一尾部角色含内容则**不改 participant_count**，显示 `Character N 仍有内容，请手动移除` 提示并 dispatch `SCENE_PROPOSAL{kind:"remove_characters_blocked"}`——**不猜测性别、不静默删除**。
 - **strict exclusive groups**：`participant_count` / `primary_scene_type` / `stage` / `position` / `clothing_state:char:N`。新选择 dispatch **一个** `SET_EXCLUSIVE_GROUP` action，Integrator 原子删除同组旧 entries、加新 tag、更新 context、只通知一次。作用域：scene/position/stage/participant_count → `target:"base"`；clothing_state → `target:char:N`（Character Assignment）。
 - **上下文不泄漏为 tags**：所有上下文 metadata 通过 `SET_ASSISTANT_CONTEXT`（对齐 Recommendation V2）交给 Integrator，不直接编译成 Prompt tags；只有带 canonical tag 的选择（活动新增、推荐点击）才 `ADD_TAG`。
@@ -180,7 +180,8 @@ const builder = createNsfwBuilder({
   mode: "adult",                            // Recommendation V2 mode（app.js 传 "adult"）
   // 真实候选（canonical tag 已由后端逐条校验 sqlite；缺 tag 只更新 context 不 ADD_TAG）：
   participants: [{ key: "1", label: "1" }, { key: "2", label: "2" }, { key: "3", label: "3" }, { key: "4+", label: "4+" }],
-  scenes: [{ key: "solo_intimate", label: "单人亲密", tag: "solo", minParticipants: 1 }],
+  scenarios: [{ key: "bedroom", label: "卧室", tag: "bedroom", route: "base", section: "scene" }],
+  environments: [{ key: "night", label: "夜晚", tag: "night", route: "base", section: "scene" }],
   positions: [{ key: "missionary", label: "missionary", tag: "missionary", minParticipants: 2 }],
   clothingStates: [{ key: "nude", label: "全裸", tag: "nude" }],
   activities: [{ key: "kissing", label: "接吻", tag: "kissing", section: "action" }],

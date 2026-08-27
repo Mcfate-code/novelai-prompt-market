@@ -17,14 +17,14 @@
  *  - 成人内容策略：组件只读集成方注入的 settings（adolescent_mode）。青少年模式
  *    （adolescent_mode=true）下组件整体禁用 / 隐藏，绝不绕过内容策略。缺省未注入按
  *    「已启用成人」处理，但集成方必须在 wiring 时把后端返回的 adolescent_mode 传进来。
- *  - 不凭记忆造 canonical tags：主场景 / 体位 / 服装状态 / 附加活动 / 身体聚焦的真实
+ *  - 不凭记忆造 canonical tags：环境/情境 / 体位 / 服装状态 / 附加活动 / 身体聚焦的真实
  *    候选一律由集成方通过 options 注入（后端 GET /api/nsfw-builder/options 已按
  *    config/scene_composer.json + data/nsfw_taxonomy.json 逐条校验 sqlite 后下发），
  *    或由推荐 API 返回。组件只内置 stage 语义标识（PREPARATION/FOREPLAY/MAIN_ACT/
  *    CLIMAX/AFTERMATH，非 canonical tag）与 participant 计数档（严格 1/2/3，非 canonical tag）。
  *
- * UI 分区（渲染顺序）：人数 → 主场景 → 阶段 → 角色（每角色衣着，全部同时可见）→
- *   体位 → 附加活动 → 身体焦点 → 推荐。
+ * UI 分区（渲染顺序）：人数 → 主要行为 → 互动关系 → 阶段 → 角色（每角色衣着，全部同时可见）→
+ *   体位 → 附加活动 → 身体焦点 → 镜头环境（构图 + 环境/情境）→ 推荐。
  *
  * 挂载示例（wiring 由 Integrator 完成）：
  *   import { createNsfwBuilder } from "/static/nsfw-builder.js";
@@ -146,7 +146,7 @@ export function exclusiveMembers(group, options, characterIndex = null) {
   const list = {
     [GROUP_KEYS.participants]: options.participants,
     primary_act: options.primaryActs,
-    [GROUP_KEYS.scene]: options.scenes,
+    [GROUP_KEYS.scene]: [...(options.scenes || []), ...(options.environments || [])],
     [GROUP_KEYS.stage]: options.stages,
     [GROUP_KEYS.position]: options.positions,
     [GROUP_KEYS.clothing]: options.clothingStates,
@@ -329,7 +329,7 @@ function emptyView() {
  *   adolescentMode  是否青少年模式（后端 /api/settings；true=禁用/隐藏本组件）
  *   mode            Recommendation V2 的 mode（默认 "nsfw"）
  *   participants    计数档候选（默认 1/2/3/4+，非 canonical tag）
- *   scenes          主场景候选（canonical tag 可选）
+ *   scenes          环境/情境（scenarios）候选（canonical tag 可选）
  *   stages          阶段候选（默认内置语义标识）
  *   positions       体位候选（支持 minParticipants / requiresScenes 过滤）
  *   clothingStates  服装状态候选（canonical tag 可选，按角色作用域）
@@ -362,6 +362,8 @@ export class NsfwBuilder {
     };
     this.recommendImpl = typeof options.recommend === "function" ? options.recommend : null;
     this.openState = {};
+    // 互动关系 Actor/Target/Relation 的 UI 草稿（非业务权威状态；apply 时随 `<select>` 实时读取）。
+    this.interactionDraft = { actor: 0, target: 1, relation: "directional" };
     this.context = {};
     this.view = emptyView();
     this._destroyed = false;
@@ -541,6 +543,11 @@ export class NsfwBuilder {
   }
 
   _findOption(group, key) {
+    // 「环境/情境」互斥组 = scenarios + environments 合并（两者都写 primary_scene_type → base）。
+    if (group === "scene") {
+      const merged = [...this.options.scenes, ...this.options.environments];
+      return merged.find((o) => o && o.key === String(key || "")) || null;
+    }
     const listKey = {
       participants: "participants", scene: "scenes", stage: "stages",
       primaryAct: "primaryActs",
@@ -701,10 +708,8 @@ export class NsfwBuilder {
     } else if (action === "char-state") {
       this.selectCharacterState(node.dataset.kind, node.dataset.key, Number(node.dataset.char));
     } else if (action === "interaction-add") {
-      const actor = this.root.querySelector('[data-input="actor"]')?.value || 0;
-      const target = this.root.querySelector('[data-input="target"]')?.value || 1;
-      const relation = this.root.querySelector('[data-input="relation"]')?.value || "directional";
-      this.applyInteraction(node.dataset.key, actor, target, relation);
+      const draft = this.interactionDraft || { actor: 0, target: 1, relation: "directional" };
+      this.applyInteraction(node.dataset.key, draft.actor, draft.target, draft.relation);
     } else if (action === "interaction-remove") {
       this.removeInteraction(node.dataset.id);
     } else if (action === "body-focus") {
@@ -724,6 +729,12 @@ export class NsfwBuilder {
     if (!node || !node.dataset) return;
     if (node.dataset.action === "exclusive-select") {
       this.selectExclusive(node.dataset.group, node.value);
+    } else if (node.dataset.action === "interaction-select") {
+      const field = node.dataset.input;
+      if (field === "actor" || field === "target" || field === "relation") {
+        this.interactionDraft = { ...(this.interactionDraft || { actor: 0, target: 1, relation: "directional" }), [field]: node.value };
+        if (this.root) this.render();
+      }
     }
   }
 
@@ -756,7 +767,7 @@ export class NsfwBuilder {
     if (status) status.textContent = message;
   }
 
-  // ---- 渲染（顺序：人数 / 主场景 / 阶段 / 角色 / 体位 / 附加活动 / 身体焦点 / 推荐） ----
+  // ---- 渲染（顺序：人数 / 主要行为 / 互动关系 / 阶段 / 角色 / 体位 / 附加活动 / 身体焦点 / 镜头环境 / 推荐） ----
 
   render() {
     if (!this.root) return;
@@ -773,7 +784,6 @@ export class NsfwBuilder {
           ${this.noticesHtml()}
           ${this.participantsHtml()}
           ${this.primaryActHtml()}
-          ${this.sceneHtml()}
           ${this.interactionsHtml()}
           ${this.stageHtml()}
           ${this.charactersHtml()}
@@ -812,24 +822,27 @@ export class NsfwBuilder {
 
   participantsHtml() {
     if (!this.options.participants.length) return "";
-    return this.radioGroupHtml("人数", this.options.participants, this.context.participant_count == null ? null : String(this.context.participant_count), { action: "participants", dataGroup: "participants" });
+    return this.radioGroupHtml("人数", this.options.participants, this.context.participant_count == null ? null : String(this.context.participant_count), { action: "participants", dataGroup: "participants", id: "nb-人物" });
   }
 
-  sceneHtml() {
-    if (!this.options.scenes.length) return "";
-    return this.radioGroupHtml("主场景", this.options.scenes, this.context.primary_scene_type || null, { action: "exclusive", dataGroup: "scene" });
-  }
-  primaryActHtml() { return this.radioGroupHtml("主要行为 · 写入 Base", this.options.primaryActs, this.context.primary_act || null, { action: "exclusive", dataGroup: "primaryAct" }); }
+  primaryActHtml() { return this.radioGroupHtml("主要行为 · 写入 Base", this.options.primaryActs, this.context.primary_act || null, { action: "exclusive", dataGroup: "primaryAct", id: "nb-主要行为" }); }
   interactionsHtml() {
-    const count = participantNumber(this.context.participant_count) || 1; if (count < 2) return `<div class="nb-notice">选择 2–3 人以启用互动关系</div>`;
-    const actors = Array.from({length:count},(_,i)=>`<option value="${i}">C${i+1}</option>`).join("");
-    const targets = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===1?"selected":""}>C${i+1}</option>`).join("");
-    return `<section class="nb-fieldset"><legend class="nb-legend">互动关系 · Actor → Action → Target</legend><div class="nb-interaction-controls"><select data-input="actor">${actors}</select><select data-input="target">${targets}</select><select data-input="relation"><option value="directional">定向</option><option value="mutual">相互</option></select>${this.options.interactionActions.map(o=>`<button data-action="interaction-add" data-key="${esc(o.key)}">${esc(o.label)} <small>互动 C1 → C2</small></button>`).join("")}</div>${(this.context.interactions||[]).map(r=>`<div>C${r.actor+1} → ${esc(r.action)} → C${r.target+1} <button data-action="interaction-remove" data-id="${esc(r.id)}">移除</button></div>`).join("")}</section>`;
+    const count = participantNumber(this.context.participant_count) || 1;
+    if (count < 2) return `<div class="nb-notice">选择 2–3 人以启用互动关系</div>`;
+    const draft = this.interactionDraft || (this.interactionDraft = { actor: 0, target: 1, relation: "directional" });
+    const clamp = (v, fallback) => { const n = Number(v); return Number.isFinite(n) ? Math.min(Math.max(n, 0), count - 1) : fallback; };
+    const actor = clamp(draft.actor, 0);
+    const target = clamp(draft.target, 1);
+    this.interactionDraft = { ...draft, actor, target };
+    const actors = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===actor?"selected":""}>C${i+1}</option>`).join("");
+    const targets = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===target?"selected":""}>C${i+1}</option>`).join("");
+    const relationSel = `<option value="directional" ${draft.relation!=="mutual"?"selected":""}>定向</option><option value="mutual" ${draft.relation==="mutual"?"selected":""}>相互</option>`;
+    return `<section class="nb-fieldset" id="nb-互动关系"><legend class="nb-legend">互动关系 · Actor → Action → Target</legend><div class="nb-interaction-controls"><select data-action="interaction-select" data-input="actor">${actors}</select><select data-action="interaction-select" data-input="target">${targets}</select><select data-action="interaction-select" data-input="relation">${relationSel}</select>${this.options.interactionActions.map(o=>`<button data-action="interaction-add" data-key="${esc(o.key)}">${esc(o.label)} <small>互动 C${actor+1} → C${target+1}</small></button>`).join("")}</div>${(this.context.interactions||[]).map(r=>`<div>C${r.actor+1} → ${esc(r.action)} → C${r.target+1} <button data-action="interaction-remove" data-id="${esc(r.id)}">移除</button></div>`).join("")}</section>`;
   }
 
   stageHtml() {
     if (!this.options.stages.length) return "";
-    return this.radioGroupHtml("阶段", this.options.stages, this.context.stage || null, { action: "exclusive", dataGroup: "stage" });
+    return this.radioGroupHtml("阶段", this.options.stages, this.context.stage || null, { action: "exclusive", dataGroup: "stage", id: "nb-阶段体位" });
   }
 
   charactersHtml() {
@@ -837,7 +850,7 @@ export class NsfwBuilder {
     const n = count == null ? 1 : Math.max(1, count);
     const parts = [];
     for (let i = 0; i < n; i++) parts.push(this.charClothingHtml(i) + this.charStateHtml(i, "expression", "表情", this.options.expressions, this.context.expressions?.[i]) + this.charStateHtml(i, "state", "状态", this.options.characterStates, this.context.character_state?.[i]));
-    return `<section class="nb-group nb-char-clothing-group" aria-label="角色服装状态">${parts.join("")}</section>`;
+    return `<section class="nb-group nb-char-clothing-group" aria-label="角色服装状态" id="nb-角色状态">${parts.join("")}</section>`;
   }
   charStateHtml(i, kind, label, options, current) { return `<fieldset class="nb-fieldset"><legend>C${i+1} ${label} · 写入 C${i+1}</legend><div class="nb-options">${options.map(o=>`<button data-action="char-state" data-kind="${kind}" data-char="${i}" data-key="${esc(o.key)}" class="${isSelected(current,o.key)?"active":""}">${esc(o.label)}</button>`).join("")}</div></fieldset>`; }
 
@@ -873,7 +886,7 @@ export class NsfwBuilder {
     if (!visiblePositions.length) {
       return `<fieldset class="nb-fieldset">
         <legend class="nb-legend">体位</legend>
-        <div class="nb-notice">当前主场景下暂无可用体位。</div>
+        <div class="nb-notice">当前环境 / 情境下暂无可用体位。</div>
       </fieldset>`;
     }
     return this.radioGroupHtml("体位", visiblePositions, this.context.position || null, { action: "exclusive", dataGroup: "position" });
@@ -901,12 +914,12 @@ export class NsfwBuilder {
     if (!this.options.bodyFocus.length) return "";
     return this.radioGroupHtml("身体聚焦", this.options.bodyFocus, this.context.body_focus || null, { action: "body-focus", dataGroup: "bodyfocus" });
   }
-  compositionEnvironmentHtml() { return `<section><div class="nb-legend">镜头环境 · 写入 Base</div>${this.radioGroupHtml("构图", this.options.compositions, this.context.composition, { action:"exclusive", dataGroup:"composition" })}${this.radioGroupHtml("环境 / 情境", [...this.options.scenes,...this.options.environments], this.context.primary_scene_type || this.context.environment, { action:"exclusive", dataGroup:"scene" })}</section>`; }
+  compositionEnvironmentHtml() { return `<section id="nb-镜头环境"><div class="nb-legend">镜头环境 · 写入 Base</div>${this.radioGroupHtml("构图", this.options.compositions, this.context.composition, { action:"exclusive", dataGroup:"composition" })}${this.radioGroupHtml("环境 / 情境", [...this.options.scenes,...this.options.environments], this.context.primary_scene_type || this.context.environment, { action:"exclusive", dataGroup:"scene" })}</section>`; }
 
-  radioGroupHtml(label, options, current, { action = "exclusive", dataGroup = "", disabled = false, hint = "" } = {}) {
+  radioGroupHtml(label, options, current, { action = "exclusive", dataGroup = "", disabled = false, hint = "", id = "" } = {}) {
     if (!options || !options.length) return "";
     const groupAttr = dataGroup ? ` data-group="${esc(dataGroup)}"` : "";
-    return `<fieldset class="nb-fieldset" ${disabled ? "disabled" : ""}>
+    return `<fieldset class="nb-fieldset" ${disabled ? "disabled" : ""}${id ? ` id="${esc(id)}"` : ""}>
       <legend class="nb-legend">${esc(label)}</legend>
       <div class="nb-options" role="radiogroup" aria-label="${esc(label)}"${groupAttr}>
         ${options.map((o) => { const comp=this._compatibility(o); const retained=isSelected(current,o.key)&&!comp.ok; return `

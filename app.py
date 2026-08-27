@@ -3110,7 +3110,7 @@ def _enrich_proposal_sections(proposal: dict, conn) -> dict:
     return proposal
 
 
-# Scene Composer 语义候选配置（高层主场景 / 服装状态 / 附加活动 / 身体聚焦 / 体位来源）。
+# Scene Composer 语义候选配置（环境/情境 / 服装状态 / 附加活动 / 身体聚焦 / 体位来源）。
 # 所有 canonical tag 必须真实存在于 data/tags.sqlite（或 curated data/nsfw_taxonomy.json），
 # 运行时逐条校验，未命中即 drop（绝不发明 / 绝不输出未校验 tag）。
 SCENE_COMPOSER_CONFIG_PATH = BASE_DIR / "config" / "scene_composer.json"
@@ -3205,16 +3205,17 @@ def _scene_tag_exists(conn, tag: str) -> bool:
 
 @app.get("/api/nsfw-builder/options")
 def nsfw_builder_options():
-    """Scene Composer 候选（participants/scenes/stages/positions/clothingStates/activities/bodyFocus）。
+    """Scene Composer 候选（participants/scenarios/environments/stages/positions/clothingStates/activities/bodyFocus）。
 
     青少年模式下全部返回空候选（组件整体禁用）。成人模式下从 config/scene_composer.json
-    取高层主场景 / 服装状态 / 附加活动 / 身体聚焦，体位取自 curated nsfw_positions；
-    每个 canonical tag 运行时逐条校验 sqlite，未命中即 drop（绝不发明 / 绝不输出未校验 tag）。
+    取环境/情境（scenarios/environments）/ 服装状态 / 附加活动 / 身体聚焦，体位取自 curated
+    nsfw_positions；每个 canonical tag 运行时逐条校验 sqlite，未命中即 drop（绝不发明 /
+    绝不输出未校验 tag）。
     """
     conn = _conn()
     try:
         if _load_user_settings()["adolescent_mode"]:
-            return {group: [] for group in NSFW_BUILDER_GROUPS + ("scenes", "activities")}
+            return {group: [] for group in NSFW_BUILDER_GROUPS + ("activities",)}
 
         config = _scene_composer_config()
 
@@ -3272,8 +3273,8 @@ def nsfw_builder_options():
                 {"key": "3", "label": "3"},
             ],
             "primaryActs": _verified(config.get("primary_acts")),
-            # Phase A-D aliases remain read-only compatibility views.
-            "scenes": _verified(config.get("primary_scenes")),
+            # `scenarios` + `environments` 是环境/情境的唯一来源；旧的 `primary_scenes`（主场景）
+            # 概念已删除（无独立语义），不再下发 legacy `scenes` 别名。
             "scenarios": _verified(config.get("scenarios")),
             "environments": _verified(config.get("environments")),
             "stages": [

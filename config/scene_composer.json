@@ -1,11 +1,4 @@
 {
-  "primary_scenes": [
-    { "key": "solo_intimate", "label": "单人亲密", "tag": "solo", "minParticipants": 1 },
-    { "key": "couple_intimate", "label": "伴侣亲密", "tag": "sex", "minParticipants": 2 },
-    { "key": "multi_intimate", "label": "多人互动", "tag": "group sex", "minParticipants": 3 },
-    { "key": "roleplay_situational", "label": "情境 / 旁观", "tag": "voyeurism", "minParticipants": 2 },
-    { "key": "foreplay_only", "label": "前戏向", "tag": "touching", "minParticipants": 2 }
-  ],
   "primary_acts": [
     { "key": "solo", "label": "单人自慰", "tag": "masturbation", "route": "base", "minParticipants": 1, "maxParticipants": 1, "exclusiveGroup": "primary_act" },
     { "key": "vaginal_sex", "label": "性交", "tag": "vaginal sex", "route": "base", "minParticipants": 2, "exclusiveGroup": "primary_act", "allowedStages": ["MAIN_ACT", "CLIMAX"] },
