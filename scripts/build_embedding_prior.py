@@ -34,6 +34,7 @@ from prompt.prior_schema import (  # noqa: E402
     upsert_semantic_node,
     write_manifest_row,
 )
+from prompt.prior_safety import classify_tag_safety  # noqa: E402
 from scripts.lib import (  # noqa: E402
     embedding_cache,
     semantic_slots,
@@ -243,6 +244,20 @@ def compute_neighbors(matrix, tag_keys, k):
 # 不再本模块自建 schema，也不再 DROP 任何表。
 
 
+def safety_scope_of(tag_key, adult_set):
+    """用 prompt/prior_safety.classify_tag_safety 标注 safety_scope（§2.4）。
+
+    minor_like / age_ambiguous 硬规则优先，绝不判为 ``adult``；否则按 DB adult_set
+    （NSFW taxonomy）判 adult；其余按分类器（成人词汇 fallback）→ general。
+    """
+    scope = classify_tag_safety(tag_key)
+    if scope in ("minor_like", "age_ambiguous"):
+        return scope
+    if tag_key in adult_set:
+        return "adult"
+    return scope
+
+
 def resolve_node(tag_key, meta, vector, slot_vectors, seed_map, adult_set,
                  min_similarity, min_margin):
     """tag → 语义节点（§27 多来源，embedding 仅作辅助证据）。
@@ -260,7 +275,7 @@ def resolve_node(tag_key, meta, vector, slot_vectors, seed_map, adult_set,
     决策（作为证据字段单独记录）。relation_type 一律由 node/taxonomy 派生，绝不由
     相似度直接判定（见 classify_relation）。
     """
-    safety = "adult" if tag_key in adult_set else "general"
+    safety = safety_scope_of(tag_key, adult_set)
     # 1. explicit/manual mapping（tag_section_override 人类显式覆盖，最高优先）
     node = SECTION_TO_NODE.get(meta.get("section")) if meta.get("section") else None
     if node:
@@ -610,7 +625,7 @@ def run_full_build(model, args, slot_defs, seed_map, parent_map, adult_set):
                 src_node = tag_rows[src]["node_id"]
                 dst_node = tag_rows[dst]["node_id"]
                 rel = classify_relation(src_node, dst_node, parent_map)
-                safety = "adult" if dst in adult_set else "general"
+                safety = safety_scope_of(dst, adult_set)
                 conn.execute(
                     "INSERT OR REPLACE INTO prior_semantic_neighbor "
                     "(src_tag, dst_tag, similarity, src_node, dst_node, relation_type, safety_scope, model_id, model_revision) "

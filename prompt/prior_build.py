@@ -14,9 +14,12 @@
   2. 本地 ``data/tags.sqlite``（无逐帖共现，只能生成「合成」关联：同语义节点 ~0.3、
      父子节点 ~0.15，post_count 作为质量代理）。
 
-无 tag 黑名单：年龄含糊标签（young/loli/shota 等）照常参与；adult/general 分割
-仅由 Danbooru rating（q/e=adult，g/s=general）决定（本地回退用 curated NSFW taxonomy
-作为代理）。安全过滤由运行时 serving 层负责，不在此构建层做任何硬排除。
+年龄含糊标签（young/loli/shota 等）仍照常参与 general 学习（无黑名单、不被排除）；
+adult/general 分割由 Danbooru rating（q/e=adult，g/s=general）决定（本地回退用
+curated NSFW taxonomy 作为代理）。Phase 2 安全边界（§2.2/§2.3）：任何携带 minor_like /
+age_ambiguous 证据（prompt.prior_safety.classify_tag_safety）的样本/标签绝不进入
+adult 作用域（prior_tag_assoc / prior_slot_tag / prior_context_tag 的 is_adult=1 行）。
+运行时 serving 层安全过滤仍保留，本构建层不删除运行时安全。
 
 运行：``python prompt/prior_build.py [--output PATH] [--no-hf]``
 """
@@ -37,6 +40,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+from prompt.prior_safety import classify_tag_safety, has_minor_evidence  # noqa: E402
 from prompt.prior_schema import (  # noqa: E402
     PUBLIC_RULE_SOURCES,
     ensure_prior_schema,
@@ -132,6 +136,14 @@ def norm_tag(tag: str) -> str:
     value = (tag or "").strip().lower().replace("_", " ")
     value = re.sub(r"[^\w\s]+", " ", value, flags=re.UNICODE)
     return " ".join(value.split())
+
+
+def _sample_has_minor_evidence(tags) -> bool:
+    """样本（tag 可迭代集合）是否携带 minor_like / age_ambiguous 证据（§2.2/§2.3）。
+
+    命中即该样本不得写入 adult 作用域（既不进 adult doc-freq，也不进 adult 配对）。
+    """
+    return any(has_minor_evidence(t) for t in tags)
 
 
 def _section_for_tag(tag: str) -> str:
@@ -361,12 +373,19 @@ def compute_npmi_assoc(records: list[dict], vocab: set[str]) -> list[dict]:
 
     NPMI(a,b) = ln(P(a,b) / (P(a)P(b))) / (-ln P(a,b))，截断到 [-1, 1]。
     quality_weight = 共现帖子的质量权重之和。
+
+    Phase 2 硬规则（§2.3）：任何携带 minor_like / age_ambiguous 证据的样本绝不进入
+    adult 作用域（不进入 adult doc-freq、不进入 adult 配对），因此 minor-like 标签
+    永不出现在 is_adult=1 的关联里。
     """
     adult_df: Counter = Counter()
     general_df: Counter = Counter()
     n_adult = n_general = 0
     for rec in records:
         is_adult = rec["rating"] in ADULT_RATINGS
+        # adult 作用域硬规则：minor-like / age-ambiguous 样本跳过（保守：不降级进 general）。
+        if is_adult and _sample_has_minor_evidence(rec["tags"]):
+            continue
         df = adult_df if is_adult else general_df
         if is_adult:
             n_adult += 1
@@ -383,6 +402,8 @@ def compute_npmi_assoc(records: list[dict], vocab: set[str]) -> list[dict]:
         quality: Counter = Counter()
         for rec in records:
             if (rec["rating"] in ADULT_RATINGS) != is_adult:
+                continue
+            if is_adult and _sample_has_minor_evidence(rec["tags"]):
                 continue
             tags = sorted({t for t in rec["tags"] if t in tag_set})
             if len(tags) < 2:
@@ -480,10 +501,13 @@ def synthetic_associations(
                 for c in child_tags:
                     add(p, c, SYN_NPMI_PARENT_CHILD, 0)
 
-    # adult：同 nsfw taxonomy 分类两两（is_adult=1）
+    # adult：同 nsfw taxonomy 分类两两（is_adult=1）。minor-like / age-ambiguous 标签
+    # 即便意外进入 adult_set，也绝不写入 adult 作用域（§2.3 硬规则）。
     cat_tags: dict[str, list[str]] = {}
     for tag in adult_set:
         if tag not in vocab:
+            continue
+        if has_minor_evidence(tag):
             continue
         cat = _nsfw_category_of_tag(nsfw_path, tag) or "nsfw_sex"
         cat_tags.setdefault(cat, []).append(tag)
@@ -513,11 +537,12 @@ def _cap_top_per_tag(assoc: list[dict], limit: int) -> list[dict]:
 def build_slot_tags(node_map, vocab, adult_set) -> list[dict]:
     rows = []
     for tag, (node_id, _conf, _src) in node_map.items():
+        # 硬规则（§2.3）：minor-like / age-ambiguous 标签即便在 adult_set 也绝不标 adult。
         rows.append({
             "semantic_node_id": node_id,
             "tag": tag,
             "frequency": vocab.get(tag, {}).get("post_count", 0),
-            "is_adult": int(tag in adult_set),
+            "is_adult": int(tag in adult_set and not has_minor_evidence(tag)),
         })
     return rows
 
