@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import re
@@ -37,6 +36,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # 允许 `python prompt/prior_build.py` 直接运行时 import prompt.sections。
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
+
+from prompt.prior_schema import (  # noqa: E402
+    PUBLIC_RULE_SOURCES,
+    ensure_prior_schema,
+    schema_hash as prior_schema_hash,
+    upsert_semantic_node,
+    write_manifest_row,
+)
 
 DATA_DIR = BASE_DIR / "data"
 NAV_PATH = BASE_DIR / "config" / "prompt_navigation.json"
@@ -116,66 +123,8 @@ NSFW_CATEGORY_NODE = {
     "nsfw_camera": "base_composition",
 }
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS prior_manifest (
-    source TEXT NOT NULL,
-    revision TEXT,
-    license TEXT,
-    retrieved_at TEXT,
-    schema_hash TEXT,
-    pipeline_version TEXT,
-    tag_count INTEGER,
-    pair_count INTEGER
-);
-CREATE TABLE IF NOT EXISTS prior_tag_assoc (
-    tag_a TEXT NOT NULL,
-    tag_b TEXT NOT NULL,
-    npmi REAL NOT NULL DEFAULT 0,
-    support INTEGER NOT NULL DEFAULT 0,
-    quality_weight REAL NOT NULL DEFAULT 0,
-    is_adult INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (tag_a, tag_b, is_adult),
-    CHECK (tag_a < tag_b)
-);
-CREATE INDEX IF NOT EXISTS idx_prior_tag_assoc_a ON prior_tag_assoc(tag_a, is_adult);
-CREATE INDEX IF NOT EXISTS idx_prior_tag_assoc_b ON prior_tag_assoc(tag_b, is_adult);
-CREATE TABLE IF NOT EXISTS prior_slot_tag (
-    semantic_node_id TEXT NOT NULL,
-    tag TEXT NOT NULL,
-    frequency INTEGER NOT NULL DEFAULT 0,
-    is_adult INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (semantic_node_id, tag, is_adult)
-);
-CREATE INDEX IF NOT EXISTS idx_prior_slot_node ON prior_slot_tag(semantic_node_id, is_adult);
-CREATE TABLE IF NOT EXISTS prior_context_tag (
-    context_tag TEXT NOT NULL,
-    related_tag TEXT NOT NULL,
-    npmi REAL NOT NULL DEFAULT 0,
-    is_adult INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS idx_prior_context ON prior_context_tag(context_tag, is_adult);
-CREATE TABLE IF NOT EXISTS prior_slot_transition (
-    from_node_id TEXT NOT NULL,
-    to_node_id TEXT NOT NULL,
-    frequency INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (from_node_id, to_node_id)
-);
-CREATE TABLE IF NOT EXISTS tag_semantic_node (
-    tag TEXT PRIMARY KEY,
-    semantic_node_id TEXT,
-    confidence REAL,
-    source TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tag_semantic_node ON tag_semantic_node(semantic_node_id);
-"""
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _schema_hash() -> str:
-    return hashlib.sha256(SCHEMA.encode("utf-8")).hexdigest()[:16]
 
 
 def norm_tag(tag: str) -> str:
@@ -290,8 +239,10 @@ def build_semantic_node_map(
 ) -> dict[str, tuple[str, float, str]]:
     """tag -> (semantic_node_id, confidence, source)。
 
-    优先级：导航 seed > Danbooru category(4/3 身份、1 风格) > 年龄含糊→appearance >
+    优先级：导航 seed > Danbooru category(4 身份、1 风格) > 年龄含糊→appearance >
             NSFW taxonomy 分类 > sections._RULES 关键字。
+    Danbooru category 3 = Copyright 是支持性上下文（franchise/作品），绝不映射为
+    char_identity（Genshin Impact / Azur Lane / Fate 等不得填身份槽）。
     无节点返回 None（纯「无法归类」，绝非黑名单排除）。
     """
     mapping: dict[str, tuple[str, float, str]] = {}
@@ -302,9 +253,12 @@ def build_semantic_node_map(
             mapping[tag] = (node_id, 1.0, "nav_seed")
             continue
         category = vocab[tag]["category"]
-        # 2) Character(4) / Copyright(3) → 身份节点
-        if category in (4, 3):
+        # 2) Character(4) → 身份节点（Copyright(3) 是支持性上下文，绝非身份）
+        if category == 4:
             mapping[tag] = ("char_identity", 0.9, "category")
+            continue
+        # 2b) Copyright(3) → 无 copyright/franchise 槽位 → 当作支持性上下文（不落身份节点）
+        if category == 3:
             continue
         # 3) Artist(1) → 风格节点
         if category == 1:
@@ -605,14 +559,30 @@ def write_prior(
     transitions: list[dict],
     node_map: dict[str, tuple[str, float, str]],
 ) -> None:
+    """就地写库（§1.6/§1.8）。
+
+    只重建公共独占表；``prior_semantic_neighbor``（Embedding 独占）与 embedding 的
+    ``prior_manifest`` 行绝不触碰。``tag_semantic_node`` 为共享表：只清公共来源行，
+    再按 tag 合并 upsert（更高优先级来源覆盖，绝不抹除 embedding 证据列）。
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
-    tmp = output.with_suffix(".sqlite.tmp")
-    if tmp.exists():
-        tmp.unlink()
-    conn = sqlite3.connect(str(tmp))
+    conn = sqlite3.connect(str(output))
     conn.row_factory = sqlite3.Row
     try:
-        conn.executescript(SCHEMA)
+        ensure_prior_schema(conn)
+
+        # 快照式重建公共独占表（绝不触碰 prior_semantic_neighbor）
+        conn.execute("DELETE FROM prior_tag_assoc")
+        conn.execute("DELETE FROM prior_slot_tag")
+        conn.execute("DELETE FROM prior_context_tag")
+        conn.execute("DELETE FROM prior_slot_transition")
+
+        # 共享表 tag_semantic_node：只清公共来源行，保留 embedding 行与证据列
+        placeholders = ",".join("?" for _ in PUBLIC_RULE_SOURCES)
+        conn.execute(
+            f"DELETE FROM tag_semantic_node WHERE rule_source IN ({placeholders})",
+            PUBLIC_RULE_SOURCES,
+        )
 
         conn.executemany(
             "INSERT OR REPLACE INTO prior_tag_assoc "
@@ -638,28 +608,25 @@ def write_prior(
             "VALUES (:from_node_id, :to_node_id, :frequency)",
             transitions,
         )
-        conn.executemany(
-            "INSERT OR REPLACE INTO tag_semantic_node "
-            "(tag, semantic_node_id, confidence, source) "
-            "VALUES (:tag, :semantic_node_id, :confidence, :source)",
-            [
-                {"tag": tag, "semantic_node_id": node_id, "confidence": conf, "source": src}
-                for tag, (node_id, conf, src) in sorted(node_map.items())
-            ],
-        )
-        conn.execute(
-            "INSERT INTO prior_manifest "
-            "(source, revision, license, retrieved_at, schema_hash, pipeline_version, tag_count, pair_count) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (
-                source, revision, license_, _now_iso(), _schema_hash(),
-                PIPELINE_VERSION, len(node_map), len(assoc),
+        for tag, (node_id, conf, src) in sorted(node_map.items()):
+            upsert_semantic_node(conn, tag, node_id=node_id, confidence=conf, rule_source=src)
+        write_manifest_row(
+            conn,
+            source_id="public-corpus",
+            source_type="public",
+            revision=revision,
+            license=license_,
+            retrieved_at=_now_iso(),
+            pipeline_version=PIPELINE_VERSION,
+            schema_hash=prior_schema_hash(),
+            metadata_json=json.dumps(
+                {"source": source, "tag_count": len(node_map), "pair_count": len(assoc)},
+                ensure_ascii=False,
             ),
         )
         conn.commit()
     finally:
         conn.close()
-    tmp.replace(output)
 
 
 def build_context_rows(assoc: list[dict], limit: int) -> list[dict]:

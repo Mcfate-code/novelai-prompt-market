@@ -28,6 +28,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import db  # noqa: E402
+from prompt.prior_schema import (  # noqa: E402
+    ensure_prior_schema,
+    schema_hash,
+    upsert_semantic_node,
+    write_manifest_row,
+)
 from scripts.lib import (  # noqa: E402
     embedding_cache,
     semantic_slots,
@@ -233,76 +239,8 @@ def compute_neighbors(matrix, tag_keys, k):
     return dict(out)
 
 
-def _table_columns(conn, table: str) -> set[str]:
-    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def create_output_schema(conn):
-    """建立本任务的表（仅 tag_semantic_node / prior_semantic_neighbor / prior_manifest）。
-
-    并行主任务（prompt/prior_build.py）可能已建过同名的旧版表：
-      - 旧 ``tag_semantic_node`` 用 ``semantic_node_id``/``source``（本任务 §28 用
-        ``node_id``/``rule_source`` + embedding 证据列）。
-      - 旧 ``prior_manifest`` 用 ``source/revision/license/...`` 列（本任务用 key/value）。
-    这两种表都属于本任务（§28/§40 明确列为本任务表，且不在「不得删改」清单内），
-    故检测到旧版 schema 时 DROP 后按本任务 schema 重建。绝不触碰
-    prior_tag_assoc / prior_slot_tag / prior_context_tag / prior_slot_transition。
-    """
-    existing = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
-
-    if "tag_semantic_node" in existing:
-        cols = _table_columns(conn, "tag_semantic_node")
-        if "node_id" not in cols and "semantic_node_id" in cols:
-            conn.execute("DROP TABLE tag_semantic_node")
-
-    if "prior_manifest" in existing:
-        cols = _table_columns(conn, "prior_manifest")
-        if "key" not in cols or "value" not in cols:
-            conn.execute("DROP TABLE prior_manifest")
-
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS tag_semantic_node (
-        tag TEXT PRIMARY KEY,
-        node_id TEXT,
-        confidence REAL,
-        rule_source TEXT,
-        embedding_score REAL,
-        model_id TEXT,
-        model_revision TEXT,
-        safety_scope TEXT
-    );
-    CREATE TABLE IF NOT EXISTS prior_semantic_neighbor (
-        src_tag TEXT,
-        dst_tag TEXT,
-        similarity REAL,
-        src_node TEXT,
-        dst_node TEXT,
-        relation_type TEXT,
-        safety_scope TEXT,
-        model_id TEXT,
-        model_revision TEXT,
-        PRIMARY KEY(src_tag, dst_tag)
-    );
-    CREATE TABLE IF NOT EXISTS prior_manifest (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_tsn_node ON tag_semantic_node(node_id);
-    CREATE INDEX IF NOT EXISTS idx_tsn_tag ON tag_semantic_node(tag);
-    CREATE INDEX IF NOT EXISTS idx_psn_src ON prior_semantic_neighbor(src_tag);
-    CREATE INDEX IF NOT EXISTS idx_psn_srcnode ON prior_semantic_neighbor(src_node);
-    """)
-    conn.commit()
-
-
-def write_manifest(conn, manifest: dict):
-    for k, v in manifest.items():
-        conn.execute(
-            "INSERT OR REPLACE INTO prior_manifest (key, value) VALUES (?,?)",
-            (k, str(v)),
-        )
-    conn.commit()
+# 建表 / 迁移统一走 prompt/prior_schema.ensure_prior_schema（§1.1/§1.7），
+# 不再本模块自建 schema，也不再 DROP 任何表。
 
 
 def resolve_node(tag_key, meta, vector, slot_vectors, seed_map, adult_set,
@@ -313,7 +251,8 @@ def resolve_node(tag_key, meta, vector, slot_vectors, seed_map, adult_set,
       1. manual     tag_section_override → SECTION_TO_NODE（人类显式覆盖，最高）conf 0.95
       2. seed       prompt_navigation.json seed_tags                        conf 0.90
       3. taxonomy   taxonomy_map.category_l1 → node                         conf 0.85
-      4. category   tags.category 4/3（角色/版权身份）→ char_identity        conf 0.75
+      4. category   tags.category 4（角色）→ char_identity                   conf 0.75
+      4b. copyright tags.category 3（版权/作品）→ 支持性上下文，绝非 char_identity
       5. embedding  槽位质心相似度 + 歧义保护（§30/§31，仅辅助）              conf 0.60
       否则 node_id='unknown'，rule_source='unknown'（§27 末尾 fallback）。
 
@@ -333,9 +272,12 @@ def resolve_node(tag_key, meta, vector, slot_vectors, seed_map, adult_set,
     node = tag_enrichment.TAXONOMY_L1_TO_NODE.get(meta.get("taxonomy_l1")) if meta.get("taxonomy_l1") else None
     if node:
         return node, 0.85, "taxonomy", None, safety
-    # 4. Danbooru category / known category
-    if meta.get("category") in (4, 3):
+    # 4. Danbooru category 4 = Character → identity node（Copyright 3 ≠ identity）
+    if meta.get("category") == 4:
         return "char_identity", 0.75, "category", None, safety
+    # 4b. Danbooru category 3 = Copyright → supporting context（never char_identity）
+    if meta.get("category") == 3:
+        return "unknown", 0.0, "copyright", None, safety
     # 5. embedding slot similarity（辅助，带最小相似度/边际歧义保护）
     node_id, score, src = semantic_slots.assign_slot(
         vector, slot_vectors, min_similarity=min_similarity, min_margin=min_margin
@@ -649,19 +591,18 @@ def run_full_build(model, args, slot_defs, seed_map, parent_map, adult_set):
     output.parent.mkdir(parents=True, exist_ok=True)
     conn = db.get_conn(output)
     try:
-        create_output_schema(conn)
-        # 快照式全量重建本任务拥有的表（避免残留旧行；绝不触碰并行任务的表）
-        conn.execute("DELETE FROM tag_semantic_node")
+        ensure_prior_schema(conn)
+        # 快照式全量重建 embedding 独占表；绝不 DELETE tag_semantic_node、绝不触碰公共表
         conn.execute("DELETE FROM prior_semantic_neighbor")
         node_family = semantic_slots.node_to_family(slot_defs)
         for k in tag_keys:
             r = tag_rows[k]
-            conn.execute(
-                "INSERT OR REPLACE INTO tag_semantic_node "
-                "(tag, node_id, confidence, rule_source, embedding_score, model_id, model_revision, safety_scope) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (k, r["node_id"], r["confidence"], r["rule_source"], r["embedding_score"],
-                 model, EMBEDDING_REVISION, r["safety_scope"]),
+            upsert_semantic_node(
+                conn, k,
+                node_id=r["node_id"], confidence=r["confidence"],
+                rule_source=r["rule_source"], embedding_score=r["embedding_score"],
+                model_id=model, model_revision=EMBEDDING_REVISION,
+                safety_scope=r["safety_scope"],
             )
         n_neighbor = 0
         for src in tag_keys:
@@ -677,24 +618,31 @@ def run_full_build(model, args, slot_defs, seed_map, parent_map, adult_set):
                     (src, dst, sim, src_node, dst_node, rel, safety, model, EMBEDDING_REVISION),
                 )
                 n_neighbor += 1
-        write_manifest(conn, {
-            "artifact_version": "1",
-            "pipeline_version": args.pipeline_version,
-            "provider": "siliconflow",
-            "embedding_model": model,
-            "embedding_revision": EMBEDDING_REVISION,
-            "embedding_dimension": siliconflow_embeddings.EXPECTED_DIM,
-            "normalized": "true",
-            "tag_count": len(tag_keys),
-            "neighbor_k": args.neighbor_k,
-            "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "source_datasets": "data/tags.sqlite (tags, tag_aliases, taxonomy_map, tag_section_override); config/prompt_navigation.json; config/semantic_slots.json",
-            "source_revisions": "git:" + _git_rev(),
-            "licenses": "danbooru tag corpus; SiliconFlow embedding model (build-time only)",
-            "min_similarity": args.min_similarity,
-            "min_margin": args.min_margin,
-            "neighbor_rows": n_neighbor,
-        })
+        write_manifest_row(
+            conn,
+            source_id="siliconflow-embedding",
+            source_type="embedding",
+            revision=EMBEDDING_REVISION,
+            license="danbooru tag corpus; SiliconFlow embedding model (build-time only)",
+            retrieved_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            pipeline_version=args.pipeline_version,
+            schema_hash=schema_hash(),
+            metadata_json=json.dumps({
+                "artifact_version": "1",
+                "provider": "siliconflow",
+                "embedding_model": model,
+                "embedding_dimension": siliconflow_embeddings.EXPECTED_DIM,
+                "normalized": "true",
+                "tag_count": len(tag_keys),
+                "neighbor_k": args.neighbor_k,
+                "source_datasets": "data/tags.sqlite (tags, tag_aliases, taxonomy_map, tag_section_override); config/prompt_navigation.json; config/semantic_slots.json",
+                "source_revisions": "git:" + _git_rev(),
+                "licenses": "danbooru tag corpus; SiliconFlow embedding model (build-time only)",
+                "min_similarity": args.min_similarity,
+                "min_margin": args.min_margin,
+                "neighbor_rows": n_neighbor,
+            }, ensure_ascii=False),
+        )
         conn.commit()
         n_tag = conn.execute("SELECT COUNT(*) FROM tag_semantic_node").fetchone()[0]
         n_nei = conn.execute("SELECT COUNT(*) FROM prior_semantic_neighbor").fetchone()[0]

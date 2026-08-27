@@ -364,7 +364,7 @@ class PriorRuntimeTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM prior_tag_assoc WHERE tag_a=? OR tag_b=?", (tag, tag)
             ).fetchone()[0]
             node = conn.execute(
-                "SELECT semantic_node_id FROM tag_semantic_node WHERE tag=?", (tag,)
+                "SELECT node_id FROM tag_semantic_node WHERE tag=?", (tag,)
             ).fetchone()
             adult_n = conn.execute(
                 "SELECT COUNT(*) FROM prior_tag_assoc WHERE (tag_a=? OR tag_b=?) AND is_adult=1",
@@ -372,7 +372,7 @@ class PriorRuntimeTest(unittest.TestCase):
             ).fetchone()[0]
             self.assertGreater(n, 0, f"{tag} was excluded from prior_tag_assoc")
             self.assertEqual(adult_n, 0, f"{tag} must be general (is_adult=0)")
-            self.assertEqual(node["semantic_node_id"], "char_appearance")
+            self.assertEqual(node["node_id"], "char_appearance")
         conn.close()
 
     # ------------------------------------------------------------------ #
