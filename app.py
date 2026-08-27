@@ -2731,6 +2731,34 @@ def _collect_scoped_positive_tags(state, conn=None) -> dict:
     return result
 
 
+def _recent_tag_scope(conn, tag: str) -> str:
+    """按标签所属 prompt section 派生 recent_tags_scoped 作用域。
+
+    base-environment 标签 → 'base'；scene 标签 → 'scene'。
+    角色（character）与互动（interaction）作用域由调用方显式指定。
+    """
+    try:
+        section = prompt_sections.classify_tag(conn, tag)
+    except Exception:
+        section = "other"
+    return "scene" if section == "scene" else "base"
+
+
+def _upsert_recent_scoped(conn, scope: str, tag: str, now: str) -> None:
+    """写入/累加 recent_tags_scoped（按作用域隔离个人最近使用，spec 6.2）。"""
+    tag = search._norm(tag)
+    if not tag:
+        return
+    conn.execute(
+        "INSERT INTO recent_tags_scoped (scope, tag_name, last_used_at, use_count) "
+        "VALUES (?,?,?,1) "
+        "ON CONFLICT(scope, tag_name) DO UPDATE SET "
+        "last_used_at=excluded.last_used_at, "
+        "use_count=recent_tags_scoped.use_count+1",
+        (scope, tag, now),
+    )
+
+
 def _record_scoped_cooccurrence(conn, scoped_tags: dict, event_weight: float = 1.0) -> list[str]:
     """按作用域写入 tag_cooccurrence_scoped（修复跨角色污染）。
 
@@ -2800,6 +2828,19 @@ def _record_scoped_cooccurrence(conn, scoped_tags: dict, event_weight: float = 1
                 "ON CONFLICT(tag_name) DO UPDATE SET last_used_at=excluded.last_used_at, use_count=recent_tags.use_count+1",
                 (tag, now),
             )
+        # recent_tags_scoped：按作用域写个人最近使用（spec 6.2），供推荐按当前上下文隔离读取。
+        # base-environment 标签按 section 拆成 base / scene；角色标签归 character；互动动作归 interaction。
+        for tag in _normalized_unique_tags(base):
+            _upsert_recent_scoped(conn, _recent_tag_scope(conn, tag), tag, now)
+        for ch in characters:
+            char_tags = _normalized_unique_tags(
+                ([ch.get("identity")] if ch.get("identity") else []) + (ch.get("tags") or [])
+            )
+            for tag in char_tags:
+                _upsert_recent_scoped(conn, "character", tag, now)
+        for _source_tag, _target_tag, action in relations:
+            if action:
+                _upsert_recent_scoped(conn, "interaction", action, now)
     return learned
 
 

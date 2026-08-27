@@ -79,6 +79,19 @@ CREATE TABLE IF NOT EXISTS recent_tags (
     use_count INTEGER NOT NULL DEFAULT 1
 );
 
+-- 作用域化个人最近使用（spec 6.2）：按 base/character/interaction/scene 隔离，
+-- 供 Recommendation V3 的 personal_recent 源按当前推荐上下文（target/section/node）过滤读取。
+-- 旧的 recent_tags（全局）保留用于向后兼容；新推荐优先读本表，缺失/为空时回退到 recent_tags。
+CREATE TABLE IF NOT EXISTS recent_tags_scoped (
+    scope TEXT NOT NULL,
+    tag_name TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    use_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (scope, tag_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recent_scoped_scope ON recent_tags_scoped(scope);
+
 CREATE TABLE IF NOT EXISTS presets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,

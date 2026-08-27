@@ -596,8 +596,7 @@ class RecommendationService:
                                       - float(row["negative_weight"] or 0))
             return [{"tag": tag, "count": count} for tag, count in totals.items() if count > 0]
         if name == "personal_recent":
-            return [{"tag": row["tag_name"], "use_count": row["use_count"]}
-                    for row in self.conn.execute("SELECT tag_name, use_count FROM recent_tags ORDER BY use_count DESC, last_used_at DESC")]
+            return self._personal_recent_items(ctx)
         if name == "semantic_context":
             return self._semantic_items(ctx)
         if name == "adult_context":
@@ -611,6 +610,34 @@ class RecommendationService:
         if isinstance(node, Mapping):
             return node.get("seed_tags", node.get("tags", []))
         return []
+
+    def _personal_recent_items(self, ctx):
+        """作用域过滤的个人最近使用（spec 6.3/6.5）。
+
+        优先读 recent_tags_scoped 并按当前推荐上下文（target）过滤作用域；
+        作用域结果为空或表缺失/不可用时，优雅回退到全局 recent_tags（向后兼容）。
+        个人偏好仍是小权重 bonus，不参与主排序（见 _v3_sort 的 0.05 * personal）。
+        """
+        scopes = _personal_recent_scopes(ctx)
+        placeholders = ",".join("?" for _ in scopes)
+        rows: list[Any] = []
+        try:
+            rows = list(self.conn.execute(
+                f"SELECT tag_name, use_count FROM recent_tags_scoped "
+                f"WHERE scope IN ({placeholders}) ORDER BY use_count DESC, last_used_at DESC",
+                scopes,
+            ).fetchall())
+        except Exception:
+            rows = []
+        if not rows:
+            # 优雅回退：作用域表缺失/为空时退回全局 recent_tags（保持旧行为）。
+            try:
+                rows = list(self.conn.execute(
+                    "SELECT tag_name, use_count FROM recent_tags ORDER BY use_count DESC, last_used_at DESC"
+                ).fetchall())
+            except Exception:
+                rows = []
+        return [{"tag": row["tag_name"], "use_count": row["use_count"]} for row in rows]
 
     def _adult_items(self, ctx):
         source = self.sources.get("adult_context", [])
@@ -699,6 +726,19 @@ class RecommendationService:
 
 def item_sort(item, tag):
     return (-int(item.get("meta", {}).get("rank", 10**9)), tag)
+
+
+def _personal_recent_scopes(ctx) -> tuple[str, ...]:
+    """把推荐目标映射到个人最近使用的作用域集合（spec 6.3）。
+
+    base 目标读 base/scene（base 环境历史），绝不读 character；character 目标读
+    character（角色偏好），绝不读 base 环境历史；未指定目标读全部作用域。
+    """
+    if ctx.target == "base":
+        return ("base", "scene")
+    if ctx.target == "character" or ctx.target.startswith("char:"):
+        return ("character",)
+    return ("base", "scene", "character", "interaction")
 
 
 def source_sort(source, item, tag):
