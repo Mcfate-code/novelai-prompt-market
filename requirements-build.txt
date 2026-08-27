@@ -1,0 +1,5 @@
+# Build-time only dependencies for scripts/build_embedding_prior.py.
+# Do NOT add these to requirements.txt (runtime must stay free of numpy/faiss).
+numpy>=1.24
+# faiss-cpu>=1.7  # optional build-time accelerator; numpy fallback used if absent
+# NOTE: HTTP is done with stdlib urllib.request — no requests/httpx dependency.
