@@ -6,14 +6,13 @@
 层负责，本模块不内置任何 tag 黑名单。
 
 并行扩展（SiliconFlow Embedding Prior）约定：
-  本模块刻意不实现 ``semantic_neighbors()`` / ``semantic_node()``（embedding 版本），
-  这两个方法由并行任务后续添加。它们应：
-    - 读取同一 data/offline_prompt_prior.sqlite 中并行任务自建的
-      ``prior_semantic_neighbor`` 表；
-    - 在表缺失时优雅降级（catch sqlite3.OperationalError，返回空）；
-    - 与这里的 ``semantic_node_for_tag()``（离线 taxonomy/nav 版本）并存，
-      二者都从 ``tag_semantic_node`` 表读取节点映射。
-  PromptPrior 类结构保持简洁、可追加方法，不引入任何冲突。
+  本模块现已实现 ``semantic_neighbors()``（读 ``prior_semantic_neighbor``）与
+  ``semantic_node()``（读 ``tag_semantic_node.node_id`` 多来源映射），二者在对应
+  表缺失时优雅降级（复用 ``_fetch``，catch sqlite3.OperationalError 返回空）。
+  ``semantic_node_for_tag()``（离线 taxonomy/nav 版本）也读 ``tag_semantic_node``
+  （``node_id`` 列）并与之并存。
+  PromptPrior 类结构保持简洁、可追加方法，不引入任何冲突；本模块绝不 import
+  numpy / faiss / 构建期 client，运行时不依赖任何 ML 框架。
 """
 from __future__ import annotations
 
@@ -39,6 +38,20 @@ class PromptPrior:
         self.db_path = Path(db_path) if db_path else DEFAULT_PRIOR_PATH
         self._lock = threading.Lock()
         self._available: bool | None = None
+        self._indexes_ensured = False
+
+    def _ensure_indexes(self, conn: sqlite3.Connection) -> None:
+        """幂等建立本任务表的查询索引（§71）；失败静默（只读文件系统也不崩）。"""
+        try:
+            conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_psn_src ON prior_semantic_neighbor(src_tag);
+            CREATE INDEX IF NOT EXISTS idx_psn_srcnode ON prior_semantic_neighbor(src_node);
+            CREATE INDEX IF NOT EXISTS idx_tsn_node ON tag_semantic_node(node_id);
+            CREATE INDEX IF NOT EXISTS idx_tsn_tag ON tag_semantic_node(tag);
+            """)
+            conn.commit()
+        except sqlite3.Error:
+            pass
 
     def _conn(self) -> sqlite3.Connection | None:
         if not self.db_path.is_file():
@@ -46,6 +59,9 @@ class PromptPrior:
         try:
             conn = sqlite3.connect(str(self.db_path))
             conn.row_factory = sqlite3.Row
+            if not self._indexes_ensured:
+                self._ensure_indexes(conn)
+                self._indexes_ensured = True
             return conn
         except sqlite3.Error:
             return None
@@ -84,6 +100,10 @@ class PromptPrior:
     def _adult_clause(self, adult: bool) -> str:
         return "" if adult else "AND is_adult = 0"
 
+    def _safety_clause(self, adult: bool) -> str:
+        """prior_semantic_neighbor / tag_semantic_node 用 safety_scope 标注（§37/§38）。"""
+        return "" if adult else "AND (safety_scope IS NULL OR safety_scope != 'adult')"
+
     def related_tags(self, tag: str, limit: int = 32, adult: bool = False) -> list[dict]:
         """返回与 tag 的 NPMI 关联标签（adult=False 只返回一般向 is_adult=0）。"""
         if not self.is_available():
@@ -110,11 +130,15 @@ class PromptPrior:
             })
         return out
 
-    def slot_candidates(self, node_id: str, limit: int = 64, adult: bool = False) -> list[dict]:
-        """返回某语义槽位节点的候选标签（按频率降序）。"""
+    def slot_candidates(self, slot, context=None, limit: int = 20, adult: bool = False) -> list[dict]:
+        """返回某语义槽位节点的候选标签（按频率降序，§69）。
+
+        ``slot`` 为语义节点 id（对应 prior_slot_tag.semantic_node_id）。
+        ``context`` 预留（当前未使用）。adult=False 只返回一般向 is_adult=0。
+        """
         if not self.is_available():
             return []
-        node_id = (node_id or "").strip()
+        node_id = (slot or "").strip()
         if not node_id:
             return []
         limit = max(0, int(limit))
@@ -174,23 +198,73 @@ class PromptPrior:
     def semantic_node_for_tag(self, tag: str) -> str | None:
         """返回标签的语义节点 id（离线版本：taxonomy/nav-seed 基础）。
 
-        这是非 embedding 的离线映射。并行 SiliconFlow 任务会补充 ``semantic_node()``
-        （embedding 版本），两者都读 ``tag_semantic_node`` 表。
+        读 ``tag_semantic_node.node_id``（§28）。这是非 embedding 的离线映射；
+        ``semantic_node()`` 提供带证据字段的完整版本，二者都读 ``tag_semantic_node``。
+        本方法直接查询该表，不依赖 ``prior_tag_assoc``（NPMI 表缺失/为空不影响语义节点）；
+        表缺失或用例不存在时返回 None（绝不抛错）。
         """
-        if not self.is_available():
-            return None
         key = _norm(tag)
         if not key:
             return None
         row = self._fetchone(
-            "SELECT semantic_node_id FROM tag_semantic_node WHERE tag=?", (key,)
+            "SELECT node_id FROM tag_semantic_node WHERE tag=?", (key,)
         )
-        return row["semantic_node_id"] if row else None
+        return row["node_id"] if row else None
 
-    # NOTE: 并行 SiliconFlow 任务将在此类追加以下方法（本实现刻意不提供）：
-    #   def semantic_node(self, tag) -> str | None: ...   # embedding 版本
-    #   def semantic_neighbors(self, tag, limit=20) -> list[dict]: ...
-    # 它们读取 prior_semantic_neighbor 表；表缺失时应返回空而非抛错（复用 _fetch）。
+    def semantic_node(self, tag: str) -> dict | None:
+        """返回标签的语义节点完整信息（多来源，§28）。
+
+        返回 ``{tag, node_id, confidence, rule_source, embedding_score}``；
+        表缺失或标签不存在时返回 None（绝不抛错）。
+        """
+        key = _norm(tag)
+        if not key:
+            return None
+        row = self._fetchone(
+            "SELECT node_id, confidence, rule_source, embedding_score "
+            "FROM tag_semantic_node WHERE tag=?",
+            (key,),
+        )
+        if row is None:
+            return None
+        escore = row["embedding_score"]
+        return {
+            "tag": key,
+            "node_id": row["node_id"],
+            "confidence": float(row["confidence"] or 0),
+            "rule_source": row["rule_source"],
+            "embedding_score": float(escore) if escore is not None else None,
+        }
+
+    def semantic_neighbors(self, tag: str, limit: int = 20, adult: bool = False) -> list[dict]:
+        """返回 tag 的语义近邻（embedding 相似度 Top-K，§25）。
+
+        读 ``prior_semantic_neighbor``（src_tag, dst_tag, similarity, relation_type,
+        safety_scope）；adult=False 时过滤 safety_scope='adult' 的行（§37/§38）。
+        表缺失时返回空列表（绝不抛错）。
+        """
+        key = _norm(tag)
+        if not key:
+            return []
+        limit = max(0, int(limit))
+        rows = self._fetch(
+            f"SELECT dst_tag, similarity, relation_type, src_node, dst_node, safety_scope "
+            f"FROM prior_semantic_neighbor WHERE src_tag=? {self._safety_clause(adult)} "
+            f"ORDER BY similarity DESC LIMIT ?",
+            (key, limit),
+        )
+        return [{
+            "tag": r["dst_tag"],
+            "similarity": float(r["similarity"] or 0),
+            "relation_type": r["relation_type"],
+            "src_node": r["src_node"],
+            "dst_node": r["dst_node"],
+            "safety_scope": r["safety_scope"],
+        } for r in rows]
+
+    def tag_associations(self, tag: str, limit: int = 32, adult: bool = False) -> list[dict]:
+        """别名：委托 ``related_tags``（NPMI 关联先验）。"""
+        return self.related_tags(tag, limit=limit, adult=adult)
 
 
 _singleton: PromptPrior | None = None
@@ -212,8 +286,12 @@ def related_tags(tag: str, limit: int = 32, adult: bool = False) -> list[dict]:
     return get_prior().related_tags(tag, limit=limit, adult=adult)
 
 
-def slot_candidates(node_id: str, limit: int = 64, adult: bool = False) -> list[dict]:
-    return get_prior().slot_candidates(node_id, limit=limit, adult=adult)
+def tag_associations(tag: str, limit: int = 32, adult: bool = False) -> list[dict]:
+    return get_prior().tag_associations(tag, limit=limit, adult=adult)
+
+
+def slot_candidates(slot, context=None, limit: int = 20, adult: bool = False) -> list[dict]:
+    return get_prior().slot_candidates(slot, context=context, limit=limit, adult=adult)
 
 
 def context_candidates(context_tag: str, limit: int = 32, adult: bool = False) -> list[dict]:
@@ -224,7 +302,16 @@ def semantic_node_for_tag(tag: str) -> str | None:
     return get_prior().semantic_node_for_tag(tag)
 
 
+def semantic_node(tag: str) -> dict | None:
+    return get_prior().semantic_node(tag)
+
+
+def semantic_neighbors(tag: str, limit: int = 20, adult: bool = False) -> list[dict]:
+    return get_prior().semantic_neighbors(tag, limit=limit, adult=adult)
+
+
 __all__ = [
     "PromptPrior", "get_prior",
-    "related_tags", "slot_candidates", "context_candidates", "semantic_node_for_tag",
+    "related_tags", "tag_associations", "slot_candidates", "context_candidates",
+    "semantic_node_for_tag", "semantic_node", "semantic_neighbors",
 ]
