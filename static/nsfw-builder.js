@@ -953,12 +953,3 @@ export function createNsfwBuilder(options) {
 }
 
 export default createNsfwBuilder;
-    } else if (action === "char-state") {
-      this.selectCharacterState(node.dataset.kind, node.dataset.key, Number(node.dataset.char));
-    } else if (action === "interaction-add") {
-      const actor = this.root.querySelector('[data-input="actor"]')?.value || 0;
-      const target = this.root.querySelector('[data-input="target"]')?.value || 1;
-      const rel = this.root.querySelector('[data-input="relation"]')?.value || "directional";
-      this.applyInteraction(node.dataset.key, actor, target, rel);
-    } else if (action === "interaction-remove") {
-      this.removeInteraction(node.dataset.id);

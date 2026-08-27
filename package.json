@@ -7,7 +7,8 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "test": "node --experimental-sqlite --test server/*.test.mjs tests/*.mjs static/tests/*.mjs"
+    "test": "node --experimental-sqlite --test server/*.test.mjs tests/*.mjs static/tests/*.mjs",
+    "lint:js": "node --experimental-vm-modules scripts/check_js_syntax.mjs"
   },
   "dependencies": {
     "jszip": "^3.10.1",
