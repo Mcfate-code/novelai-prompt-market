@@ -45,7 +45,7 @@ Prompt 使用固定 10 分区：`character / appearance / clothing / expression 
 
 #### PromptDocument 数据契约（schema_version=2）
 
-前端纯数据层位于 `static/prompt-document.js`，是 Prompt 的统一契约；`state.prompt` 保持唯一权威状态，旧的 `base` / `characters` / `global_uc` 数组仅作为兼容投影。文档包含 `sections`、`characters[].prompt_sections/uc_sections`、`global_uc_sections`、自由文本字段与 `assistant_context`（推荐 / Scene Builder 的兼容 metadata，`participant_count / primary_scene_type / stage / position / body_focus / additional_activities / clothing_state:char:N`，随 snapshot/restore/gallery continue generate 保留，**绝不编译进 Prompt**）；条目统一保存 `id`、`tag`、`weight`、`section`、来源与 Bundle 元数据。支持的目标为 `base`、`global_uc`、`char:N`、`char:N:uc`。`normalize()` 同时接受现有 snapshot 的旧数组形态和 schema v2，`serializeTarget()` / `parseTargetText()` 保留 NovelAI `weight::tag::` 权重语法及括号标签。
+前端纯数据层位于 `static/prompt-document.js`，是 Prompt 的统一契约；`state.prompt` 保持唯一权威状态，旧的 `base` / `characters` / `global_uc` 数组仅作为兼容投影。文档包含 `sections`、`characters[].prompt_sections/uc_sections`、`global_uc_sections`、自由文本字段与 `assistant_context`（推荐 / Scene Composer V2 的 metadata，包括独立的 `primary_act` 与 Environment/Scenario `primary_scene_type`、1–3 人精确角色槽、Stage/Position/Body Focus/Composition、逐角色状态及 snapshot 可恢复的 `interactions` 行）；条目统一保存 `id`、`tag`、`weight`、`section`、relation/brackets、来源与 Bundle/provenance 元数据。互动行原子物化为角色 `source/target/mutual` relation 条目（固定 weight=1），并沿用既有 relation codec；本阶段不改变 relation+numeric-weight 顺序，也不作新的官方语法结论。
 
 ### 推荐与冲突提示
 
@@ -151,6 +151,9 @@ PromptBridge 与 Tag Assistant 同源（`getDocument()` / `getActiveTarget()` / 
 ### NSFW Scene Builder（Scene Composer，产品化）
 
 `static/nsfw-builder.js` + `static/nsfw-builder.css` 提供挂载到 `#nsfw-builder-root` 的原生 JS 组件（无框架 / 零依赖），产品化为成人内容场景的「Scene Composer」：高层语义小集合而非成人词库整面墙。`app.js` 在 `mountWorkbenchComponents()` 中挂载，`adolescentMode` 从 `/api/settings` 注入，候选从 `GET /api/nsfw-builder/options` 派生（后端按 `config/scene_composer.json` + `data/nsfw_taxonomy.json` 逐条校验 `data/tags.sqlite` 后下发，未命中即 drop，绝不发明 tag）。组件遵守后端 adolescent / NSFW 内容策略，不绕过：
+
+- **V2 信息架构**：首屏是可自由跳转的「人物 / 主要行为 / 互动关系 / 阶段体位 / 角色状态 / 镜头环境」六组 dashboard，并显示 Scene-only 完成数和实时摘要；不是强制向导。
+- **人数行为**：仅支持 1/2/3，人数与 Character 槽通过单个原子 action 同步；减少时非空尾部角色会阻止并提示。当前 SQLite 不含已验证的 `<N>people` / `<N>persons` / `<N>characters` 精确非性别人数标签，因此只同步结构状态、不猜性别、不发明 Base tag，Semantic State 将 Participants 标记为 partial。
 
 - **唯一权威状态**：`PromptDocument.assistant_context` 是唯一场景上下文；组件无 `this.selections` / 无业务副本，每次刷新从 `bridge.getDocument().assistant_context` 水合（`currentContext()` / `_hydrateContext()` 是唯一水合路径）。
 - **高层主场景**：主场景为 ≤6 个高层语义项（单人亲密 / 伴侣亲密 / 多人互动 / 情境 / 前戏向，带已校验 canonical tag），取代旧的 restricted-taxonomy 整面候选；`minParticipants` 用于人数兼容。

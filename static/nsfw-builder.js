@@ -21,7 +21,7 @@
  *    候选一律由集成方通过 options 注入（后端 GET /api/nsfw-builder/options 已按
  *    config/scene_composer.json + data/nsfw_taxonomy.json 逐条校验 sqlite 后下发），
  *    或由推荐 API 返回。组件只内置 stage 语义标识（PREPARATION/FOREPLAY/MAIN_ACT/
- *    CLIMAX/AFTERMATH，非 canonical tag）与 participant 计数档（1/2/3/4+，非 canonical tag）。
+ *    CLIMAX/AFTERMATH，非 canonical tag）与 participant 计数档（严格 1/2/3，非 canonical tag）。
  *
  * UI 分区（渲染顺序）：人数 → 主场景 → 阶段 → 角色（每角色衣着，全部同时可见）→
  *   体位 → 附加活动 → 身体焦点 → 推荐。
@@ -85,7 +85,7 @@ export const EXCLUSIVE_GROUP_ORDER = ["participants", "scene", "stage", "positio
 // participant 计数档（非 canonical tag）。
 export const DEFAULT_PARTICIPANTS = [
   { key: "1", label: "1" }, { key: "2", label: "2" },
-  { key: "3", label: "3" }, { key: "4+", label: "4+" },
+  { key: "3", label: "3" },
 ];
 
 export const DEFAULT_STAGES = STAGE_KEYS.map((key) => ({ key, label: STAGE_LABELS[key], zh: STAGE_LABELS[key] }));
@@ -103,7 +103,7 @@ export function normalizeOption(raw, fallbackKey = "") {
   if (raw == null || typeof raw !== "object") return null;
   const key = String(raw.key ?? raw.id ?? raw.value ?? fallbackKey);
   if (!key) return null;
-  return {
+  const option = {
     key,
     label: String(raw.label ?? raw.key ?? raw.id ?? key),
     zh: String(raw.zh ?? ""),
@@ -112,6 +112,12 @@ export function normalizeOption(raw, fallbackKey = "") {
     requiresScenes: Array.isArray(raw.requiresScenes) ? raw.requiresScenes.map(String) : null,
     meta: (raw.meta && typeof raw.meta === "object") ? raw.meta : {},
   };
+  if (raw.maxParticipants != null) option.maxParticipants = Number(raw.maxParticipants);
+  if (Array.isArray(raw.allowedStages)) option.allowedStages = raw.allowedStages.map(String);
+  if (Array.isArray(raw.allowedPrimaryActs)) option.allowedPrimaryActs = raw.allowedPrimaryActs.map(String);
+  if (raw.route) option.route = String(raw.route);
+  if (raw.section) option.section = String(raw.section);
+  return option;
 }
 
 export function normalizeOptions(rawList) {
@@ -139,10 +145,12 @@ export function exclusiveMembers(group, options, characterIndex = null) {
   const g = String(group || "");
   const list = {
     [GROUP_KEYS.participants]: options.participants,
+    primary_act: options.primaryActs,
     [GROUP_KEYS.scene]: options.scenes,
     [GROUP_KEYS.stage]: options.stages,
     [GROUP_KEYS.position]: options.positions,
     [GROUP_KEYS.clothing]: options.clothingStates,
+    composition: options.compositions,
   }[g];
   return (Array.isArray(list) ? list : []).map((o) => o && o.tag ? String(o.tag) : "").filter(Boolean);
 }
@@ -155,7 +163,7 @@ export function participantNumber(participants) {
   const m = p.match(/^(\d+)/);
   if (!m) return null;
   const n = Number(m[1]);
-  return n >= 4 ? 4 : n;
+  return n >= 4 ? 4 : (n >= 1 ? n : null);
 }
 
 export function buildContext({
@@ -243,6 +251,7 @@ export function buildRecommendPayload(context, doc, { target = "", limit = REC_L
     mode: ctx.mode || "nsfw",
     participant_count: ctx.participant_count ?? undefined,
     primary_scene_type: String(ctx.primary_scene_type || ""),
+    primary_act: String(ctx.primary_act || ""),
     stage: String(ctx.stage || ""),
     position: String(ctx.position || ""),
     body_focus: String(ctx.body_focus || ""),
@@ -253,6 +262,12 @@ export function buildRecommendPayload(context, doc, { target = "", limit = REC_L
   if (ctx.clothing_state && typeof ctx.clothing_state === "object") {
     payload.clothing_state = ctx.clothing_state;
   }
+  payload.character_state = ctx.character_state || {};
+  payload.expressions = ctx.expressions || {};
+  payload.interactions = ctx.interactions || [];
+  payload.composition = String(ctx.composition || "");
+  payload.environment = String(ctx.environment || "");
+  payload.structured_state = doc;
   return payload;
 }
 
@@ -332,11 +347,17 @@ export class NsfwBuilder {
     this.adolescentMode = options.adolescentMode === true || options.settings?.adolescent_mode === true;
     this.options = {
       participants: normalizeOptions(options.participants || DEFAULT_PARTICIPANTS),
-      scenes: normalizeOptions(options.scenes),
+      primaryActs: normalizeOptions(options.primaryActs),
+      scenes: normalizeOptions(options.scenarios || options.scenes),
+      environments: normalizeOptions(options.environments),
       stages: normalizeOptions(options.stages || DEFAULT_STAGES),
       positions: normalizeOptions(options.positions),
       clothingStates: normalizeOptions(options.clothingStates),
-      activities: normalizeOptions(options.activities),
+      activities: normalizeOptions(options.additionalActivities || options.activities),
+      interactionActions: normalizeOptions(options.interactionActions),
+      characterStates: normalizeOptions(options.characterStates),
+      expressions: normalizeOptions(options.expressions),
+      compositions: normalizeOptions(options.compositions),
       bodyFocus: normalizeOptions(options.bodyFocus),
     };
     this.recommendImpl = typeof options.recommend === "function" ? options.recommend : null;
@@ -348,7 +369,10 @@ export class NsfwBuilder {
     this.onClick = (event) => this.handleClick(event);
     this.onChange = (event) => this.handleChange(event);
     this.onKeydown = (event) => this.handleKeydown(event);
-    this.onBridgeChange = () => { if (!this._destroyed) this.refresh(); };
+    this._recommendationSeq = 0;
+    this._recommendTimer = null;
+    this.getGenerationConfig = typeof options.getGenerationConfig === "function" ? options.getGenerationConfig : () => ({});
+    this.onBridgeChange = (_doc, action) => { if (!this._destroyed) { this.refresh(); if (action?.type !== "SCENE_WARNING") this.scheduleRecommend(); } };
   }
 
   isDisabled() { return !!this.adolescentMode; }
@@ -393,7 +417,7 @@ export class NsfwBuilder {
   _hydrateContext() {
     const doc = this.bridge?.getDocument?.() || {};
     const raw = doc.assistant_context || {};
-    this.context = { ...raw, clothing_state: { ...(raw.clothing_state || {}) }, additional_activities: [...(raw.additional_activities || [])] };
+    this.context = { ...raw, clothing_state: { ...(raw.clothing_state || {}) }, character_state: { ...(raw.character_state || {}) }, expressions: { ...(raw.expressions || {}) }, additional_activities: [...(raw.additional_activities || [])], interactions: [...(raw.interactions || [])] };
     return this.context;
   }
 
@@ -435,42 +459,14 @@ export class NsfwBuilder {
     if (this.isDisabled()) return false;
     const requestedN = participantNumber(key);
     if (requestedN == null) return false;
-    const context = this._hydrateContext();
-    const currentRaw = context.participant_count == null ? null : participantNumber(context.participant_count);
-    const currentN = currentRaw == null ? 1 : currentRaw;
-    const groupAction = buildSetExclusiveGroupAction({
-      group: GROUP_KEYS.participants, key: String(key || ""), newTag: "",
-      target: "base", characterIndex: null, members: [],
-    });
-
-    if (requestedN >= currentN) {
-      const ok = dispatchAction(this.bridge, groupAction);
-      if (ok) this._dispatchProposal({ kind: "sync_participants", count: requestedN });
-      return ok;
-    }
-
-    // 减少人数：检查尾部角色（index >= requestedN）是否仍含内容。
     const doc = this.bridge?.getDocument?.() || {};
-    const characters = Array.isArray(doc.characters) ? doc.characters : [];
-    const removableEmpty = [];
-    const blocked = [];
-    for (let i = requestedN; i < characters.length; i++) {
-      if (this._characterNonEmpty(characters[i], i)) blocked.push(i);
-      else removableEmpty.push(i);
-    }
-
+    const blocked = (doc.characters || []).slice(requestedN).map((ch, offset) => this._characterNonEmpty(ch, requestedN + offset) ? requestedN + offset : null).filter((i) => i != null);
     if (blocked.length) {
-      this.view = { ...this.view, blockedIndices: blocked.map((i) => ({ index: i, label: `Character ${i + 1} 仍有内容，请手动移除` })) };
+      this.view = { ...this.view, blockedIndices: blocked.map((i) => ({ index: i, label: `Character ${i + 1} 仍有内容` })) };
       if (this.root) this.render();
-      this._dispatchProposal({ kind: "remove_characters_blocked", blockedIndices: blocked });
       return false;
     }
-
-    const ok = dispatchAction(this.bridge, groupAction);
-    if (ok) {
-      this._dispatchProposal({ kind: "sync_participants", count: requestedN, autoRemovableEmptyIndices: removableEmpty });
-    }
-    return ok;
+    return this._dispatchProposal({ kind: "sync_participants", count: requestedN });
   }
 
   _characterNonEmpty(character, index) {
@@ -498,6 +494,7 @@ export class NsfwBuilder {
     if (groupKey === GROUP_KEYS.participants) return this.selectParticipants(key);
     if (groupKey === GROUP_KEYS.clothing) return false;
     const option = this._findOption(group, key);
+    if (option && !this._compatibility(option).ok) return false;
     const members = exclusiveMembers(groupKey, this.options);
     const action = buildSetExclusiveGroupAction({
       group: groupKey, key: String(key || ""),
@@ -505,6 +502,28 @@ export class NsfwBuilder {
       target: "base", characterIndex: null, members,
     });
     return dispatchAction(this.bridge, action);
+  }
+
+  selectPrimaryAct(key) {
+    if (this.isDisabled()) return false;
+    const option = this.options.primaryActs.find((item) => item.key === String(key));
+    if (!option || !this._compatibility(option).ok) return false;
+    return dispatchAction(this.bridge, buildSetExclusiveGroupAction({ group: "primary_act", key, newTag: option.tag, target: "base", members: exclusiveMembers("primary_act", this.options) }));
+  }
+
+  applyInteraction(actionKey, actor, target, relation = "directional") {
+    const option = this.options.interactionActions.find((o) => o.key === String(actionKey));
+    if (!option?.tag || Number(actor) === Number(target)) return false;
+    return dispatchAction(this.bridge, { type: "APPLY_INTERACTION", payload: { interaction: { id: `scene-${Date.now()}`, actor: Number(actor), action: option.tag, target: Number(target), relation } } });
+  }
+  removeInteraction(id) { return dispatchAction(this.bridge, { type: "REMOVE_INTERACTION", payload: { id } }); }
+
+  selectCharacterState(kind, key, characterIndex) {
+    const map = { clothing: ["clothingStates", "clothing_state"], expression: ["expressions", "expressions"], state: ["characterStates", "character_state"] }[kind];
+    if (!map) return false;
+    const option = this.options[map[0]].find((o) => o.key === String(key));
+    const members = this.options[map[0]].map((o) => o.tag).filter(Boolean);
+    return dispatchAction(this.bridge, buildSetExclusiveGroupAction({ group: map[1], key, newTag: option?.tag || "", target: `char:${characterIndex}`, characterIndex, members }));
   }
 
   // ---- 服装状态（按角色作用域）：显式 characterIndex，dispatch 单个 SET_EXCLUSIVE_GROUP ----
@@ -524,6 +543,7 @@ export class NsfwBuilder {
   _findOption(group, key) {
     const listKey = {
       participants: "participants", scene: "scenes", stage: "stages",
+      primaryAct: "primaryActs",
       position: "positions", clothing: "clothingStates",
       bodyfocus: "bodyFocus", activity: "activities", activities: "activities",
     }[group];
@@ -531,12 +551,29 @@ export class NsfwBuilder {
     return list.find((o) => o && o.key === String(key || "")) || null;
   }
 
+  _compatibility(option) {
+    const count = participantNumber(this.context.participant_count);
+    if (count && option.minParticipants != null && count < option.minParticipants) return { ok: false, reason: `至少 ${option.minParticipants} 人` };
+    if (count && option.maxParticipants != null && count > option.maxParticipants) return { ok: false, reason: `最多 ${option.maxParticipants} 人` };
+    if (option.requiresScenes?.length && this.context.primary_scene_type && !option.requiresScenes.includes(String(this.context.primary_scene_type))) return { ok: false, reason: "与当前情境不兼容" };
+    if (option.allowedStages?.length && this.context.stage && !option.allowedStages.includes(String(this.context.stage))) return { ok: false, reason: "与当前阶段不兼容" };
+    if (option.allowedPrimaryActs?.length && this.context.primary_act && !option.allowedPrimaryActs.includes(String(this.context.primary_act))) return { ok: false, reason: "与主要行为不兼容" };
+    return { ok: true, reason: "" };
+  }
+
+  scheduleRecommend() {
+    clearTimeout(this._recommendTimer);
+    this._recommendTimer = setTimeout(() => this.recommend(), 320);
+  }
+
   // ---- 非互斥上下文（body_focus）：dispatch SET_ASSISTANT_CONTEXT ----
   selectBodyFocus(key) {
     if (this.isDisabled()) return false;
     const context = { ...this.currentContext(), body_focus: String(key || "") };
-    const action = buildSetAssistantContextAction(context);
-    return dispatchAction(this.bridge, action);
+    const option = this._findOption("bodyfocus", key);
+    const ok = dispatchAction(this.bridge, buildSetAssistantContextAction(context));
+    if (option?.tag) dispatchAction(this.bridge, buildAddTagAction(option.tag, "base", option.section || "composition"));
+    return ok;
   }
 
   // ---- 附加活动（multi-select）：对称 + 溯源 ----
@@ -552,7 +589,7 @@ export class NsfwBuilder {
     const context = { ...current, additional_activities: activities };
     const ctxOk = dispatchAction(this.bridge, buildSetAssistantContextAction(context));
     if (option && option.tag) {
-      const target = this._activeTarget();
+      const target = "base";
       const entries = getTargetEntries(this.bridge?.getDocument?.(), target);
       if (added) {
         // 仅当同 tag 尚不存在（大小写不敏感）时 ADD_TAG；携带 scene_activity / scene-builder 溯源。
@@ -592,23 +629,29 @@ export class NsfwBuilder {
       return [];
     }
     const context = this.currentContext();
-    const payload = buildRecommendPayload(context, doc, { target: this._activeTarget() });
+    const payload = buildRecommendPayload(context, doc, { target: "base" });
+    payload.structured_state = doc;
+    payload.generation_config = this.getGenerationConfig();
+    payload.active_target = "base";
+    const seq = ++this._recommendationSeq;
     this.view = { ...this.view, recStatus: "loading" };
     if (this.root) this.render();
     try {
       const data = await this._fetchRecommend(payload);
+      if (seq !== this._recommendationSeq) return [];
       const groups = Array.isArray(data?.groups) && data.groups.length
         ? data.groups.map((g) => ({ group: String(g?.group || ""), recommendations: normalizeRecommendations({ recommendations: g?.recommendations }) })).filter((g) => g.recommendations.length)
         : [];
       const recs = normalizeRecommendations(data);
       this.view = {
-        ...this.view, groups, recs,
+        ...this.view, groups, recs, nextSteps: Array.isArray(data?.next_steps) ? data.next_steps : [],
         recStatus: (groups.length || recs.length) ? "ok" : "empty",
         message: (groups.length || recs.length) ? "" : "暂无可用推荐。",
       };
       if (this.root) this.render();
       return recs;
     } catch (error) {
+      if (seq !== this._recommendationSeq) return [];
       this.view = { ...this.view, recStatus: "error", error: String(error?.message || error), groups: [] };
       if (this.root) this.render();
       return [];
@@ -637,7 +680,7 @@ export class NsfwBuilder {
     if (this.isDisabled()) return false;
     const item = normalizeRecommendation(rec);
     if (!item) return false;
-    const target = this._activeTarget();
+    const target = item.target && /^char:\d+$/.test(item.target) ? item.target : "base";
     return dispatchAction(this.bridge, buildAddTagAction(item.tag, target, item.section || ""));
   }
 
@@ -651,7 +694,19 @@ export class NsfwBuilder {
     if (action === "participants") {
       this.selectParticipants(node.dataset.key);
     } else if (action === "exclusive") {
-      this.selectExclusive(node.dataset.group, node.dataset.key);
+      if (node.dataset.group === "primaryAct") this.selectPrimaryAct(node.dataset.key);
+      else this.selectExclusive(node.dataset.group, node.dataset.key);
+    } else if (action === "clothing") {
+      this.selectClothing(node.dataset.key, Number(node.dataset.char));
+    } else if (action === "char-state") {
+      this.selectCharacterState(node.dataset.kind, node.dataset.key, Number(node.dataset.char));
+    } else if (action === "interaction-add") {
+      const actor = this.root.querySelector('[data-input="actor"]')?.value || 0;
+      const target = this.root.querySelector('[data-input="target"]')?.value || 1;
+      const relation = this.root.querySelector('[data-input="relation"]')?.value || "directional";
+      this.applyInteraction(node.dataset.key, actor, target, relation);
+    } else if (action === "interaction-remove") {
+      this.removeInteraction(node.dataset.id);
     } else if (action === "body-focus") {
       this.selectBodyFocus(node.dataset.key);
     } else if (action === "activity") {
@@ -711,18 +766,35 @@ export class NsfwBuilder {
            <div class="nb-disabled" role="status">当前为青少年模式，NSFW Scene Builder 已禁用。</div>
          </div>`
       : `<div class="nsfw-builder" role="region" aria-label="NSFW Scene Builder">
+          ${this.summaryHtml()}
+          ${this.dashboardHtml()}
           ${this.statusHtml()}
           <div class="nb-status-flash" aria-live="polite"></div>
           ${this.noticesHtml()}
           ${this.participantsHtml()}
+          ${this.primaryActHtml()}
           ${this.sceneHtml()}
+          ${this.interactionsHtml()}
           ${this.stageHtml()}
           ${this.charactersHtml()}
           ${this.positionHtml()}
           ${this.activitiesHtml()}
           ${this.bodyFocusHtml()}
+          ${this.compositionEnvironmentHtml()}
           ${this.recommendHtml()}
         </div>`;
+  }
+
+  dashboardHtml() {
+    const groups = [["人物", this.context.participant_count], ["主要行为", this.context.primary_act], ["互动关系", this.context.interactions?.length], ["阶段体位", this.context.stage || this.context.position], ["角色状态", Object.keys(this.context.clothing_state || {}).length + Object.keys(this.context.character_state || {}).length], ["镜头环境", this.context.composition || this.context.environment || this.context.primary_scene_type]];
+    const done = groups.filter(([, value]) => value).length;
+    return `<nav class="nb-dashboard" aria-label="场景自由跳转">${groups.map(([label,value]) => `<a href="#nb-${esc(label)}" class="nb-${value ? "filled" : "empty"}">${esc(label)}<small>${value ? "已填" : "未填"}</small></a>`).join("")}<span>${done}/${groups.length}</span></nav>`;
+  }
+  summaryHtml() {
+    const doc = this.bridge?.getDocument?.() || {}; const c = this.context;
+    const chars = (doc.characters || []).map((ch,i) => `C${i+1} ${ch.name || ""}: ${c.clothing_state?.[i] || "-"}/${c.expressions?.[i] || "-"}/${c.character_state?.[i] || "-"}`);
+    const rows = (c.interactions || []).map((r) => `C${r.actor+1} ${r.action} C${r.target+1}`);
+    return `<header class="nb-summary"><strong>Scene Composer V2</strong><div>${esc(`${c.participant_count || doc.characters?.length || 1}人 · ${c.primary_scene_type || c.environment || "环境未定"} · ${c.primary_act || "主要行为未定"} · ${c.stage || "阶段未定"} · ${c.position || "体位未定"}`)}</div><small>${esc([...chars,...rows].join(" | "))}</small></header>`;
   }
 
   statusHtml() {
@@ -747,6 +819,13 @@ export class NsfwBuilder {
     if (!this.options.scenes.length) return "";
     return this.radioGroupHtml("主场景", this.options.scenes, this.context.primary_scene_type || null, { action: "exclusive", dataGroup: "scene" });
   }
+  primaryActHtml() { return this.radioGroupHtml("主要行为 · 写入 Base", this.options.primaryActs, this.context.primary_act || null, { action: "exclusive", dataGroup: "primaryAct" }); }
+  interactionsHtml() {
+    const count = participantNumber(this.context.participant_count) || 1; if (count < 2) return `<div class="nb-notice">选择 2–3 人以启用互动关系</div>`;
+    const actors = Array.from({length:count},(_,i)=>`<option value="${i}">C${i+1}</option>`).join("");
+    const targets = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===1?"selected":""}>C${i+1}</option>`).join("");
+    return `<section class="nb-fieldset"><legend class="nb-legend">互动关系 · Actor → Action → Target</legend><div class="nb-interaction-controls"><select data-input="actor">${actors}</select><select data-input="target">${targets}</select><select data-input="relation"><option value="directional">定向</option><option value="mutual">相互</option></select>${this.options.interactionActions.map(o=>`<button data-action="interaction-add" data-key="${esc(o.key)}">${esc(o.label)} <small>互动 C1 → C2</small></button>`).join("")}</div>${(this.context.interactions||[]).map(r=>`<div>C${r.actor+1} → ${esc(r.action)} → C${r.target+1} <button data-action="interaction-remove" data-id="${esc(r.id)}">移除</button></div>`).join("")}</section>`;
+  }
 
   stageHtml() {
     if (!this.options.stages.length) return "";
@@ -754,13 +833,13 @@ export class NsfwBuilder {
   }
 
   charactersHtml() {
-    if (!this.options.clothingStates.length) return "";
     const count = participantNumber(this.context.participant_count);
     const n = count == null ? 1 : Math.max(1, count);
     const parts = [];
-    for (let i = 0; i < n; i++) parts.push(this.charClothingHtml(i));
+    for (let i = 0; i < n; i++) parts.push(this.charClothingHtml(i) + this.charStateHtml(i, "expression", "表情", this.options.expressions, this.context.expressions?.[i]) + this.charStateHtml(i, "state", "状态", this.options.characterStates, this.context.character_state?.[i]));
     return `<section class="nb-group nb-char-clothing-group" aria-label="角色服装状态">${parts.join("")}</section>`;
   }
+  charStateHtml(i, kind, label, options, current) { return `<fieldset class="nb-fieldset"><legend>C${i+1} ${label} · 写入 C${i+1}</legend><div class="nb-options">${options.map(o=>`<button data-action="char-state" data-kind="${kind}" data-char="${i}" data-key="${esc(o.key)}" class="${isSelected(current,o.key)?"active":""}">${esc(o.label)}</button>`).join("")}</div></fieldset>`; }
 
   charClothingHtml(characterIndex) {
     const label = `Character ${characterIndex + 1} 衣着`;
@@ -822,6 +901,7 @@ export class NsfwBuilder {
     if (!this.options.bodyFocus.length) return "";
     return this.radioGroupHtml("身体聚焦", this.options.bodyFocus, this.context.body_focus || null, { action: "body-focus", dataGroup: "bodyfocus" });
   }
+  compositionEnvironmentHtml() { return `<section><div class="nb-legend">镜头环境 · 写入 Base</div>${this.radioGroupHtml("构图", this.options.compositions, this.context.composition, { action:"exclusive", dataGroup:"composition" })}${this.radioGroupHtml("环境 / 情境", [...this.options.scenes,...this.options.environments], this.context.primary_scene_type || this.context.environment, { action:"exclusive", dataGroup:"scene" })}</section>`; }
 
   radioGroupHtml(label, options, current, { action = "exclusive", dataGroup = "", disabled = false, hint = "" } = {}) {
     if (!options || !options.length) return "";
@@ -829,12 +909,13 @@ export class NsfwBuilder {
     return `<fieldset class="nb-fieldset" ${disabled ? "disabled" : ""}>
       <legend class="nb-legend">${esc(label)}</legend>
       <div class="nb-options" role="radiogroup" aria-label="${esc(label)}"${groupAttr}>
-        ${options.map((o) => `
+        ${options.map((o) => { const comp=this._compatibility(o); const retained=isSelected(current,o.key)&&!comp.ok; return `
           <button type="button" role="radio" data-action="${esc(action)}"${groupAttr} data-key="${esc(o.key)}"
+            ${!comp.ok && !retained ? "disabled" : ""} title="${esc(comp.reason)}"
             aria-checked="${isSelected(current, o.key)}"
             class="${isSelected(current, o.key) ? "active" : ""}">
             ${esc(o.label)}${o.tag ? ` <small class="nb-tag">${esc(o.tag)}</small>` : ""}
-          </button>`).join("")}
+          </button>${retained ? `<small class="nb-warning">已保留：${esc(comp.reason)}</small>` : ""}`; }).join("")}
       </div>
       ${hint ? `<div class="nb-hint">${esc(hint)}</div>` : ""}
     </fieldset>`;
@@ -855,7 +936,8 @@ export class NsfwBuilder {
       : "";
     return `<section class="nb-group" aria-label="推荐">
       <div class="nb-legend">推荐</div>
-      <button type="button" class="nb-recommend-btn" data-action="recommend">获取推荐</button>
+      <button type="button" class="nb-recommend-btn" data-action="recommend">重试 / 刷新引导</button>
+      ${(v.nextSteps || []).map(s=>`<div class="nb-next-step">下一步：${esc(s.zh || s.label || s.node_id)}</div>`).join("")}
       <div class="nb-recs" aria-live="polite">
         ${v.recStatus === "loading" ? `<div class="nb-hint">加载中…</div>` : ""}
         ${v.recStatus === "empty" ? `<div class="nb-hint">${esc(v.message || "暂无可用推荐。")}</div>` : ""}
@@ -871,3 +953,12 @@ export function createNsfwBuilder(options) {
 }
 
 export default createNsfwBuilder;
+    } else if (action === "char-state") {
+      this.selectCharacterState(node.dataset.kind, node.dataset.key, Number(node.dataset.char));
+    } else if (action === "interaction-add") {
+      const actor = this.root.querySelector('[data-input="actor"]')?.value || 0;
+      const target = this.root.querySelector('[data-input="target"]')?.value || 1;
+      const rel = this.root.querySelector('[data-input="relation"]')?.value || "directional";
+      this.applyInteraction(node.dataset.key, actor, target, rel);
+    } else if (action === "interaction-remove") {
+      this.removeInteraction(node.dataset.id);

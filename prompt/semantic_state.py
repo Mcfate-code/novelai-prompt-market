@@ -36,7 +36,9 @@ SCENE_SLOTS = [
     {"node_id": "scene_stage", "label": "Stage", "zh": "阶段"},
     {"node_id": "scene_position", "label": "Position", "zh": "体位"},
     {"node_id": "scene_character_state", "label": "Character State", "zh": "角色状态"},
+    {"node_id": "scene_additional_activities", "label": "Additional Activities", "zh": "附加活动"},
     {"node_id": "scene_body_focus", "label": "Body Focus", "zh": "身体焦点"},
+    {"node_id": "scene_composition", "label": "Composition", "zh": "构图"},
     {"node_id": "scene_environment", "label": "Environment / Scenario", "zh": "环境"},
 ]
 
@@ -432,7 +434,8 @@ def _build_scene_slots(state: dict) -> list[SlotInfo]:
     sections = state.get("sections") or {}
     scene_section_tags = _collect_section_tags(sections)
     has_scene = any(s == "scene" for _, s in scene_section_tags)
-    has_relation = _has_relation_entries(characters)
+    interactions = ctx.get("interactions") if isinstance(ctx.get("interactions"), list) else []
+    has_relation = bool(interactions) or _has_relation_entries(characters)
 
     def _filled(val) -> bool:
         return val is not None and str(val).strip() not in ("", "0", "None")
@@ -443,22 +446,36 @@ def _build_scene_slots(state: dict) -> list[SlotInfo]:
             evidence or [], nid if filled else None,
             f"已有 {evidence[0]}" if filled and evidence else ("已设置" if filled else "尚未设置"))
 
+    count = ctx.get("participant_count")
+    count_exact = False
+    try:
+        count_exact = int(count) == len(characters) and 1 <= int(count) <= 3
+    except (TypeError, ValueError):
+        pass
+    participants = _slot("scene_participants", "Participants", "人物", _filled(count), [str(count or "")])
+    if count_exact:
+        participants.status = PARTIAL
+        participants.reason = "人数与角色槽已同步；本地库无已验证的非性别精确人数标签"
     return [
-        _slot("scene_participants", "Participants", "人物",
-              _filled(ctx.get("participant_count")), [str(ctx.get("participant_count",""))]),
+        participants,
         _slot("scene_primary_act", "Primary Act", "主要行为",
-              _filled(ctx.get("primary_scene_type")), [str(ctx.get("primary_scene_type",""))]),
-        _slot("scene_interaction", "Interaction", "互动关系", has_relation),
+              _filled(ctx.get("primary_act")), [str(ctx.get("primary_act",""))]),
+        _slot("scene_interaction", "Interaction", "互动关系", has_relation,
+              [str(row.get("action", "")) for row in interactions if isinstance(row, dict)][:3]),
         _slot("scene_stage", "Stage", "阶段",
               _filled(ctx.get("stage")), [str(ctx.get("stage",""))]),
         _slot("scene_position", "Position", "体位",
               _filled(ctx.get("position")), [str(ctx.get("position",""))]),
         _slot("scene_character_state", "Character State", "角色状态",
-              any(_filled(v) for v in (ctx.get("clothing_state") or {}).values())),
+              any(any(_filled(v) for v in (ctx.get(key) or {}).values()) for key in ("clothing_state", "character_state", "expressions"))),
+        _slot("scene_additional_activities", "Additional Activities", "附加活动",
+              bool(ctx.get("additional_activities")), list(ctx.get("additional_activities") or [])[:3]),
         _slot("scene_body_focus", "Body Focus", "身体焦点",
               _filled(ctx.get("body_focus")), [str(ctx.get("body_focus",""))]),
-        _slot("scene_environment", "Environment / Scenario", "环境", has_scene,
-              [t for t,s in scene_section_tags if s=="scene"][:3]),
+        _slot("scene_composition", "Composition", "构图", _filled(ctx.get("composition")), [str(ctx.get("composition", ""))]),
+        _slot("scene_environment", "Environment / Scenario", "环境",
+              _filled(ctx.get("primary_scene_type")) or _filled(ctx.get("environment")) or has_scene,
+              [str(ctx.get("primary_scene_type") or ctx.get("environment") or "")] + [t for t,s in scene_section_tags if s=="scene"][:2]),
     ]
 
 
@@ -509,8 +526,12 @@ def build_semantic_state(structured_state, *, conn=None, generation_config=None,
     partial = sum(1 for s in all_slots if s.status == PARTIAL)
     empty = sum(1 for s in all_slots if s.status == EMPTY)
     missing = [s for s in all_slots if s.status in (EMPTY, PARTIAL)]
+    scene_filled = sum(1 for s in scene_slots if s.status in (FILLED, FILLED_BY_AUTO_PRESET))
+    scene_partial = sum(1 for s in scene_slots if s.status == PARTIAL)
     summary = {"filled": filled, "partial": partial, "empty": empty,
                "total": len(all_slots), "missing_slots": len(missing)}
+    summary["scene"] = {"filled": scene_filled, "partial": scene_partial,
+                        "empty": len(scene_slots) - scene_filled - scene_partial, "total": len(scene_slots)}
 
     return SemanticState(base_slots=base_slots, character_slots=character_slots,
                          scene_slots=scene_slots, intent=intent, summary=summary)

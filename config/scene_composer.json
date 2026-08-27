@@ -1,69 +1,70 @@
 {
   "primary_scenes": [
-    {
-      "key": "solo_intimate",
-      "label": "单人亲密",
-      "tag": "solo",
-      "minParticipants": 1,
-      "description": "单人情态 / 自慰向"
-    },
-    {
-      "key": "couple_intimate",
-      "label": "伴侣亲密",
-      "tag": "sex",
-      "minParticipants": 2,
-      "description": "伴侣性交 / 亲密"
-    },
-    {
-      "key": "multi_intimate",
-      "label": "多人互动",
-      "tag": "group sex",
-      "minParticipants": 3,
-      "description": "三人及以上群戏"
-    },
-    {
-      "key": "roleplay_situational",
-      "label": "情境 / 旁观",
-      "tag": "voyeurism",
-      "minParticipants": 2,
-      "description": "旁观 / 窥视视角的情境"
-    },
-    {
-      "key": "foreplay_only",
-      "label": "前戏向",
-      "tag": "touching",
-      "minParticipants": 2,
-      "description": "抚摸 / 前戏为主"
-    }
+    { "key": "solo_intimate", "label": "单人亲密", "tag": "solo", "minParticipants": 1 },
+    { "key": "couple_intimate", "label": "伴侣亲密", "tag": "sex", "minParticipants": 2 },
+    { "key": "multi_intimate", "label": "多人互动", "tag": "group sex", "minParticipants": 3 },
+    { "key": "roleplay_situational", "label": "情境 / 旁观", "tag": "voyeurism", "minParticipants": 2 },
+    { "key": "foreplay_only", "label": "前戏向", "tag": "touching", "minParticipants": 2 }
+  ],
+  "primary_acts": [
+    { "key": "solo", "label": "单人自慰", "tag": "masturbation", "route": "base", "minParticipants": 1, "maxParticipants": 1, "exclusiveGroup": "primary_act" },
+    { "key": "vaginal_sex", "label": "性交", "tag": "vaginal sex", "route": "base", "minParticipants": 2, "exclusiveGroup": "primary_act", "allowedStages": ["MAIN_ACT", "CLIMAX"] },
+    { "key": "anal_sex", "label": "肛交", "tag": "anal sex", "route": "base", "minParticipants": 2, "exclusiveGroup": "primary_act", "allowedStages": ["MAIN_ACT", "CLIMAX"] },
+    { "key": "fellatio", "label": "口交", "tag": "fellatio", "route": "base", "minParticipants": 2, "exclusiveGroup": "primary_act", "allowedStages": ["FOREPLAY", "MAIN_ACT", "CLIMAX"] },
+    { "key": "cunnilingus", "label": "舔阴", "tag": "cunnilingus", "route": "base", "minParticipants": 2, "exclusiveGroup": "primary_act", "allowedStages": ["FOREPLAY", "MAIN_ACT", "CLIMAX"] }
+  ],
+  "scenarios": [
+    { "key": "bedroom", "label": "卧室", "tag": "bedroom", "route": "base", "section": "scene" },
+    { "key": "outdoors", "label": "户外", "tag": "outdoors", "route": "base", "section": "scene" },
+    { "key": "voyeurism", "label": "旁观 / 窥视", "tag": "voyeurism", "route": "base", "section": "scene", "minParticipants": 2 }
+  ],
+  "environments": [
+    { "key": "day", "label": "白天", "tag": "day", "route": "base", "section": "scene" },
+    { "key": "night", "label": "夜晚", "tag": "night", "route": "base", "section": "scene" }
+  ],
+  "interaction_actions": [
+    { "key": "kissing", "label": "接吻", "tag": "kissing", "route": "interaction", "minParticipants": 2 },
+    { "key": "groping", "label": "抚摸", "tag": "groping", "route": "interaction", "minParticipants": 2 },
+    { "key": "fellatio", "label": "口交", "tag": "fellatio", "route": "interaction", "minParticipants": 2 },
+    { "key": "cunnilingus", "label": "舔阴", "tag": "cunnilingus", "route": "interaction", "minParticipants": 2 }
   ],
   "clothing_states": [
-    { "key": "clothed", "label": "穿衣", "tag": "clothed" },
-    { "key": "partially_clothed", "label": "半脱", "tag": "partially clothed" },
-    { "key": "nude", "label": "全裸", "tag": "nude" },
-    { "key": "lingerie", "label": "内衣", "tag": "lingerie" },
-    { "key": "see_through", "label": "透视", "tag": "see-through clothes" }
+    { "key": "clothed", "label": "穿衣", "tag": "clothed", "route": "character", "section": "clothing" },
+    { "key": "partially_clothed", "label": "半脱", "tag": "partially clothed", "route": "character", "section": "clothing" },
+    { "key": "nude", "label": "全裸", "tag": "nude", "route": "character", "section": "clothing" },
+    { "key": "lingerie", "label": "内衣", "tag": "lingerie", "route": "character", "section": "clothing" },
+    { "key": "see_through", "label": "透视", "tag": "see-through clothes", "route": "character", "section": "clothing" }
+  ],
+  "character_states": [
+    { "key": "blush", "label": "脸红", "tag": "blush", "route": "character", "section": "expression" },
+    { "key": "sweat", "label": "出汗", "tag": "sweat", "route": "character", "section": "appearance" },
+    { "key": "tears", "label": "流泪", "tag": "tears", "route": "character", "section": "expression" }
+  ],
+  "expressions": [
+    { "key": "smile", "label": "微笑", "tag": "smile", "route": "character", "section": "expression" },
+    { "key": "ahegao", "label": "阿嘿颜", "tag": "ahegao", "route": "character", "section": "expression" }
   ],
   "activities": [
-    { "key": "kissing", "label": "接吻", "tag": "kissing", "section": "action" },
-    { "key": "french_kiss", "label": "深吻", "tag": "french kiss", "section": "action" },
-    { "key": "groping", "label": "抚摸", "tag": "groping", "section": "action" },
-    { "key": "cunnilingus", "label": "舔阴", "tag": "cunnilingus", "section": "action" },
-    { "key": "fellatio", "label": "口交", "tag": "fellatio", "section": "action" },
-    { "key": "masturbation", "label": "手淫", "tag": "masturbation", "section": "action" },
-    { "key": "paizuri", "label": "乳交", "tag": "paizuri", "section": "action" },
-    { "key": "footjob", "label": "足交", "tag": "footjob", "section": "action" },
-    { "key": "fingering", "label": "指交", "tag": "fingering", "section": "action" },
-    { "key": "anal_sex", "label": "肛交", "tag": "anal sex", "section": "action" },
-    { "key": "vaginal_sex", "label": "性交", "tag": "vaginal sex", "section": "action" },
-    { "key": "sixty_nine", "label": "69", "tag": "69", "section": "action" },
-    { "key": "cuddling", "label": "依偎", "tag": "cuddling", "section": "action" }
+    { "key": "kissing", "label": "接吻", "tag": "kissing", "route": "base", "section": "action", "minParticipants": 2 },
+    { "key": "french_kiss", "label": "深吻", "tag": "french kiss", "route": "base", "section": "action", "minParticipants": 2 },
+    { "key": "groping", "label": "抚摸", "tag": "groping", "route": "base", "section": "action", "minParticipants": 2 },
+    { "key": "paizuri", "label": "乳交", "tag": "paizuri", "route": "base", "section": "action", "minParticipants": 2 },
+    { "key": "footjob", "label": "足交", "tag": "footjob", "route": "base", "section": "action", "minParticipants": 2 },
+    { "key": "fingering", "label": "指交", "tag": "fingering", "route": "base", "section": "action", "minParticipants": 2 },
+    { "key": "cuddling", "label": "依偎", "tag": "cuddling", "route": "base", "section": "action", "minParticipants": 2 }
   ],
   "body_focus": [
-    { "key": "face", "label": "面部" },
-    { "key": "breasts", "label": "胸部", "tag": "breasts" },
-    { "key": "butt", "label": "臀部", "tag": "ass" },
-    { "key": "pussy", "label": "阴部", "tag": "pussy" },
-    { "key": "penis", "label": "阴茎", "tag": "penis" }
+    { "key": "breasts", "label": "胸部", "tag": "breasts", "route": "base", "section": "composition" },
+    { "key": "butt", "label": "臀部", "tag": "ass", "route": "base", "section": "composition" },
+    { "key": "pussy", "label": "阴部", "tag": "pussy", "route": "base", "section": "composition" },
+    { "key": "penis", "label": "阴茎", "tag": "penis", "route": "base", "section": "composition" }
+  ],
+  "compositions": [
+    { "key": "close_up", "label": "特写", "tag": "close-up", "route": "base", "section": "composition" },
+    { "key": "full_body", "label": "全身", "tag": "full body", "route": "base", "section": "composition", "exclusiveGroup": "scene_composition" },
+    { "key": "cowboy_shot", "label": "牛仔镜头", "tag": "cowboy shot", "route": "base", "section": "composition", "exclusiveGroup": "scene_composition" },
+    { "key": "from_above", "label": "俯视", "tag": "from above", "route": "base", "section": "composition", "exclusiveGroup": "camera_angle" },
+    { "key": "from_below", "label": "仰视", "tag": "from below", "route": "base", "section": "composition", "exclusiveGroup": "camera_angle" }
   ],
   "positions_source": "nsfw_positions"
 }

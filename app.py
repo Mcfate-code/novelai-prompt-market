@@ -2519,11 +2519,17 @@ class RecommendRequest(TagsRequest):
     mode: str = "general"
     participant_count: int | str | None = None
     primary_scene_type: str = ""
+    primary_act: str = ""
     stage: str = ""
     position: str = ""
     body_focus: str = ""
     additional_activities: list[str] = []
     clothing_state: dict = {}
+    character_state: dict = {}
+    expressions: dict = {}
+    interactions: list[dict] = []
+    composition: str = ""
+    environment: str = ""
     active_target: str = ""
     active_section: str = ""
     last_added_tag: str = ""
@@ -2570,11 +2576,21 @@ def _recommendation_adult_source(conn, body):
               "position": str(getattr(body, "position", "") or "").strip().lower(),
               "body_focus": str(getattr(body, "body_focus", "") or "").strip().lower()}
     out = []
-    for raw in (config.get("primary_scenes") or []) + (config.get("activities") or []) + (config.get("clothing_states") or []):
+    contextual_groups = ("primary_acts", "activities", "clothing_states", "character_states", "expressions", "compositions", "scenarios", "environments")
+    selected_activities = set(getattr(body, "additional_activities", []) or [])
+    selected_states = set((getattr(body, "clothing_state", {}) or {}).values()) | set((getattr(body, "character_state", {}) or {}).values()) | set((getattr(body, "expressions", {}) or {}).values())
+    selected_context = {str(getattr(body, field, "") or "") for field in ("primary_act", "composition", "environment", "primary_scene_type")}
+    for raw in [item for group in contextual_groups for item in (config.get(group) or [])]:
         if not isinstance(raw, dict):
             continue
         tag = str(raw.get("tag") or "").strip()
         if not tag or not _scene_tag_exists(conn, tag):
+            continue
+        if raw in (config.get("activities") or []) and raw.get("key") not in selected_activities:
+            continue
+        if raw in (config.get("clothing_states") or []) + (config.get("character_states") or []) + (config.get("expressions") or []) and raw.get("key") not in selected_states:
+            continue
+        if raw in (config.get("primary_acts") or []) + (config.get("compositions") or []) + (config.get("scenarios") or []) + (config.get("environments") or []) and raw.get("key") not in selected_context:
             continue
         minimum = raw.get("minParticipants")
         if count is not None and minimum is not None and count < int(minimum):
@@ -2584,6 +2600,12 @@ def _recommendation_adult_source(conn, body):
             item.update({"activity": tag, "scene": wanted["stage"]})
         elif raw in (config.get("clothing_states") or []):
             item.update({"clothing_state": tag})
+        elif raw in (config.get("primary_acts") or []):
+            item.update({"primary_act": raw.get("key"), "min_participants": minimum})
+        elif raw in (config.get("compositions") or []):
+            item.update({"composition": raw.get("key")})
+        elif raw in (config.get("scenarios") or []) + (config.get("environments") or []):
+            item.update({"environment": raw.get("key")})
         else:
             item.update({"scene": tag, "min_participants": minimum})
         out.append(item)
@@ -2876,11 +2898,17 @@ def recommendations(body: RecommendRequest):
             mode=_recommendation_mode(getattr(body, "mode", "general")),
             participant_count=getattr(body, "participant_count", None),
             primary_scene_type=getattr(body, "primary_scene_type", "") or "",
+            primary_act=getattr(body, "primary_act", "") or "",
             stage=getattr(body, "stage", "") or "",
             position=getattr(body, "position", "") or "",
             body_focus=getattr(body, "body_focus", "") or "",
             additional_activities=getattr(body, "additional_activities", []) or [],
             clothing_state=getattr(body, "clothing_state", {}) or {},
+            character_state=getattr(body, "character_state", {}) or {},
+            expressions=getattr(body, "expressions", {}) or {},
+            interactions=getattr(body, "interactions", []) or [],
+            composition=getattr(body, "composition", "") or "",
+            environment=getattr(body, "environment", "") or "",
             active_target=active_target,
             active_section=getattr(body, "active_section", "") or "",
             semantic_node=semantic_node,
@@ -3046,7 +3074,7 @@ SCENE_COMPOSER_CONFIG_PATH = BASE_DIR / "config" / "scene_composer.json"
 NSFW_TAXONOMY_PATH = BASE_DIR / "data" / "nsfw_taxonomy.json"
 
 # 青少年模式下返回的空候选组 key（保持 /api/nsfw-builder/options 响应形状稳定）。
-NSFW_BUILDER_GROUPS = ("participants", "scenes", "stages", "positions", "clothingStates", "activities", "bodyFocus")
+NSFW_BUILDER_GROUPS = ("participants", "primaryActs", "scenarios", "environments", "stages", "positions", "clothingStates", "characterStates", "expressions", "additionalActivities", "interactionActions", "bodyFocus", "compositions")
 
 _scene_composer_config_cache: dict | None = None
 _nsfw_taxonomy_cache: dict | None = None
@@ -3143,7 +3171,7 @@ def nsfw_builder_options():
     conn = _conn()
     try:
         if _load_user_settings()["adolescent_mode"]:
-            return {group: [] for group in NSFW_BUILDER_GROUPS}
+            return {group: [] for group in NSFW_BUILDER_GROUPS + ("scenes", "activities")}
 
         config = _scene_composer_config()
 
@@ -3171,32 +3199,17 @@ def nsfw_builder_options():
                     entry["tag"] = tag
                 elif require_tag:
                     entry["tag"] = ""
-                if raw.get("section"):
-                    entry["section"] = str(raw["section"]).strip()
-                if raw.get("minParticipants") is not None:
-                    entry["minParticipants"] = int(raw["minParticipants"])
+                for field in ("section", "route", "exclusiveGroup"):
+                    if raw.get(field):
+                        entry[field] = str(raw[field]).strip()
+                for field in ("minParticipants", "maxParticipants"):
+                    if raw.get(field) is not None:
+                        entry[field] = int(raw[field])
+                for field in ("requiresScene", "requiresScenes", "allowedStages", "allowedPrimaryActs"):
+                    if raw.get(field) is not None:
+                        entry[field] = raw[field]
                 out.append(entry)
             return out
-
-        # 主场景：config primary_scenes -> {key,label,tag,minParticipants}（tag 未命中 sqlite 则 drop 为 ""）。
-        scenes = []
-        for raw in config.get("primary_scenes") or []:
-            if not isinstance(raw, dict):
-                continue
-            key = str(raw.get("key") or "").strip()
-            label = str(raw.get("label") or raw.get("key") or "").strip()
-            if not key:
-                continue
-            tag = str(raw.get("tag") or "").strip()
-            if tag and not _scene_tag_in_sqlite(conn, tag):
-                print(f"[nsfw-builder] drop unverified scene tag {tag!r} (key={key!r})", flush=True)
-                tag = ""
-            entry = {"key": key, "label": label, "tag": tag}
-            if raw.get("minParticipants") is not None:
-                entry["minParticipants"] = int(raw["minParticipants"])
-            if raw.get("description"):
-                entry["description"] = str(raw["description"]).strip()
-            scenes.append(entry)
 
         positions = []
         seen_positions: set[str] = set()
@@ -3207,16 +3220,19 @@ def nsfw_builder_options():
                 print(f"[nsfw-builder] drop unverified position tag {tag!r}", flush=True)
                 continue
             seen_positions.add(tag)
-            positions.append({"key": tag, "label": tag, "tag": tag, "minParticipants": 2})
+            positions.append({"key": tag, "label": tag, "tag": tag, "minParticipants": 2, "route": "base", "section": "composition"})
 
         return {
             "participants": [
                 {"key": "1", "label": "1"},
                 {"key": "2", "label": "2"},
                 {"key": "3", "label": "3"},
-                {"key": "4+", "label": "4+"},
             ],
-            "scenes": scenes,
+            "primaryActs": _verified(config.get("primary_acts")),
+            # Phase A-D aliases remain read-only compatibility views.
+            "scenes": _verified(config.get("primary_scenes")),
+            "scenarios": _verified(config.get("scenarios")),
+            "environments": _verified(config.get("environments")),
             "stages": [
                 {"key": "PREPARATION", "label": "准备"},
                 {"key": "FOREPLAY", "label": "前戏"},
@@ -3226,8 +3242,13 @@ def nsfw_builder_options():
             ],
             "positions": positions,
             "clothingStates": _verified(config.get("clothing_states")),
+            "characterStates": _verified(config.get("character_states")),
+            "expressions": _verified(config.get("expressions")),
+            "additionalActivities": _verified(config.get("activities")),
             "activities": _verified(config.get("activities")),
+            "interactionActions": _verified(config.get("interaction_actions")),
             "bodyFocus": _verified(config.get("body_focus"), require_tag=False),
+            "compositions": _verified(config.get("compositions")),
         }
     finally:
         conn.close()

@@ -38,7 +38,7 @@ function dispatchPromptAction(action = {}) {
   const target = resolveMutationTarget(payload.target || state.target);
   if (!target) return state.prompt;
   if (action.type === "ADD_TAG" && !String(payload.tag || "").trim()) return state.prompt;
-   if (!["ADD_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP"].includes(action.type)) return state.prompt;
+    if (!["ADD_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP", "SCENE_PROPOSAL", "APPLY_INTERACTION", "REMOVE_INTERACTION"].includes(action.type)) return state.prompt;
   // RECONCILE_TEXT 不逐键 pushHistory：一次编辑会话只压一个快照（见 #nai-editor focus/blur 事务）。
   if (action.type !== "RECONCILE_TEXT") pushHistory();
   const remapTarget = (target, type, from, to) => {
@@ -53,7 +53,12 @@ function dispatchPromptAction(action = {}) {
       const tag = String(payload.tag || "").trim();
       if (promptDocument.getTargetEntries(state.prompt, target).some((entry) => entry.tag.toLocaleLowerCase() === tag.toLocaleLowerCase())) { state.history.pop(); return state.prompt; }
       const section = SECTION_IDS.includes(payload.section) ? payload.section : "other";
-      state.prompt = promptDocument.addTag(state.prompt, target, { tag, section, weight: payload.weight ?? 1, source: payload.source || "tag", custom: !!payload.custom }, section);
+      state.prompt = promptDocument.addTag(state.prompt, target, {
+        tag, section, weight: payload.weight ?? 1, source: payload.source || "tag", custom: !!payload.custom,
+        relation: payload.relation ?? null, brackets: payload.brackets ?? 0,
+        bundle_id: payload.bundle_id ?? null, bundle_name: payload.bundle_name ?? null,
+        provenance: payload.provenance ?? null, interaction_id: payload.interaction_id ?? null,
+      }, section);
       break;
     }
     case "REMOVE_TAG": state.prompt = promptDocument.removeTag(state.prompt, target, payload.entryId); break;
@@ -61,8 +66,19 @@ function dispatchPromptAction(action = {}) {
     case "SET_WEIGHT": state.prompt = promptDocument.updateEntry(state.prompt, target, payload.entryId, { weight: Number(payload.weight) }); break;
     case "MOVE_SECTION": state.prompt = promptDocument.updateEntry(state.prompt, target, payload.entryId, { section: payload.section }); break;
     case "RECONCILE_TEXT": state.prompt = promptDocument.reconcileTargetText(state.prompt, target, payload.text || "", new Map(knownCatalogTags)); break;
-    case "ADD_CHARACTER": state.prompt = promptDocument.addCharacter(state.prompt, payload); break;
-    case "REMOVE_CHARACTER": state.prompt = promptDocument.removeCharacter(state.prompt, payload.index); break;
+    case "ADD_CHARACTER": {
+      if (state.prompt.characters.length >= 3) { state.history.pop(); return state.prompt; }
+      state.prompt = promptDocument.addCharacter(state.prompt, payload);
+      state.prompt = promptDocument.setAssistantContext(state.prompt, { participant_count: state.prompt.characters.length });
+      break;
+    }
+    case "REMOVE_CHARACTER": {
+      const idx = Number(payload.index);
+      if (idx !== state.prompt.characters.length - 1 || promptDocument.characterHasContent(state.prompt.characters[idx], idx)) { state.history.pop(); notifyPromptSubscribers({ type: "SCENE_WARNING", payload: { message: `Character ${idx + 1} 仍有内容` } }); return state.prompt; }
+      state.prompt = promptDocument.removeCharacter(state.prompt, idx);
+      state.prompt = promptDocument.setAssistantContext(state.prompt, { participant_count: state.prompt.characters.length });
+      break;
+    }
     case "MOVE_CHARACTER": state.prompt = promptDocument.moveCharacter(state.prompt, payload.fromIndex, payload.toIndex); break;
     case "RENAME_CHARACTER": state.prompt = promptDocument.renameCharacter(state.prompt, payload.index, payload.name); break;
     case "SET_CHARACTER_POSITION": state.prompt = promptDocument.setCharacterPosition(state.prompt, payload.index, payload.position); break;
@@ -75,6 +91,15 @@ function dispatchPromptAction(action = {}) {
     }
     case "SET_ASSISTANT_CONTEXT": state.prompt = promptDocument.setAssistantContext(state.prompt, payload.context || {}); break;
     case "SET_EXCLUSIVE_GROUP": state.prompt = promptDocument.applyExclusiveGroup(state.prompt, payload); break;
+    case "SCENE_PROPOSAL": {
+      if (payload.kind !== "sync_participants") { state.history.pop(); return state.prompt; }
+      const result = promptDocument.syncSceneParticipants(state.prompt, payload.count);
+      if (!result.ok) { state.history.pop(); notifyPromptSubscribers({ type: "SCENE_WARNING", payload: { message: result.blockedIndices.map((idx) => `Character ${idx + 1} 仍有内容`).join("；"), blockedIndices: result.blockedIndices } }); return state.prompt; }
+      state.prompt = result.document;
+      break;
+    }
+    case "APPLY_INTERACTION": state.prompt = promptDocument.applyInteraction(state.prompt, payload.interaction || payload); break;
+    case "REMOVE_INTERACTION": state.prompt = promptDocument.removeInteraction(state.prompt, payload.id); break;
   }
   if (action.type === "REMOVE_CHARACTER") state.target = remapTarget(state.target, "remove", Number(payload.index));
   if (action.type === "MOVE_CHARACTER") state.target = remapTarget(state.target, "move", Number(payload.fromIndex), Number(payload.toIndex));
@@ -82,7 +107,7 @@ function dispatchPromptAction(action = {}) {
   // PromptBridge 订阅者 renderWorkbenchEditorFromDocument 更新，且聚焦时跳过）。
   if (action.type === "RECONCILE_TEXT") commitPromptChange({ render: false, refresh: false });
   else commitPromptChange({ refresh: true });
-  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT"].includes(action.type)) {
+  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SCENE_PROPOSAL"].includes(action.type)) {
     rebuildTargetSelect();
     if (typeof naiRenderCharacters === "function") {
       syncNaiCharactersFromState();
@@ -705,11 +730,20 @@ async function mountWorkbenchComponents() {
       bridge: window.PromptBridge,
       adolescentMode: !!userSettings.adolescent_mode,
       mode: "adult",
-      scenes: options.scenes || [],
+      participants: options.participants || [],
+      primaryActs: options.primaryActs || [],
+      scenarios: options.scenarios || [],
+      environments: options.environments || [],
+      stages: options.stages || [],
       positions: options.positions || [],
       clothingStates: options.clothingStates || [],
-      activities: options.activities || [],
+      characterStates: options.characterStates || [],
+      expressions: options.expressions || [],
+      additionalActivities: options.additionalActivities || [],
+      interactionActions: options.interactionActions || [],
       bodyFocus: options.bodyFocus || [],
+      compositions: options.compositions || [],
+      getGenerationConfig: () => ({ positiveTier: naiPositiveTier }),
     });
     nsfwBuilder.mount();
   } catch (e) {

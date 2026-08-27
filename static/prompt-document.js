@@ -19,6 +19,7 @@ function normalizeEntry(value, section = "other", extra = {}) {
     section: SECTION_IDS.includes(raw.section) ? raw.section : (SECTION_IDS.includes(section) ? section : "other"),
     custom: !!raw.custom, source: raw.source || extra.source || "tag",
     bundle_id: raw.bundle_id ?? extra.bundle_id ?? null, bundle_name: raw.bundle_name ?? extra.bundle_name ?? null,
+    provenance: raw.provenance ?? extra.provenance ?? null, interaction_id: raw.interaction_id ?? extra.interaction_id ?? null,
     sort_order: Number.isFinite(Number(raw.sort_order)) ? Number(raw.sort_order) : Number(extra.sort_order ?? 0),
     relation, brackets,
   };
@@ -164,8 +165,27 @@ function updateEntry(document, target, entryId, patch) {
 }
 function addTag(document, target, value, section = "other", extra = {}) { const doc = normalize(document); const sections = getSections(doc, target); if (!sections) return doc; const entry = normalizeEntry(value, section, extra); sections[entry.section].push(entry); return doc; }
 function removeTag(document, target, entryId) { const doc = normalize(document); const sections = getSections(doc, target); if (!sections) return doc; SECTION_IDS.forEach((id) => { sections[id] = sections[id].filter((e) => e.id !== entryId); }); return doc; }
-function addCharacter(document, character = {}) { const doc = normalize(document); doc.characters.push(normalizeCharacter(character, doc.characters.length)); return doc; }
-function removeCharacter(document, index) { const doc = normalize(document); const idx = Number(index); if (!Number.isInteger(idx) || idx < 0 || idx >= doc.characters.length) return doc; doc.characters.splice(idx, 1); if (!doc.characters.length) doc.characters.push(normalizeCharacter({}, 0)); return doc; }
+function characterHasContent(character, index) {
+  if (!character || typeof character !== "object") return false;
+  if (String(character.name || "") && String(character.name) !== `Character ${index + 1}`) return true;
+  if (character.position) return true;
+  return [character.prompt_sections, character.uc_sections].some((sections) => getSectionEntries(sections).some((entry) => String(entry.tag || "").trim()));
+}
+function getSectionEntries(sections) {
+  if (!sections || typeof sections !== "object") return [];
+  return SECTION_IDS.flatMap((id) => Array.isArray(sections[id]) ? sections[id] : []);
+}
+function addCharacter(document, character = {}) {
+  const doc = normalize(document);
+  if (doc.characters.length >= 3) return doc;
+  doc.characters.push(normalizeCharacter(character, doc.characters.length));
+  return doc;
+}
+function removeCharacter(document, index) {
+  const doc = normalize(document); const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= doc.characters.length || characterHasContent(doc.characters[idx], idx)) return doc;
+  doc.characters.splice(idx, 1); if (!doc.characters.length) doc.characters.push(normalizeCharacter({}, 0)); return doc;
+}
 function renameCharacter(document, index, name) { const doc = normalize(document); if (doc.characters[Number(index)]) doc.characters[Number(index)].name = String(name || `Character ${Number(index) + 1}`); return doc; }
 function moveCharacter(document, fromIndex, toIndex) {
   const doc = normalize(document); const from = Number(fromIndex); const to = Number(toIndex);
@@ -190,6 +210,42 @@ function setAssistantContext(document, context = {}) {
   }
   doc.assistant_context = next;
   return doc;
+}
+
+function syncSceneParticipants(document, count, { removeIndices = [], addCharacters = [] } = {}) {
+  const doc = normalize(document); const requested = Number(count);
+  if (!Number.isInteger(requested) || requested < 1 || requested > 3) return { document: doc, ok: false, blockedIndices: [] };
+  const blockedIndices = [];
+  if (requested < doc.characters.length) {
+    for (let i = requested; i < doc.characters.length; i++) if (characterHasContent(doc.characters[i], i)) blockedIndices.push(i);
+    if (blockedIndices.length) return { document: doc, ok: false, blockedIndices };
+    doc.characters = doc.characters.slice(0, requested);
+  }
+  while (doc.characters.length < requested) {
+    const supplied = Array.isArray(addCharacters) ? addCharacters[doc.characters.length] || {} : {};
+    doc.characters.push(normalizeCharacter(supplied, doc.characters.length));
+  }
+  const ctx = { ...(doc.assistant_context || {}), participant_count: requested };
+  doc.assistant_context = ctx;
+  return { document: doc, ok: true, blockedIndices: [] };
+}
+
+function applyInteraction(document, interaction = {}) {
+  const doc = normalize(document); const actor = Number(interaction.actor); const target = Number(interaction.target);
+  const action = String(interaction.action || "").trim(); const relation = interaction.relation === "mutual" ? "mutual" : "directional";
+  if (!Number.isInteger(actor) || !Number.isInteger(target) || actor < 0 || target < 0 || actor >= doc.characters.length || target >= doc.characters.length || !action || actor === target) return doc;
+  const ctx = { ...(doc.assistant_context || {}) }; const rows = Array.isArray(ctx.interactions) ? ctx.interactions.filter((row) => row && row.id !== interaction.id) : [];
+  const id = String(interaction.id || `interaction-${Date.now()}-${rows.length}`); rows.push({ id, actor, action, target, relation });
+  const add = (idx, rel) => { doc.characters[idx].prompt_sections.action.push(normalizeEntry({ tag: action, weight: 1, relation: rel, source: "scene_interaction", bundle_name: "scene-composer-v2", provenance: "scene-composer-v2", interaction_id: id }, "action")); };
+  if (relation === "mutual") { add(actor, "mutual"); add(target, "mutual"); } else { add(actor, "source"); add(target, "target"); }
+  ctx.interactions = rows; doc.assistant_context = ctx; return doc;
+}
+function removeInteraction(document, interactionId) {
+  const doc = normalize(document); const id = String(interactionId || ""); const ctx = { ...(doc.assistant_context || {}) };
+  const row = (ctx.interactions || []).find((item) => String(item?.id) === id);
+  if (!row) return doc;
+  for (const character of doc.characters) for (const section of SECTION_IDS) character.prompt_sections[section] = (character.prompt_sections[section] || []).filter((entry) => entry.interaction_id !== id);
+  ctx.interactions = (ctx.interactions || []).filter((item) => String(item?.id) !== id); doc.assistant_context = ctx; return doc;
 }
 
 // proposal 条目 -> schema v2 section map（free_text 条目从 base 中提取，不落入 section）。
@@ -241,7 +297,7 @@ function documentFromProposal(proposal = {}) {
 // 严格互斥组原子处理（SET_EXCLUSIVE_GROUP）：
 //   - clothing_state 作用域 = char:characterIndex（按角色）；其余组作用域 = base。
 //   - 在作用域内按 canonical members 删除旧组条目，加入 newTag（非空），更新 assistant_context。
-const EXCLUSIVE_SCOPE_SECTION = { primary_scene_type: "scene", position: "composition", clothing_state: "clothing" };
+const EXCLUSIVE_SCOPE_SECTION = { primary_act: "action", primary_scene_type: "scene", position: "composition", composition: "composition", clothing_state: "clothing", expressions: "expression", character_state: "expression" };
 function applyExclusiveGroup(document, payload = {}) {
   const doc = normalize(document);
   const group = String(payload.group || "");
@@ -250,7 +306,7 @@ function applyExclusiveGroup(document, payload = {}) {
   const members = new Set((Array.isArray(payload.members) ? payload.members : []).map((t) => String(t).trim().toLocaleLowerCase()).filter(Boolean));
   const characterIndex = payload.characterIndex == null ? null : Number(payload.characterIndex);
   let scopeTarget = "base";
-  if (group === "clothing_state") {
+  if (["clothing_state", "expressions", "character_state"].includes(group)) {
     const idx = characterIndex == null ? 0 : characterIndex;
     while (doc.characters.length <= idx) doc.characters.push(normalizeCharacter({}, doc.characters.length));
     scopeTarget = `char:${idx}`;
@@ -266,11 +322,11 @@ function applyExclusiveGroup(document, payload = {}) {
     }
   }
   const ctx = { ...(doc.assistant_context || {}) };
-  if (group === "clothing_state") {
+  if (["clothing_state", "expressions", "character_state"].includes(group)) {
     const idx = characterIndex == null ? 0 : characterIndex;
-    const clothing = { ...(ctx.clothing_state || {}) };
-    if (key) clothing[idx] = key; else delete clothing[idx];
-    ctx.clothing_state = clothing;
+    const values = { ...(ctx[group] || {}) };
+    if (key) values[idx] = key; else delete values[idx];
+    ctx[group] = values;
   } else if (key) {
     ctx[group] = key;
   } else {
@@ -305,4 +361,4 @@ function buildGenerationPromptState(document) {
   return { basePrompt, globalUc, characters };
 }
 
-export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, documentFromProposal, applyExclusiveGroup, effectiveFreeText, buildGenerationPromptState };
+export { SECTION_IDS, emptySections, createEmpty, normalize, normalizeEntry, getTargetSections, getTargetEntries, recommendationContextTags, selectedTagKeysForTarget, serializeTarget, parseTargetText, reconcileTargetText, addTag, removeTag, updateEntry, addCharacter, removeCharacter, renameCharacter, moveCharacter, setCharacterPosition, getAssistantContext, setAssistantContext, syncSceneParticipants, applyInteraction, removeInteraction, characterHasContent, documentFromProposal, applyExclusiveGroup, effectiveFreeText, buildGenerationPromptState };

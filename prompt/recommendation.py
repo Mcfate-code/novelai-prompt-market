@@ -58,11 +58,17 @@ class RecommendationContext:
     mode: str = "general"
     participant_count: Any = None
     primary_scene_type: str = ""
+    primary_act: str = ""
     stage: str = ""
     position: str = ""
     body_focus: str = ""
     additional_activities: tuple[str, ...] = ()
     clothing_state: Mapping[str, Any] = field(default_factory=dict)
+    character_state: Mapping[str, Any] = field(default_factory=dict)
+    expressions: Mapping[str, Any] = field(default_factory=dict)
+    interactions: tuple[Mapping[str, Any], ...] = ()
+    composition: str = ""
+    environment: str = ""
     active_target: str = ""
     active_section: str = ""
     semantic_node: Any = None
@@ -97,16 +103,19 @@ class RecommendationService:
     def recommend(self, *, tags: Sequence[str] = (), target: str = "", node_id: str = "",
                   limit: int = 20, mode: str = "general", participant_count=None,
                   primary_scene_type: str = "", stage: str = "", position: str = "",
+                  primary_act: str = "", character_state: Mapping[str, Any] | None = None,
+                  expressions: Mapping[str, Any] | None = None, interactions: Sequence[Mapping[str, Any]] = (),
+                  composition: str = "", environment: str = "",
                   body_focus: str = "", additional_activities: Sequence[str] = (),
                   clothing_state: Mapping[str, Any] | None = None,
                   active_target: str = "", active_section: str = "",
                   semantic_node=None, last_added_tag: str = "") -> dict[str, Any]:
         normalized = tuple(dict.fromkeys(_norm(tag) for tag in tags if _norm(tag)))
         ctx = RecommendationContext(normalized, _norm(target), node_id, _norm(mode), participant_count,
-                                    _norm(primary_scene_type), _norm(stage).upper(), _norm(position),
+                                    _norm(primary_scene_type), _norm(primary_act), _norm(stage).upper(), _norm(position),
                                     _norm(body_focus),
                                     tuple(dict.fromkeys(_norm(t) for t in (additional_activities or []) if _norm(t))),
-                                    dict(clothing_state or {}),
+                                    dict(clothing_state or {}), dict(character_state or {}), dict(expressions or {}), tuple(interactions or ()), _norm(composition), _norm(environment),
                                     _norm(active_target), _norm(active_section),
                                     semantic_node, _norm(last_added_tag))
         if not normalized or "uc" in ctx.target or ctx.active_target.endswith(":uc"):
@@ -129,7 +138,10 @@ class RecommendationService:
 
     def recommend_v3(self, *, tags: Sequence[str] = (), target: str = "", node_id: str = "",
                      limit: int = 20, mode: str = "general", participant_count=None,
-                     primary_scene_type: str = "", stage: str = "", position: str = "",
+                      primary_scene_type: str = "", stage: str = "", position: str = "",
+                      primary_act: str = "", character_state: Mapping[str, Any] | None = None,
+                      expressions: Mapping[str, Any] | None = None, interactions: Sequence[Mapping[str, Any]] = (),
+                      composition: str = "", environment: str = "",
                      body_focus: str = "", additional_activities: Sequence[str] = (),
                      clothing_state: Mapping[str, Any] | None = None,
                      active_target: str = "", active_section: str = "",
@@ -143,10 +155,10 @@ class RecommendationService:
         """
         normalized = tuple(dict.fromkeys(_norm(tag) for tag in tags if _norm(tag)))
         ctx = RecommendationContext(normalized, _norm(target), node_id, _norm(mode), participant_count,
-                                    _norm(primary_scene_type), _norm(stage).upper(), _norm(position),
+                                    _norm(primary_scene_type), _norm(primary_act), _norm(stage).upper(), _norm(position),
                                     _norm(body_focus),
                                     tuple(dict.fromkeys(_norm(t) for t in (additional_activities or []) if _norm(t))),
-                                    dict(clothing_state or {}), _norm(active_target), _norm(active_section),
+                                    dict(clothing_state or {}), dict(character_state or {}), dict(expressions or {}), tuple(interactions or ()), _norm(composition), _norm(environment), _norm(active_target), _norm(active_section),
                                     semantic_node, _norm(last_added_tag))
         if "uc" in ctx.target or ctx.active_target.endswith(":uc"):
             return self._v3_empty(ctx)
@@ -272,8 +284,11 @@ class RecommendationService:
     @staticmethod
     def _context_map(ctx):
         return {"participant_count": ctx.participant_count, "primary_scene_type": ctx.primary_scene_type,
+                "primary_act": ctx.primary_act, "interactions": ctx.interactions,
+                "composition": ctx.composition, "environment": ctx.environment,
                 "stage": ctx.stage, "position": ctx.position, "body_focus": ctx.body_focus,
-                "additional_activities": ctx.additional_activities, "clothing_state": dict(ctx.clothing_state)}
+                "additional_activities": ctx.additional_activities, "clothing_state": dict(ctx.clothing_state),
+                "character_state": dict(ctx.character_state), "expressions": dict(ctx.expressions)}
 
     @staticmethod
     def _filled_slots(state_dict):
@@ -303,8 +318,9 @@ class RecommendationService:
         intent_node = (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
         intent = 1 if intent_node and slot == intent_node else int(bool(ctx.last_added_tag and _norm(meta.get("related_to")) == ctx.last_added_tag))
         scene = 0
-        for field, actual in (("scene", ctx.primary_scene_type), ("stage", ctx.stage),
-                              ("position", ctx.position), ("body_focus", ctx.body_focus)):
+        for field, actual in (("scene", ctx.primary_scene_type), ("primary_act", ctx.primary_act),
+                              ("stage", ctx.stage), ("position", ctx.position), ("body_focus", ctx.body_focus),
+                              ("composition", ctx.composition), ("environment", ctx.environment)):
             if meta.get(field) is not None and actual and _norm(meta.get(field)) == _norm(actual):
                 scene += 1
         if meta.get("activity") in ctx.additional_activities:
@@ -324,7 +340,7 @@ class RecommendationService:
         meta = item["meta"]
         public["slot"] = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
         public["target"] = meta.get("target", ctx.target or "base")
-        public["scene_context"] = any(meta.get(k) is not None for k in ("scene", "stage", "position", "body_focus", "activity", "participant_count"))
+        public["scene_context"] = any(meta.get(k) is not None for k in ("scene", "primary_act", "stage", "position", "body_focus", "activity", "participant_count", "composition", "environment"))
         public["reason"] = "；".join(x for x in ("补齐当前槽位" if public["slot"] else "与当前标签相关", "匹配当前场景" if public["scene_context"] else "") if x)
         return public
 
@@ -411,7 +427,8 @@ class RecommendationService:
         return []
 
     def _adult_items(self, ctx):
-        return self.sources.get("adult_context", []) if ctx.mode == "adult" else []
+        source = self.sources.get("adult_context", [])
+        return (source(ctx) if callable(source) else source) if ctx.mode == "adult" else []
 
     def _allowed(self, item, ctx, selected):
         tag, meta = item["tag"], item["meta"]
