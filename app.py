@@ -36,7 +36,7 @@ import gallery_memory  # noqa: E402
 import imageutil  # noqa: E402
 import search  # noqa: E402
 from importer import build_catalog, import_aliases, import_danbooru_zh, import_restricted, import_taxonomy, sync_danbooru  # noqa: E402
-from prompt import auto_split, composer, import_parser, novelai_export, recommendation, related_client, sections as prompt_sections  # noqa: E402
+from prompt import auto_split, composer, import_parser, novelai_export, prior, recommendation, related_client, sections as prompt_sections  # noqa: E402
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -452,9 +452,33 @@ def ensure_seeded() -> None:
         conn.close()
 
 
+def _log_offline_prior_status() -> None:
+    """PHASE 8 交付契约：先验库缺失时显式告警，存在时 INFO 带路径与计数。"""
+    try:
+        st = prior.get_prior().status()
+    except Exception as exc:  # noqa: BLE001 —— 状态查询失败不阻塞启动
+        print(f"Offline Prior status check failed: {exc}", file=sys.stderr)
+        return
+    if Path(st["path"]).is_file():
+        print(
+            f"Offline Prior ready at {st['path']} "
+            f"(node_count={st['node_count']}, source_count={st['source_count']})",
+            flush=True,
+        )
+    else:
+        print(
+            f"Offline Prior MISSING at {st['path']} — running with degraded fallback; "
+            f"see README 'Offline Prior' for how to install. "
+            f"Recommendation still works via NPMI/seed but semantic-alternative quality is reduced.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ensure_seeded()
+    _log_offline_prior_status()
     app.state.thumb_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="thumb-fetch")
     app.state.image_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="image-fetch")
     app.state.novelai_service_process = None
@@ -1150,6 +1174,14 @@ def overlay(model_id: str):
         "special_tag_groups": data.get("special_tags", {}),
         "conflict_hints": data.get("conflict_hints", []),
     }
+
+
+# ---------- 离线先验状态（PHASE 8 交付契约） ----------
+
+@app.get("/api/offline-prior/status")
+def offline_prior_status():
+    """离线先验交付契约状态：文件缺失时优雅返回 available=false（不 404、不抛错）。"""
+    return prior.get_prior().status()
 
 
 # ---------- 分类浏览 / 搜索 ----------

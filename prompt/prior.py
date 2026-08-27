@@ -266,6 +266,54 @@ class PromptPrior:
         """别名：委托 ``related_tags``（NPMI 关联先验）。"""
         return self.related_tags(tag, limit=limit, adult=adult)
 
+    def status(self) -> dict:
+        """PHASE 8 交付契约：返回 ``{available, path, node_count, source_count, note}``。
+
+        - ``node_count``：``tag_semantic_node`` 行数（文件/表缺失为 0）。
+        - ``source_count``：``prior_manifest`` 中不同 ``(source_id, source_type)`` 数。
+        - ``available``：文件存在且 ``node_count > 0``。
+        任何 SQLite 错误一律降级为计数 0 / available=False，绝不抛错。
+        """
+        path = str(self.db_path)
+        conn = self._conn()
+        if conn is None:
+            return {
+                "available": False,
+                "path": path,
+                "node_count": 0,
+                "source_count": 0,
+                "note": "offline prior DB missing — running degraded fallback; see README 'Offline Prior'",
+            }
+        node_count = 0
+        source_count = 0
+        try:
+            row = conn.execute("SELECT COUNT(*) AS c FROM tag_semantic_node").fetchone()
+            node_count = int(row["c"] or 0) if row else 0
+        except sqlite3.Error:
+            pass
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM (SELECT DISTINCT source_id, source_type FROM prior_manifest)"
+            ).fetchone()
+            source_count = int(row["c"] or 0) if row else 0
+        except sqlite3.Error:
+            # 旧版 key/value 形状的 prior_manifest（无 source_id 列）：退化为总行数。
+            try:
+                row = conn.execute("SELECT COUNT(*) AS c FROM prior_manifest").fetchone()
+                source_count = int(row["c"] or 0) if row else 0
+            except sqlite3.Error:
+                source_count = 0
+        finally:
+            conn.close()
+        available = node_count > 0
+        return {
+            "available": available,
+            "path": path,
+            "node_count": node_count,
+            "source_count": source_count,
+            "note": "offline prior DB present" if available else "offline prior DB present but empty",
+        }
+
 
 _singleton: PromptPrior | None = None
 _singleton_lock = threading.Lock()

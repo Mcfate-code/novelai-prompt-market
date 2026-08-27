@@ -390,6 +390,17 @@ function apply(event, action) {
 - 「更新标签库」从 Danbooru 增量同步标签（`/api/sync`、`/api/sync-hot`）。
 - 青少年模式：开启时隐藏 NSFW 目录与语义搜索结果。
 
+### Offline Prior（数据先验）
+
+离线先验库 `data/offline_prompt_prior.sqlite`（NPMI 关联 / 语义槽位 / 槽位转移 / 语义近邻）**不属于仓库**（`data/` 与 `*.sqlite` 均被 gitignore），需要单独获取：
+
+- **普通用户**：从 GitHub Releases 下载预构建的 `offline_prompt_prior.sqlite`，放入 `data/`；或运行 `python scripts/bootstrap_prior.py`（若设置了环境变量 `PRIOR_DOWNLOAD_URL`，该脚本会直接下载到 `data/`）。
+- **开发者**：本地重建
+  - `python -m prompt.prior_build` —— 公共先验（NPMI / 槽位 / 上下文 / 转移），使用公开 Danbooru 元数据，无需密钥；
+  - `python -m scripts.build_embedding_prior` —— embedding 语义先验（`prior_semantic_neighbor` / 共享的 `tag_semantic_node`），**需要 `SILICONFLOW_API_KEY`**。
+- **缺失时行为**：启动时 app 会打印一行 WARNING 告警（`Offline Prior MISSING at ...`），`GET /api/offline-prior/status` 返回 `{"available": false, ...}`，系统使用优雅降级 —— 推荐仍通过 NPMI / seed 正常工作，仅语义替代（semantic alternative）质量下降。
+- **运行时不需要 `SILICONFLOW_API_KEY`**：该密钥仅构建期 embedding 脚本使用，正常启动与推荐不读取。
+
 ## Recommendation Target Isolation
 
 - `recommendationContextTags(document, target)`（`static/prompt-document.js`）是正向推荐上下文的唯一来源：`base` → 仅 Base positive；`char:N` → Base + Character N；`global_uc` / `char:N:uc` → 无正向推荐（返回 `[]`）。
@@ -613,6 +624,7 @@ WantedBy=multi-user.target
 | `GET /api/novelai-examples` / `POST /api/novelai-examples/{tag}` | 标签例图查询 / 生成 |
 | `POST /api/cache/clear` / `POST /api/novelai-examples/clear` | 缓存清理 |
 | `GET /api/models` / `GET /api/overlay/{model_id}` | 模型列表 / 模型能力 |
+| `GET /api/offline-prior/status` | 离线先验交付契约状态（available / path / node_count / source_count，见「Offline Prior（数据先验）」） |
 | `POST /api/sync` / `POST /api/sync-hot` | Danbooru 标签库更新 |
 
 ### Node 代理（8787）
