@@ -6,7 +6,7 @@ FastAPI, PromptDocument, or the generation/audit write path.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from prompt.sections import classify_tag as classify_prompt_section
@@ -125,7 +125,214 @@ class RecommendationService:
         for item in output:
             groups[item["group"]].append(item)
         return {"groups": [{"group": name, "recommendations": groups[name]} for name in groups],
-                "recommendations": output}
+                 "recommendations": output}
+
+    def recommend_v3(self, *, tags: Sequence[str] = (), target: str = "", node_id: str = "",
+                     limit: int = 20, mode: str = "general", participant_count=None,
+                     primary_scene_type: str = "", stage: str = "", position: str = "",
+                     body_focus: str = "", additional_activities: Sequence[str] = (),
+                     clothing_state: Mapping[str, Any] | None = None,
+                     active_target: str = "", active_section: str = "",
+                     semantic_node=None, last_added_tag: str = "", structured_state=None,
+                     generation_config=None, semantic_state=None) -> dict[str, Any]:
+        """Recommendation V3: next-step guidance layered on the V2 RRF core.
+
+        This method intentionally has a separate contract.  The V2 method above
+        remains unchanged for existing clients.  ``semantic_state`` may be a
+        Phase-B SemanticState instance or a serializable equivalent.
+        """
+        normalized = tuple(dict.fromkeys(_norm(tag) for tag in tags if _norm(tag)))
+        ctx = RecommendationContext(normalized, _norm(target), node_id, _norm(mode), participant_count,
+                                    _norm(primary_scene_type), _norm(stage).upper(), _norm(position),
+                                    _norm(body_focus),
+                                    tuple(dict.fromkeys(_norm(t) for t in (additional_activities or []) if _norm(t))),
+                                    dict(clothing_state or {}), _norm(active_target), _norm(active_section),
+                                    semantic_node, _norm(last_added_tag))
+        if "uc" in ctx.target or ctx.active_target.endswith(":uc"):
+            return self._v3_empty(ctx)
+        state = semantic_state
+        had_explicit_state = state is not None or structured_state is not None
+        if state is None and structured_state is not None:
+            try:
+                from prompt.semantic_state import build_semantic_state
+                state = build_semantic_state(structured_state, conn=self.conn,
+                                             generation_config=generation_config,
+                                             active_target=active_target or target,
+                                             mode=mode, last_added_tag=last_added_tag)
+            except Exception:
+                state = None
+        state_dict = asdict(state) if is_dataclass(state) else (state if isinstance(state, Mapping) else {})
+        missing = self._v3_missing(state, state_dict, active_target or target)
+        rankings, candidates = self._v3_collect(ctx, missing, state_dict, use_prior=had_explicit_state)
+        if ctx.mode != "adult":
+            candidates = {tag: item for tag, item in candidates.items() if "adult_context" not in item["sources"]}
+        candidates = {tag: item for tag, item in candidates.items()
+                      if self._allowed(item, ctx, normalized)}
+        rankings = {name: [tag for tag in values if tag in candidates]
+                    for name, values in rankings.items()}
+        fused = reciprocal_rank_fusion(rankings, self.rrf_k)
+        ordered = sorted(candidates, key=lambda tag: self._v3_sort(tag, candidates[tag], fused, ctx, missing))
+        selected = self._diversify(ordered, candidates, max(0, min(int(limit), 100)), ctx)
+        output = [self._v3_public_item(tag, candidates[tag], fused.get(tag, 0.0), ctx, missing)
+                  for tag in selected]
+        next_steps = []
+        for slot in missing[:max(1, min(5, int(limit) if limit else 5))]:
+            slot_id = slot.get("node_id", "") if isinstance(slot, Mapping) else getattr(slot, "node_id", "")
+            slot_item = {"node_id": slot_id,
+                         "slot": slot_id,
+                         "label": slot.get("label", slot_id) if isinstance(slot, Mapping) else getattr(slot, "label", slot_id),
+                         "zh": slot.get("zh", "") if isinstance(slot, Mapping) else getattr(slot, "zh", ""),
+                         "status": slot.get("status", "empty") if isinstance(slot, Mapping) else getattr(slot, "status", "empty"),
+                         "reason": slot.get("reason", "建议补充该槽位") if isinstance(slot, Mapping) else getattr(slot, "reason", "建议补充该槽位"),
+                         "recommendations": [i for i in output if i.get("slot") == slot_id][:max(1, min(3, int(limit) or 3))]}
+            next_steps.append(slot_item)
+        current_node = (state_dict.get("intent") or {}).get("node_id") if isinstance(state_dict.get("intent"), Mapping) else None
+        current_node = current_node or ctx.node_id or (semantic_node.get("node_id") if isinstance(semantic_node, Mapping) else None)
+        contextual = [i for i in output if i.get("scene_context")]
+        related = [i for i in output if not i.get("scene_context") and i.get("slot") is None]
+        groups = self._v3_groups(output)
+        return {"next_steps": next_steps, "current_node": current_node,
+                "contextual": contextual, "related": related,
+                "groups": groups, "recommendations": output,
+                "count": len(output), "section": groups}
+
+    def _v3_empty(self, ctx):
+        return {"next_steps": [], "current_node": None, "contextual": [], "related": [],
+                "groups": [], "recommendations": [], "count": 0, "section": []}
+
+    @staticmethod
+    def _v3_missing(state, state_dict, target):
+        if state is not None:
+            try:
+                slots = state.next_steps(target or "base", limit=10)
+                result = [asdict(s) if is_dataclass(s) else (dict(s) if isinstance(s, Mapping) else vars(s)) for s in slots]
+                if result:
+                    return result
+            except Exception:
+                pass
+        if target.startswith("char:"):
+            return [{"node_id": "char_identity", "label": "Identity", "zh": "身份", "status": "empty", "reason": "建议先补充角色身份"}]
+        return [{"node_id": "base_subject_count", "label": "Subject / Count", "zh": "主体/人数", "status": "empty", "reason": "建议先确定主体与人数"},
+                {"node_id": "env_indoor", "label": "Environment", "zh": "环境", "status": "empty", "reason": "建议补充环境场景"},
+                {"node_id": "base_composition", "label": "Composition", "zh": "构图", "status": "empty", "reason": "建议补充构图"}]
+
+    def _v3_collect(self, ctx, missing, state_dict, *, use_prior=False):
+        rankings = {name: [] for name in self.SOURCE_NAMES}
+        candidates = {}
+        # The offline prior is an optional adapter.  It is never required for V3.
+        try:
+            if not use_prior:
+                raise RuntimeError("offline prior requires explicit semantic context")
+            from prompt import prior as prior_mod
+            prior = prior_mod.get_prior()
+            adult = ctx.mode == "adult"
+            for tag in ctx.tags:
+                for source, getter in (("global_related", lambda: prior.related_tags(tag, adult=adult)),
+                                       ("semantic_context", lambda: prior.semantic_neighbors(tag, adult=adult))):
+                    for raw in getter() or []:
+                        self._v3_add(candidates, rankings, source, raw, ctx)
+                for raw in prior.context_candidates(tag, adult=adult) or []:
+                    self._v3_add(candidates, rankings, "semantic_context", raw, ctx)
+            nodes = [s.get("node_id") for s in missing if s.get("node_id")]
+            for node in nodes:
+                for raw in prior.slot_candidates(node, context=self._context_map(ctx), adult=adult) or []:
+                    self._v3_add(candidates, rankings, "semantic_context", {**raw, "slot": node}, ctx)
+            for raw in prior.next_slot_prior([s.get("node_id") for s in self._filled_slots(state_dict)], adult=adult) or []:
+                for candidate in prior.slot_candidates(raw.get("node_id", ""), context=self._context_map(ctx), adult=adult) or []:
+                    self._v3_add(candidates, rankings, "semantic_context", {**candidate, "slot": raw.get("node_id")}, ctx)
+        except Exception:
+            pass
+        for source in self.SOURCE_NAMES:
+            if source == "adult_context" and ctx.mode != "adult":
+                continue
+            if self.conn is None and source == "local_cooccurrence":
+                continue
+            for raw in _as_items(self._source(source, ctx)):
+                self._v3_add(candidates, rankings, source, raw, ctx)
+        # Apply DB metadata after all adapters have contributed.  Prior rows are
+        # deliberately allowed to be sparse, but a known tag must still obey
+        # target/section/safety filters just like a V2 candidate.
+        if self.conn is not None:
+            for tag, entry in candidates.items():
+                try:
+                    row = self.conn.execute(
+                        "SELECT danbooru_name, prompt_tag, post_count, zh_name, category FROM tags "
+                        "WHERE lower(prompt_tag)=lower(?) OR lower(danbooru_name)=lower(?) LIMIT 1", (tag, tag)
+                    ).fetchone()
+                    if row:
+                        entry["meta"].setdefault("canonical", row["danbooru_name"])
+                        entry["meta"].setdefault("prompt_tag", row["prompt_tag"])
+                        entry["meta"].setdefault("post_count", row["post_count"])
+                        entry["meta"].setdefault("zh", row["zh_name"] or "")
+                        entry["meta"].setdefault("sections", {classify_prompt_section(self.conn, tag)})
+                except Exception:
+                    pass
+        return rankings, candidates
+
+    @staticmethod
+    def _context_map(ctx):
+        return {"participant_count": ctx.participant_count, "primary_scene_type": ctx.primary_scene_type,
+                "stage": ctx.stage, "position": ctx.position, "body_focus": ctx.body_focus,
+                "additional_activities": ctx.additional_activities, "clothing_state": dict(ctx.clothing_state)}
+
+    @staticmethod
+    def _filled_slots(state_dict):
+        slots = []
+        for value in (state_dict.get("base_slots", []), state_dict.get("scene_slots", [])):
+            slots.extend(value if isinstance(value, list) else [])
+        for chars in state_dict.get("character_slots", []) or []:
+            slots.extend(chars if isinstance(chars, list) else [])
+        return [s.get("node_id") for s in slots
+                if isinstance(s, Mapping) and s.get("status") not in ("empty", "partial") and s.get("node_id")]
+
+    def _v3_add(self, candidates, rankings, source, raw, ctx):
+        item = dict(raw) if isinstance(raw, Mapping) else {"tag": raw}
+        tag = _norm(item.get("tag") or item.get("prompt_tag"))
+        if not tag:
+            return
+        entry = candidates.setdefault(tag, {"tag": tag, "sources": set(), "meta": {}, "source_meta": {}})
+        entry["sources"].add(source); entry["meta"].update({k: v for k, v in item.items() if k not in ("tag", "prompt_tag")})
+        entry["source_meta"][source] = item
+        if tag not in rankings[source]: rankings[source].append(tag)
+
+    def _v3_sort(self, tag, item, fused, ctx, missing):
+        meta = item["meta"]
+        missing_ids = {s.get("node_id") for s in missing}
+        slot = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
+        gap = 1 if slot in missing_ids else 0
+        intent_node = (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
+        intent = 1 if intent_node and slot == intent_node else int(bool(ctx.last_added_tag and _norm(meta.get("related_to")) == ctx.last_added_tag))
+        scene = 0
+        for field, actual in (("scene", ctx.primary_scene_type), ("stage", ctx.stage),
+                              ("position", ctx.position), ("body_focus", ctx.body_focus)):
+            if meta.get(field) is not None and actual and _norm(meta.get(field)) == _norm(actual):
+                scene += 1
+        if meta.get("activity") in ctx.additional_activities:
+            scene += 1
+        if meta.get("clothing_state") and any(_norm(meta["clothing_state"]) == _norm(v) for v in ctx.clothing_state.values()):
+            scene += 1
+        if meta.get("participant_count") is not None and _participant_number(meta["participant_count"]) == _participant_number(ctx.participant_count):
+            scene += 1
+        personal = min(1, int(meta.get("use_count", meta.get("personal_metric", 0)) or 0) / 10)
+        score = .45 * fused.get(tag, 0) + .25 * gap + .15 * intent + .10 * min(scene, 1) + .05 * personal
+        # Intent is a tie-breaking layer, but should be visible even when the
+        # two candidates came from the same RRF rank.
+        return (-score, -intent, -gap, 0 if intent else 1, tag)
+
+    def _v3_public_item(self, tag, item, score, ctx, missing):
+        public = self._public_item(tag, item, score, ctx)
+        meta = item["meta"]
+        public["slot"] = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
+        public["target"] = meta.get("target", ctx.target or "base")
+        public["scene_context"] = any(meta.get(k) is not None for k in ("scene", "stage", "position", "body_focus", "activity", "participant_count"))
+        public["reason"] = "；".join(x for x in ("补齐当前槽位" if public["slot"] else "与当前标签相关", "匹配当前场景" if public["scene_context"] else "") if x)
+        return public
+
+    @staticmethod
+    def _v3_groups(output):
+        grouped = defaultdict(list)
+        for item in output: grouped[item["group"]].append(item)
+        return [{"group": name, "recommendations": values} for name, values in grouped.items()]
 
     def _collect(self, ctx: RecommendationContext) -> dict[str, dict[str, Any]]:
         collected: dict[str, dict[str, Any]] = {}

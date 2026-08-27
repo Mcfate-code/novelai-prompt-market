@@ -2527,6 +2527,8 @@ class RecommendRequest(TagsRequest):
     active_target: str = ""
     active_section: str = ""
     last_added_tag: str = ""
+    structured_state: dict | None = None
+    generation_config: dict | None = None
 
 
 def _target_category(target: str) -> str:
@@ -2556,6 +2558,43 @@ def _related_source() -> related_client.RelatedClient | None:
     if not url:
         return None
     return related_client.RelatedClient(url, timeout=2.0)
+
+
+def _recommendation_adult_source(conn, body):
+    """Deterministic, validated Scene Composer adapter for V3 adult context."""
+    if _recommendation_mode(getattr(body, "mode", "general")) != "adult":
+        return []
+    config = _scene_composer_config() if "_scene_composer_config" in globals() else {}
+    count = recommendation._participant_number(getattr(body, "participant_count", None))
+    wanted = {"stage": str(getattr(body, "stage", "") or "").strip().upper(),
+              "position": str(getattr(body, "position", "") or "").strip().lower(),
+              "body_focus": str(getattr(body, "body_focus", "") or "").strip().lower()}
+    out = []
+    for raw in (config.get("primary_scenes") or []) + (config.get("activities") or []) + (config.get("clothing_states") or []):
+        if not isinstance(raw, dict):
+            continue
+        tag = str(raw.get("tag") or "").strip()
+        if not tag or not _scene_tag_exists(conn, tag):
+            continue
+        minimum = raw.get("minParticipants")
+        if count is not None and minimum is not None and count < int(minimum):
+            continue
+        item = {"tag": tag, "group": "当前阶段", "context_priority": 3}
+        if raw in (config.get("activities") or []):
+            item.update({"activity": tag, "scene": wanted["stage"]})
+        elif raw in (config.get("clothing_states") or []):
+            item.update({"clothing_state": tag})
+        else:
+            item.update({"scene": tag, "min_participants": minimum})
+        out.append(item)
+    # Positions/body focus are sourced from curated taxonomy and validated by
+    # the same sqlite/config contract as the existing builder endpoint.
+    if wanted["position"] and _scene_tag_exists(conn, wanted["position"]):
+        out.append({"tag": wanted["position"], "position": wanted["position"], "group": "体位", "context_priority": 5,
+                    "min_participants": 2})
+    if wanted["body_focus"] and _scene_tag_exists(conn, wanted["body_focus"]):
+        out.append({"tag": wanted["body_focus"], "body_focus": wanted["body_focus"], "group": "身体焦点", "context_priority": 5})
+    return out
 
 
 def _normalized_unique_tags(tags: list[str]) -> list[str]:
@@ -2793,7 +2832,8 @@ def recommendations(body: RecommendRequest):
     """
     tags = _normalized_unique_tags(getattr(body, "tags", []) or [])
     limit = max(0, min(int(getattr(body, "limit", 20) or 20), 100))
-    if not tags:
+    use_v3 = getattr(body, "structured_state", None) is not None
+    if not tags and not use_v3:
         return {"groups": [], "recommendations": []}
     conn = _conn()
     try:
@@ -2822,13 +2862,13 @@ def recommendations(body: RecommendRequest):
 
         service = recommendation.RecommendationService(
             conn,
-            sources={},
+            sources={"adult_context": lambda _ctx: _recommendation_adult_source(conn, body)},
             related_source=_related_source(),
             hidden_tags=hidden,
             adolescent_mode=adolescent,
             navigation=nav,
         )
-        result = service.recommend(
+        recommend_args = dict(
             tags=tags,
             target=target,
             node_id=node_id,
@@ -2846,10 +2886,24 @@ def recommendations(body: RecommendRequest):
             semantic_node=semantic_node,
             last_added_tag=getattr(body, "last_added_tag", "") or "",
         )
+        if use_v3:
+            result = service.recommend_v3(
+                **recommend_args,
+                structured_state=getattr(body, "structured_state", None),
+                generation_config=getattr(body, "generation_config", None),
+            )
+        else:
+            result = service.recommend(**recommend_args)
         # 旧前端兼容：分区字段 + 确定性 count 代理分（仅展示用，不影响 V2 内部排序）。
         for item in result["recommendations"]:
             item["section"] = prompt_sections.classify_tag(conn, item["tag"])
             item["count"] = int(round(float(item.get("_score", 0.0)) * 100))
+        if use_v3:
+            for layer in ("next_steps", "contextual", "related"):
+                for item in result.get(layer, []):
+                    if isinstance(item, dict) and "recommendations" in item:
+                        for recommendation_item in item["recommendations"]:
+                            recommendation_item["section"] = prompt_sections.classify_tag(conn, recommendation_item["tag"])
         return result
     finally:
         conn.close()
