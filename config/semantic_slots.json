@@ -1,0 +1,164 @@
+[
+  {
+    "node_id": "char_identity",
+    "family": "identity",
+    "label": "Identity",
+    "zh": "身份/主体",
+    "description_en": "number and identity of subjects in the image",
+    "keywords_en": ["solo", "1girl", "1boy", "multiple girls", "multiple boys", "couple", "crowd", "female focus", "male focus", "group"],
+    "keywords_zh": ["单人", "一个女孩", "一个男孩", "多个女孩", "情侣", "人群", "女性主体", "男性主体", "群体"]
+  },
+  {
+    "node_id": "char_face",
+    "family": "face",
+    "label": "Face",
+    "zh": "面部",
+    "description_en": "facial features, skin marks and face details",
+    "keywords_en": ["scar", "freckles", "mole", "eyebrows", "facial hair", "beard", "mustache", "face"],
+    "keywords_zh": ["伤疤", "雀斑", "痣", "眉毛", "胡子", "面部"]
+  },
+  {
+    "node_id": "char_eyes",
+    "family": "eyes",
+    "label": "Eyes",
+    "zh": "眼睛",
+    "description_en": "eye color, eye state and eye details",
+    "keywords_en": ["blue eyes", "red eyes", "green eyes", "closed eyes", "open eyes", "eye color", "heterochromia", "pupil", "glowing eyes", "eyelashes"],
+    "keywords_zh": ["蓝眼睛", "红眼睛", "绿眼睛", "闭眼", "睁眼", "眼睛颜色", "异色瞳", "瞳孔", "发光眼", "睫毛"]
+  },
+  {
+    "node_id": "char_hair",
+    "family": "hair",
+    "label": "Hair",
+    "zh": "头发",
+    "description_en": "hairstyle, hair length, hair color and hair accessories",
+    "keywords_en": ["long hair", "short hair", "ponytail", "twintails", "braid", "hair color", "blonde hair", "black hair", "red hair", "bangs", "ahoge", "hair ornament"],
+    "keywords_zh": ["长发", "短发", "马尾", "双马尾", "辫子", "发色", "金发", "黑发", "红发", "刘海", "呆毛", "发饰"]
+  },
+  {
+    "node_id": "char_body",
+    "family": "body",
+    "label": "Body",
+    "zh": "体型/身体",
+    "description_en": "body shape, body type, skin and body features",
+    "keywords_en": ["full body", "bare shoulders", "barefoot", "slim", "curvy", "muscular", "tall", "petite", "flat chest", "skin", "tan", "pale"],
+    "keywords_zh": ["全身", "露肩", "赤脚", "苗条", "丰满", "肌肉发达", "高大", "娇小", "平胸", "皮肤", "苍白"]
+  },
+  {
+    "node_id": "char_clothing",
+    "family": "clothing",
+    "label": "Clothing",
+    "zh": "服装",
+    "description_en": "clothing, outfits, tops, bottoms, outerwear and shoes",
+    "keywords_en": ["dress", "skirt", "school uniform", "shirt", "t-shirt", "blouse", "sweater", "hoodie", "pants", "jeans", "jacket", "coat", "shoes", "swimsuit", "kimono"],
+    "keywords_zh": ["连衣裙", "裙子", "校服", "衬衫", "T恤", "毛衣", "连帽卫衣", "裤子", "牛仔裤", "夹克", "外套", "鞋子", "泳装", "和服"]
+  },
+  {
+    "node_id": "char_clothing_accessory",
+    "family": "accessory",
+    "label": "Accessory",
+    "zh": "配饰",
+    "description_en": "accessories, headwear, jewelry and worn items",
+    "keywords_en": ["glasses", "earrings", "necklace", "choker", "ribbon", "scarf", "cap", "hat", "gloves", "watch", "ring", "belt", "backpack", "crown", "headband"],
+    "keywords_zh": ["眼镜", "耳环", "项链", "颈圈", "丝带", "围巾", "帽子", "手套", "手表", "戒指", "腰带", "背包", "皇冠", "发带"]
+  },
+  {
+    "node_id": "char_expression",
+    "family": "expression",
+    "label": "Expression",
+    "zh": "表情",
+    "description_en": "facial expression and emotion",
+    "keywords_en": ["smile", "blush", "crying", "angry", "sad", "happy", "surprised", "embarrassed", "shy", "serious", "grin", "frown", "open mouth", "closed mouth", "tears"],
+    "keywords_zh": ["微笑", "脸红", "哭泣", "生气", "悲伤", "开心", "惊讶", "尴尬", "害羞", "严肃", "露齿笑", "皱眉", "张嘴", "闭嘴", "泪水"]
+  },
+  {
+    "node_id": "char_pose",
+    "family": "pose",
+    "label": "Pose",
+    "zh": "姿势",
+    "description_en": "body pose and posture",
+    "keywords_en": ["standing", "sitting", "kneeling", "lying", "crouching", "squatting", "hands up", "hands on hips", "crossed arms", "spread legs", "leaning forward", "looking back"],
+    "keywords_zh": ["站立", "坐着", "跪着", "躺着", "蜷蹲", "蹲着", "举手", "双手叉腰", "交叉双臂", "张开双腿", "前倾", "回望"]
+  },
+  {
+    "node_id": "char_action",
+    "family": "action",
+    "label": "Action / Interaction",
+    "zh": "动作与互动",
+    "description_en": "action, movement and interaction with viewer or objects",
+    "keywords_en": ["looking at viewer", "looking away", "holding", "waving", "reaching", "hugging", "walking", "running", "kissing", "touching"],
+    "keywords_zh": ["看向观众", "看向别处", "拿着", "挥手", "伸手", "拥抱", "走路", "奔跑", "接吻", "抚摸"]
+  },
+  {
+    "node_id": "env_indoor",
+    "family": "scene",
+    "label": "Indoor",
+    "zh": "室内场景",
+    "description_en": "indoor environments and rooms",
+    "keywords_en": ["bedroom", "cafe", "classroom", "kitchen", "bathroom", "library", "school", "office", "living room", "indoors"],
+    "keywords_zh": ["卧室", "咖啡馆", "教室", "厨房", "浴室", "图书馆", "学校", "办公室", "客厅", "室内"]
+  },
+  {
+    "node_id": "env_outdoor",
+    "family": "scene",
+    "label": "Outdoor",
+    "zh": "室外场景",
+    "description_en": "outdoor environments, landscapes and urban scenes",
+    "keywords_en": ["forest", "beach", "street", "city", "mountain", "sky", "park", "garden", "river", "lake", "sea", "outdoors"],
+    "keywords_zh": ["森林", "海滩", "街道", "城市", "山", "天空", "公园", "花园", "河流", "湖泊", "大海", "室外"]
+  },
+  {
+    "node_id": "base_lighting",
+    "family": "lighting",
+    "label": "Lighting",
+    "zh": "光照",
+    "description_en": "lighting conditions and light sources",
+    "keywords_en": ["sunlight", "moonlight", "golden hour", "neon lights", "candlelight", "rim light", "backlight", "dusk", "dawn", "fireworks"],
+    "keywords_zh": ["阳光", "月光", "黄金时刻", "霓虹灯", "烛光", "轮廓光", "背光", "黄昏", "黎明", "烟花"]
+  },
+  {
+    "node_id": "base_time_weather",
+    "family": "time_weather",
+    "label": "Time / Weather",
+    "zh": "时间与天气",
+    "description_en": "time of day, season and weather",
+    "keywords_en": ["day", "night", "sunset", "winter", "summer", "spring", "autumn", "snow", "rain", "cloudy", "starry sky", "fog"],
+    "keywords_zh": ["白天", "夜晚", "日落", "冬天", "夏天", "春天", "秋天", "雪", "雨", "多云", "星空", "雾"]
+  },
+  {
+    "node_id": "base_objects",
+    "family": "objects",
+    "label": "Objects",
+    "zh": "物件",
+    "description_en": "objects, furniture, props and items",
+    "keywords_en": ["bed", "pillow", "lamp", "table", "chair", "umbrella", "mirror", "bookshelf", "flower", "window", "book", "cup"],
+    "keywords_zh": ["床", "枕头", "灯", "桌子", "椅子", "雨伞", "镜子", "书架", "花", "窗户", "书", "杯子"]
+  },
+  {
+    "node_id": "base_composition",
+    "family": "composition",
+    "label": "Composition",
+    "zh": "构图",
+    "description_en": "framing, shot type, camera angle and composition",
+    "keywords_en": ["portrait", "close-up", "full body", "cowboy shot", "from above", "from below", "dutch angle", "wide shot", "profile", "three-quarter view", "face focus", "upper body"],
+    "keywords_zh": ["肖像", "特写", "全身", "牛仔镜头", "俯视", "仰视", "倾斜角度", "广角", "侧脸", "四分之三侧", "面部特写", "上半身"]
+  },
+  {
+    "node_id": "base_style",
+    "family": "style",
+    "label": "Style",
+    "zh": "风格",
+    "description_en": "art style, medium and color treatment",
+    "keywords_en": ["anime style", "lineart", "flat color", "watercolor", "sketch", "pixel art", "oil painting", "monochrome", "vivid colors", "pastel colors"],
+    "keywords_zh": ["动漫风格", "线稿", "平涂", "水彩", "素描", "像素画", "油画", "单色", "鲜艳色", "粉彩色"]
+  },
+  {
+    "node_id": "quality",
+    "family": "quality",
+    "label": "Quality",
+    "zh": "画质",
+    "description_en": "image quality and aesthetic polish tags",
+    "keywords_en": ["masterpiece", "best quality", "high quality", "low quality", "ultra detailed", "bad anatomy", "bad quality"],
+    "keywords_zh": ["杰作", "最佳画质", "高质量", "低质量", "超精细", "画质缺陷"]
+  }
+]

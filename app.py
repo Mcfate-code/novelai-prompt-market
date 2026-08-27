@@ -2855,6 +2855,35 @@ def recommendations(body: RecommendRequest):
         conn.close()
 
 
+class SemanticStateRequest(BaseModel):
+    structured_state: dict
+    active_target: str = ""
+    mode: str = "general"
+    generation_config: dict | None = None
+    last_added_tag: str = ""
+
+
+@app.post("/api/semantic-state")
+def semantic_state_api(body: SemanticStateRequest):
+    from prompt.semantic_state import build_semantic_state
+    conn = _conn()
+    try:
+        state = build_semantic_state(
+            body.structured_state, conn=conn,
+            generation_config=body.generation_config,
+            active_target=body.active_target, mode=body.mode,
+            last_added_tag=body.last_added_tag)
+        return {
+            "base_slots": [vars(s) for s in state.base_slots],
+            "character_slots": [[vars(s) for s in chars] for chars in state.character_slots],
+            "scene_slots": [vars(s) for s in state.scene_slots],
+            "intent": state.intent,
+            "summary": state.summary,
+        }
+    finally:
+        conn.close()
+
+
 class AutoSplitRequest(BaseModel):
     prompt: Any = None
     text: str = ""
