@@ -3,10 +3,10 @@
     "node_id": "char_identity",
     "family": "identity",
     "label": "Identity",
-    "zh": "身份/主体",
-    "description_en": "number and identity of subjects in the image",
-    "keywords_en": ["solo", "1girl", "1boy", "multiple girls", "multiple boys", "couple", "crowd", "female focus", "male focus", "group"],
-    "keywords_zh": ["单人", "一个女孩", "一个男孩", "多个女孩", "情侣", "人群", "女性主体", "男性主体", "群体"]
+    "zh": "身份",
+    "description_en": "identity and type of characters (girl, boy, named character)",
+    "keywords_en": ["girl", "boy", "named character", "original character"],
+    "keywords_zh": ["女孩", "男孩", "具名角色", "原创角色"]
   },
   {
     "node_id": "char_face",
@@ -41,8 +41,8 @@
     "label": "Body",
     "zh": "体型/身体",
     "description_en": "body shape, body type, skin and body features",
-    "keywords_en": ["full body", "bare shoulders", "barefoot", "slim", "curvy", "muscular", "tall", "petite", "flat chest", "skin", "tan", "pale"],
-    "keywords_zh": ["全身", "露肩", "赤脚", "苗条", "丰满", "肌肉发达", "高大", "娇小", "平胸", "皮肤", "苍白"]
+    "keywords_en": ["bare shoulders", "barefoot", "slim", "curvy", "muscular", "tall", "petite", "flat chest", "skin", "tan", "pale"],
+    "keywords_zh": ["露肩", "赤脚", "苗条", "丰满", "肌肉发达", "高大", "娇小", "平胸", "皮肤", "苍白"]
   },
   {
     "node_id": "char_clothing",

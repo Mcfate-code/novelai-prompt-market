@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "_note": "语义导航：创作概念骨架（不引用具体目录表，纯前端导航 + 推荐上下文）。root 为 base / character 两棵；节点字段固定为 id/label/zh/target/section/nsfw/seed_tags/children。target=base|character 决定该节点建议进入 Base 还是角色 Prompt；section 对应 prompt/sections.py 的固定分区，供 Base/Character 目标过滤与分类显示。seed_tags 是从库内（data/tags.sqlite）核验过的真实标签，作为确定性推荐上下文：节点（含祖先）的 seed_tags 参与评分，并受青少年模式隐藏规则约束。新增节点时请确保 seed_tags 全部为安全标签、nsfw 如实标注。",
+  "_note": "语义导航：创作概念骨架（不引用具体目录表，纯前端导航 + 推荐上下文）。root 为 base / character 两棵；节点字段固定为 id/label/zh/target/section/nsfw/seed_tags/children。target=base|character 决定该节点建议进入 Base 还是角色 Prompt；section 对应 prompt/sections.py 的固定分区，供 Base/Character 目标过滤与分类显示。seed_tags 是从库内（data/tags.sqlite）核验过的真实标签，作为确定性推荐上下文：节点（含祖先）的 seed_tags 参与评分，并受青少年模式隐藏规则约束。新增节点时请确保 seed_tags 全部为安全标签、nsfw 如实标注。所有权约定（冻结）：solo / 1girl / 2girls / 1boy / multiple girls 等主体计数标签归 base 根 base_subject_count 节点，绝不进 char_identity；girl / boy / 具名角色归 Character Identity；full body 归 base_composition（构图），非 char_body；glasses 等「多证据」标签以固定优先级（Accessory > Face > Eyes）裁决为单一视觉节点。",
   "base": {
     "id": "base",
     "label": "Base",
@@ -28,6 +28,16 @@
         "section": "composition",
         "nsfw": false,
         "seed_tags": ["portrait", "close-up", "full body", "looking at viewer"],
+        "children": []
+      },
+      {
+        "id": "base_subject_count",
+        "label": "Subject / Count",
+        "zh": "主体/人数",
+        "target": "base",
+        "section": "composition",
+        "nsfw": false,
+        "seed_tags": ["solo", "1girl", "1boy", "2girls", "2boys", "multiple girls", "multiple boys", "couple", "crowd"],
         "children": []
       },
       {
@@ -109,7 +119,7 @@
         "target": "character",
         "section": "character",
         "nsfw": false,
-        "seed_tags": ["solo", "1girl"],
+        "seed_tags": ["girl", "boy"],
         "children": []
       },
       {
@@ -128,7 +138,7 @@
             "target": "character",
             "section": "appearance",
             "nsfw": false,
-            "seed_tags": ["full body", "bare shoulders", "barefoot"],
+            "seed_tags": ["bare shoulders", "barefoot"],
             "children": []
           },
           {

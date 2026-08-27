@@ -396,7 +396,13 @@ def test_load_navigation_prefers_deepest_seed():
     assert seed_map["blue eyes"] == "char_eyes"        # 而非 char_appearance
     assert seed_map["long hair"] == "char_hair"        # 而非 char_appearance
     assert seed_map["masterpiece"] == "base_style"
-    assert seed_map["1girl"] == "char_identity"
+    # 主体计数归 base_subject_count，绝不进 char_identity（§3.2/§3.5）
+    assert seed_map["1girl"] == "base_subject_count"
+    assert seed_map["solo"] == "base_subject_count"
+    # full body 归构图，非 char_body（§3.3）
+    assert seed_map["full body"] == "base_composition"
+    # glasses 多证据 → 固定裁决为 Accessory（§3.4，确定性）
+    assert seed_map["glasses"] == "char_clothing_accessory"
     # 父节点仍保留
     assert "char_appearance" in parent_map.values()
 

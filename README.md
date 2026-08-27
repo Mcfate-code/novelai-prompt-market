@@ -114,7 +114,7 @@ PromptBridge 由集成方提供，需实现：
 `static/visual-builder.js` + `static/visual-builder.css` 提供挂载到 `#visual-prompt-root` 的原生 JS 组件（无框架 / 零依赖），由 Workbench V3 接入，用**语义卡片 + chip 编辑**方式编辑 Prompt（不做无限画布 / 无连线）：
 
 - **一级工作区**：Base / Character 1..N / 「+」添加角色；Base 与 Character 内容互不串用（每个工作区只渲染自己目标的 chip；新增标签一律按 `ADD_TAG` 写入当前 active target，与 Text 编辑保持同一目标）。
-- **语义卡片**：来自 `GET /api/catalog/semantic` 的 Base/Character 概念骨架（不硬编码数千 taxonomy）——Base 卡片 Style / Composition / Environment / Lighting / Time-Weather / Objects / Quality（Quality 为组件内置最小兜底节点：当后端 base 树无 `section=quality` 节点时注入，seed_tags 仅 4 个核心质量词）；Character 卡片 Identity / Appearance（Body Skin Hair Face Eyes）/ Clothing / Expression / Pose / Action-Interaction。点击卡片下钻 `?node_id=` 刷新推荐 / seed tags（青少年模式由后端裁剪 nsfw 节点，组件原样渲染不绕过），点「＋ 标签」ADD_TAG 到当前 active target（携带卡片对应分区）。
+- **语义卡片**：来自 `GET /api/catalog/semantic` 的 Base/Character 概念骨架（不硬编码数千 taxonomy）——Base 卡片 Subject / Count / Style / Composition / Environment / Lighting / Time-Weather / Objects / Quality（Quality 为组件内置最小兜底节点：当后端 base 树无 `section=quality` 节点时注入，seed_tags 仅 4 个核心质量词）；Character 卡片 Identity / Appearance（Body Skin Hair Face Eyes）/ Clothing / Expression / Pose / Action-Interaction。点击卡片下钻 `?node_id=` 刷新推荐 / seed tags（青少年模式由后端裁剪 nsfw 节点，组件原样渲染不绕过），点「＋ 标签」ADD_TAG 到当前 active target（携带卡片对应分区）。
 - **chip 编辑**：已选标签按固定 10 分区成组显示为 chip；每个 chip 支持删除（`REMOVE_TAG`）、权重显示与 `−`/`＋` 步进调权（`SET_WEIGHT`，±0.05 夹底 0.1）、分区移动（`MOVE_SECTION` 下拉）；`weight=1` 简洁显示 tag，非 1 显示如 `blue eyes · 1.3`。
 - **Character UC / Global UC**：折叠面板（`<details>`）且底色 / 边框明显区分，与正片互不混淆。
 - **角色管理**：工作区头部的角色名输入（change 时 `RENAME_CHARACTER`）与「移除角色」按钮（`REMOVE_CHARACTER`，仅剩 1 个角色时禁用），tab 栏「+」添加角色（`ADD_CHARACTER`）。

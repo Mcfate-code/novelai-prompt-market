@@ -65,6 +65,17 @@ SECTION_TO_NODE = {
     # "scene" / "appearance" 有歧义 → 交还 embedding
 }
 
+# §3.4 眼镜等「多证据」标签的确定性单节点裁决：当同一 tag 同时出现在多个同级 seed
+# 节点时，按此固定优先级（值小者优先）选单一稳定节点，绝不依赖 seed 遍历顺序。
+# 例：glasses 同时是 Eyes/Face/Accessory 的证据，但视觉具体节点固定为 Accessory
+# （Accessory > Face > Eyes）。未列入的节点优先级相同，维持「先遇者胜」。
+SEED_NODE_PRIORITY = {
+    "char_clothing_accessory": 0,
+    "char_face": 1,
+    "char_eyes": 2,
+}
+_DEFAULT_NODE_PRIORITY = 1000
+
 
 class StatsCollector:
     """累计请求级统计（用于 benchmark / 成本核算）。"""
@@ -126,7 +137,7 @@ def load_navigation(path=NAV_PATH):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     seed_map = {}
     parent_map = {}
-    depth_map = {}  # tag_key -> (node_id, depth)
+    depth_map = {}  # tag_key -> (node_id, depth, priority)
 
     def walk(node, parent=None, depth=0):
         nid = node.get("id")
@@ -134,12 +145,15 @@ def load_navigation(path=NAV_PATH):
             return
         if parent:
             parent_map[nid] = parent
+        prio = SEED_NODE_PRIORITY.get(nid, _DEFAULT_NODE_PRIORITY)
         for t in node.get("seed_tags") or []:
             key = tag_enrichment.normalize_tag(t)
             cur = depth_map.get(key)
-            # 同一 tag 出现在父/子多节点时，优先取更深（更具体）的节点。
-            if cur is None or depth > cur[1]:
-                depth_map[key] = (nid, depth)
+            # 同一 tag 出现在父/子多节点时，优先取更深（更具体）的节点；
+            # 同级则按 SEED_NODE_PRIORITY 固定裁决（§3.4，确定性，不依赖遍历顺序）；
+            # 仍未分先后则维持「先遇者胜」（JSON 顺序稳定，非随机）。
+            if cur is None or depth > cur[1] or (depth == cur[1] and prio < cur[2]):
+                depth_map[key] = (nid, depth, prio)
         for c in node.get("children") or []:
             walk(c, nid, depth + 1)
 

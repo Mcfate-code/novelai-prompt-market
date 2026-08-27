@@ -32,7 +32,7 @@ DEFAULT_MIN_POST_COUNT = 10
 
 # taxonomy_map.category_l1 -> node_id（只覆盖可确定映射；None 表示交还 embedding 判定）
 TAXONOMY_L1_TO_NODE = {
-    "人物数量与主体": "char_identity",
+    "人物数量与主体": "base_subject_count",
     "成人与人物类型（通用）": "char_identity",
     "发型": "char_hair",
     "头发长度与状态": "char_hair",
