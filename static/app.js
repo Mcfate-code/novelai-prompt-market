@@ -689,7 +689,12 @@ async function init() {
 async function mountWorkbenchComponents() {
   const [assistantModule, builderModule, nsfwModule] = await Promise.all([import("/static/tag-assistant.js"), import("/static/visual-builder.js"), import("/static/nsfw-builder.js")]);
   const assistant = assistantModule.createTagAssistant({ root: $("#tag-assistant-root"), bridge: window.PromptBridge });
-  const builder = builderModule.createVisualBuilder({ root: $("#visual-prompt-root"), bridge: window.PromptBridge });
+  const builder = builderModule.createVisualBuilder({
+    root: $("#visual-prompt-root"),
+    bridge: window.PromptBridge,
+    getGenerationConfig: () => ({ positiveTier: naiPositiveTier }),
+    getMode: () => userSettings.adolescent_mode ? "general" : (workbenchMode === "scene" ? "adult" : "general"),
+  });
   assistant.mount();
   builder.mount();
   let nsfwBuilder = null;
@@ -725,12 +730,12 @@ async function mountWorkbenchComponents() {
     const isText = mode === "text";
     const isVisual = mode === "visual";
     const isScene = mode === "scene";
-    // Text：单一编辑器 + Prompt/UC 标签 + 角色标签 + Tag Assistant（可折叠）；不复制到 Visual/Scene
+    // Base / C1 / C2 是 Generate 工作台的持久正面目标栏；UC 仍仅由 Text Prompt/UC pane 控制。
     $("#nai-editor").hidden = !isText;
     $(".nai-prompt-meta")?.toggleAttribute("hidden", !isText);
     $("#nai-free-text-collapse")?.toggleAttribute("hidden", !isText);
     document.querySelector(".nai-tabs")?.toggleAttribute("hidden", !isText);
-    $("#nai-character-tabs")?.toggleAttribute("hidden", !isText);
+    $("#nai-character-tabs")?.removeAttribute("hidden");
     $("#nai-character-list")?.toggleAttribute("hidden", !isText);
     $("#tag-assistant-root").hidden = !isText;
     // Visual / Scene 独占
@@ -3633,7 +3638,9 @@ function naiRenderCharacters() {
       b.type = "button";
       b.className = `nai-char-tab ${activeNaiTarget === i ? "active" : ""}`;
       b.dataset.naiCharTab = String(i);
-      b.textContent = `Character ${i + 1}`;
+      const identity = String(state.prompt?.characters?.[i]?.name || "").trim();
+      const generic = `Character ${i + 1}`;
+      b.textContent = identity && identity !== generic ? `${generic} · ${identity}` : generic;
       tabsBox.insertBefore(b, addBtn);
     });
     baseBtn?.classList.toggle("active", activeNaiTarget === "base");
@@ -4555,6 +4562,7 @@ $("#nai-positive-tier").addEventListener("change", () => {
   localStorage.setItem("nai_positive_tier", naiPositiveTier);
   naiUpdateTierHint();
   naiUpdateEffectivePreview();
+  window.WorkbenchComponents?.builder?.refreshSemantic();
 });
 $("#nai-negative-tier").addEventListener("change", () => {
   naiNegativeTier = $("#nai-negative-tier").value;

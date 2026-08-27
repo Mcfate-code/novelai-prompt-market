@@ -19,6 +19,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import * as promptDocument from "../prompt-document.js";
 import { splitPromptTokens, tokenRangeAtCaret } from "../prompt-tokenizer.js";
 import { compileGenerationPrompts } from "../prompt-compiler.js";
@@ -251,12 +252,20 @@ test("documentFromProposal still available for Auto-Split Apply", () => {
   assert.equal(doc.characters[0].name, "Alice");
 });
 
+test("Generate target bar persists across Text, Visual, and Scene modes", () => {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(appSource, /\$\("#nai-character-tabs"\)\?\.removeAttribute\("hidden"\)/);
+  assert.doesNotMatch(appSource, /\$\("#nai-character-tabs"\)\?\.toggleAttribute\("hidden",\s*!isText\)/);
+  assert.match(appSource, /getGenerationConfig:\s*\(\)\s*=>\s*\(\{\s*positiveTier:\s*naiPositiveTier\s*\}\)/);
+  assert.match(appSource, /WorkbenchComponents\?\.builder\?\.refreshSemantic\(\)/);
+});
+
 // ===== MANUAL CHECKLIST（DOM 依赖，无法在 node --test 覆盖）=====
 // 1. autocomplete 弹窗渲染：#nai-editor 内键入 2+ 字符出现候选；Tab 接受后光标停在插入 tag 末尾，
 //    立即触发 input 且被 naiAutocompleteSuppress 抑制不重开弹窗。
 // 2. 键盘契约：↑↓ 导航、Tab 接受、单 Enter 换行、Enter×2 生成、Esc 关闭；IME composing 的 Enter 只换行不生成。
 // 3. 单一编辑器：Base / Character N / Prompt / UC 切换时 #nai-editor 内容与光标（GUARD）正确回流；
 //    聚焦打字时不被 subscriber 重写。
-// 4. Text / Visual / Scene 模式：Text 显示编辑器 + Prompt/UC + 角色 tab + Tag Assistant；
-//    Visual 只显示 #visual-prompt-root；Scene 只显示 #nsfw-builder-root；青少年模式隐藏 Scene 按钮。
+// 4. Text / Visual / Scene 模式：Base/C1/C2 目标栏始终显示；Text 另显示编辑器、Prompt/UC 与 Tag Assistant；
+//    Visual 显示 #visual-prompt-root；Scene 显示 #nsfw-builder-root；青少年模式隐藏 Scene 按钮。
 // 5. 角色设置：折叠面板仅 角色名 / Position / X·Y / 上移·下移 / 移除，无 textarea；编辑角色 Prompt 走顶部单一编辑器。

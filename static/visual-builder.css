@@ -1,16 +1,39 @@
-.semantic-composer { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 360px); gap: 12px; padding: 12px; color: var(--text, #1d252b); background: var(--panel, #fff); border: 1px solid var(--border, #dfe4e8); border-radius: 8px; }
-.composer-target { grid-column: 1 / -1; font-size: 12px; color: var(--accent-ink, #8f3d2e); }
-.semantic-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; align-content: start; }
-.semantic-node { display: flex; min-height: 78px; flex-direction: column; align-items: flex-start; gap: 5px; padding: 10px; text-align: left; border: 1px solid var(--border, #dfe4e8); border-radius: 6px; background: var(--panel-soft, #f8fafb); cursor: pointer; }
-.semantic-node:hover, .semantic-node:focus-visible { border-color: var(--accent, #b6533d); background: var(--accent-soft, #f8e9e4); }
-.semantic-node small { color: #6d7780; }
-.semantic-node span { overflow: hidden; width: 100%; color: #59656c; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.semantic-inspector { min-height: 180px; padding: 10px; border-left: 1px solid var(--border, #dfe4e8); }
-.breadcrumb { margin-bottom: 10px; font-weight: 700; }
-.selected-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }
-.composer-chip { padding: 4px 7px; border: 1px solid var(--border, #dfe4e8); border-radius: 5px; background: var(--panel-soft, #f8fafb); }
-.composer-chip button { border: 0; background: none; cursor: pointer; }
-.recommendations { display: flex; flex-wrap: wrap; gap: 6px; }
-.recommendations button { border: 1px solid var(--border, #dfe4e8); border-radius: 5px; background: #fff; padding: 5px 8px; cursor: pointer; }
-.recommendations button:hover { border-color: var(--accent, #b6533d); }
-@media (max-width: 760px) { .semantic-composer { grid-template-columns: 1fr; } .semantic-inspector { border-left: 0; border-top: 1px solid var(--border, #dfe4e8); } }
+.semantic-composer { display:grid; grid-template-columns:minmax(0,1fr) minmax(290px,360px); gap:14px; padding:14px; color:var(--text,#1d252b); background:var(--panel,#fff); border:1px solid var(--border,#dfe4e8); border-radius:10px; }
+.completion-header,.composer-breadcrumb { grid-column:1/-1; }
+.completion-header>div:first-child { display:flex; align-items:baseline; flex-wrap:wrap; gap:8px; }
+.completion-header span { color:var(--accent-ink,#8f3d2e); font-weight:700; }
+.completion-header strong { font-size:18px; }
+.completion-header small,.muted { color:#68747c; }
+.completion-track { height:6px; margin-top:8px; overflow:hidden; border-radius:9px; background:#e9edef; }
+.completion-track i { display:block; height:100%; background:var(--accent,#b6533d); transition:width .2s ease; }
+.composer-breadcrumb { display:flex; align-items:center; flex-wrap:wrap; gap:5px; padding-bottom:9px; border-bottom:1px solid var(--border,#dfe4e8); }
+.composer-breadcrumb button { border:0; padding:3px 4px; color:var(--accent-ink,#8f3d2e); background:transparent; cursor:pointer; }
+.semantic-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:9px; align-content:start; }
+.semantic-node { position:relative; display:grid; grid-template-columns:24px 1fr; min-height:84px; gap:4px 6px; padding:11px; text-align:left; border:1px solid var(--border,#dfe4e8); border-radius:8px; background:var(--panel-soft,#f8fafb); cursor:pointer; }
+.semantic-node:hover { border-color:var(--accent,#b6533d); background:var(--accent-soft,#f8e9e4); }
+.semantic-node .status-symbol { grid-row:1/4; font-size:18px; font-weight:700; }
+.semantic-node.status-filled .status-symbol { color:#24774b; }
+.semantic-node.status-partial .status-symbol { color:#b06b18; }
+.semantic-node.status-empty .status-symbol { color:#89949a; }
+.semantic-node small { color:#657078; line-height:1.35; }
+.drill-hint { color:var(--accent-ink,#8f3d2e); font-size:12px; }
+.next-steps { margin-top:14px; padding:10px 12px; border:1px solid var(--border,#dfe4e8); border-radius:8px; }
+.next-steps h3,.semantic-inspector h3 { margin:0 0 7px; font-size:13px; }
+.next-steps ul { display:grid; gap:5px; margin:0; padding-left:18px; }
+.next-steps li span { margin-left:6px; color:#68747c; font-size:12px; }
+.semantic-inspector { min-height:220px; padding-left:14px; border-left:1px solid var(--border,#dfe4e8); }
+.semantic-inspector h2 { margin:0 0 14px; }
+.semantic-inspector section+section { margin-top:18px; }
+.selected-chips,.recommendations { display:grid; gap:7px; }
+.composer-chip { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 8px; border:1px solid var(--border,#dfe4e8); border-radius:7px; background:var(--panel-soft,#f8fafb); }
+.weight-control { display:flex; align-items:center; gap:2px; }
+.weight-control button { width:27px; height:27px; border:1px solid var(--border,#dfe4e8); background:#fff; cursor:pointer; }
+.weight-control input { width:58px; height:27px; box-sizing:border-box; border:1px solid var(--border,#dfe4e8); text-align:center; }
+.recommendations button,.composer-error button,.inspector-error button { padding:7px 9px; text-align:left; border:1px solid var(--border,#dfe4e8); border-radius:6px; color:inherit; background:#fff; cursor:pointer; }
+.recommendations button:hover { border-color:var(--accent,#b6533d); }
+.next-step-recommendation { display:grid; gap:4px; padding:8px; border-left:3px solid var(--accent-soft,#e7c2b8); background:var(--panel-soft,#f8fafb); }
+.next-step-recommendation>span { color:#68747c; font-size:12px; }
+.composer-error,.inspector-error { display:grid; gap:8px; padding:14px; border:1px solid #d38d7e; border-radius:8px; background:#fff4f1; }
+.semantic-composer button:focus-visible,.semantic-composer input:focus-visible,.composer-error button:focus-visible { outline:3px solid color-mix(in srgb,var(--accent,#b6533d) 35%,transparent); outline-offset:2px; }
+@media (max-width:800px) { .semantic-composer { grid-template-columns:1fr; } .semantic-inspector { padding:14px 0 0; border-top:1px solid var(--border,#dfe4e8); border-left:0; } }
+@media (max-width:460px) { .semantic-grid { grid-template-columns:1fr; } .composer-chip { align-items:flex-start; flex-direction:column; } }
