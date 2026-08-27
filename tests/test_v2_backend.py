@@ -51,7 +51,7 @@ class V2BackendTest(unittest.TestCase):
         conn = self.conn()
         tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"tag_bundle", "tag_cooccurrence", "prompt_snapshot", "generation"} <= tables)
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM tag_conflict").fetchone()[0], 3)
         conn.close()
 
@@ -180,7 +180,8 @@ class V2BackendTest(unittest.TestCase):
         conn = self.conn()
         usage = {row["tag_name"] for row in conn.execute("SELECT tag_name FROM recent_tags")}
         conn.close()
-        self.assertIn("anime", usage)
+        # Phase A：快照（含手动保存）不再触发学习，只保留 cooccurrence_record 写入的标签。
+        self.assertNotIn("anime", usage)
         self.assertNotIn("not an entry", usage)
 
     def test_export_preserves_structured_character_uc(self):

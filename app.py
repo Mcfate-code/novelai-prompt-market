@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import db  # noqa: E402
+import gallery_memory  # noqa: E402
 import imageutil  # noqa: E402
 import search  # noqa: E402
 from importer import build_catalog, import_aliases, import_danbooru_zh, import_restricted, import_taxonomy, sync_danbooru  # noqa: E402
@@ -688,6 +689,7 @@ class GalleryItemBody(BaseModel):
     dir_name: str = "nai_generated"
     snapshot_id: str | None = None
     source_asset_id: str | None = None
+    parent: dict | None = None
 
 
 @app.post("/api/gallery/item")
@@ -741,21 +743,37 @@ async def gallery_item(body: GalleryItemBody):
         temp_out.unlink(missing_ok=True)
         raise HTTPException(500, "图片写入失败")
     prompt = body.prompt.strip()
+    parent_payload = gallery_memory.parent_payload(body.parent, body.parameters)
     conn = _conn()
     try:
         cur = conn.execute(
             "INSERT INTO gallery (dir_name, file_name, prompt, file_path, created_at, negative_prompt, "
-            "parameters_json, snapshot_id, source_asset_id) VALUES (?,?,?,?,?,?,?,?,?)",
+            "parameters_json, snapshot_id, source_asset_id, parent_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (dir_name, fname, prompt, str(out_path.relative_to(BASE_DIR)), db.now_iso(),
              (body.negative_prompt or "").strip(),
              json.dumps(body.parameters, ensure_ascii=False) if body.parameters else None,
-             body.snapshot_id, body.source_asset_id),
+             body.snapshot_id, body.source_asset_id,
+             json.dumps(parent_payload, ensure_ascii=False) if parent_payload else None),
         )
         conn.execute(
             "INSERT INTO generation (snapshot_id, gallery_id, source_asset_id, parameters_json, created_at) "
             "VALUES (?,?,?,?,?)",
             (body.snapshot_id, cur.lastrowid, body.source_asset_id,
              json.dumps(body.parameters, ensure_ascii=False) if body.parameters else None, db.now_iso()),
+        )
+        # 成功生成 → 事件驱动的正向学习（作用域共现），仅此路径触发学习。
+        if body.snapshot_id:
+            snapshot_row = conn.execute(
+                "SELECT structured_state_json FROM prompt_snapshot WHERE id=?", (body.snapshot_id,)
+            ).fetchone()
+            if snapshot_row:
+                snapshot_state = _json_object(snapshot_row["structured_state_json"])
+                scoped = _collect_scoped_positive_tags(snapshot_state, conn)
+                _record_scoped_cooccurrence(conn, scoped, event_weight=LEARNING_EVENT_WEIGHTS["successful_generate"])
+        conn.execute(
+            "INSERT INTO gallery_events (dir_name, file_name, source_asset_id, event_type, created_at, context_json) "
+            "VALUES (?,?,?,?,?,?)",
+            (dir_name, fname, body.source_asset_id, "successful_generate", db.now_iso(), None),
         )
         conn.commit()
         created = conn.execute("SELECT * FROM gallery WHERE id=?", (cur.lastrowid,)).fetchone()
@@ -782,6 +800,16 @@ def _json_object(raw):
 def _gallery_item_dict(conn, row) -> dict:
     item = dict(row)
     item["parameters"] = _json_object(item.pop("parameters_json", None))
+    parent = _json_object(item.pop("parent_json", None))
+    if isinstance(parent, dict) and parent.get("dir_name") and parent.get("file_name"):
+        available = conn.execute(
+            "SELECT 1 FROM gallery WHERE dir_name=? AND file_name=?",
+            (parent["dir_name"], parent["file_name"]),
+        ).fetchone() is not None
+        parent["available"] = available
+        item["parent"] = parent
+    else:
+        item["parent"] = None
     snapshot_id = item.get("snapshot_id")
     snapshot = None
     if snapshot_id:
@@ -812,6 +840,26 @@ def gallery_list():
         conn.close()
 
 
+@app.get("/api/gallery/preferences")
+def gallery_preferences():
+    """从图库元数据 + 事件重建全局/角色偏好（可随时重算，无缓存依赖）。"""
+    conn = _conn()
+    try:
+        return gallery_memory.build_preferences(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/gallery/collections")
+def gallery_collections():
+    """Smart Collections 侧栏元信息（收藏/继续/恢复计数 + 角色/标签聚合）。"""
+    conn = _conn()
+    try:
+        return gallery_memory.collection_meta(conn)
+    finally:
+        conn.close()
+
+
 @app.get("/api/gallery/{dir_name}")
 def gallery_dir(dir_name: str):
     """某目录的图片列表（含提示词与收藏状态）。"""
@@ -820,7 +868,7 @@ def gallery_dir(dir_name: str):
     try:
         rows = conn.execute(
             "SELECT g.id, g.file_name, g.prompt, g.negative_prompt, g.parameters_json, g.file_path, "
-            "g.snapshot_id, g.source_asset_id, g.created_at, (f.dir_name IS NOT NULL) favorite "
+            "g.snapshot_id, g.source_asset_id, g.parent_json, g.created_at, (f.dir_name IS NOT NULL) favorite "
             "FROM gallery g LEFT JOIN gallery_favorites f USING (dir_name, file_name) "
             "WHERE g.dir_name=? ORDER BY g.id DESC",
             (dir_name,),
@@ -844,6 +892,14 @@ class GalleryItemRef(BaseModel):
     file_name: str
 
 
+class GalleryEventBody(BaseModel):
+    dir_name: str
+    file_name: str
+    source_asset_id: str | None = None
+    event_type: str = "continue_generate"
+    context: dict | None = None
+
+
 class GalleryCleanupBody(BaseModel):
     items: list[GalleryItemRef]
 
@@ -859,6 +915,10 @@ def gallery_favorite(req: GalleryFavRequest):
         ).fetchone()
         if req.favorite and not exists:
             raise HTTPException(404, "图库图片不存在")
+        already = conn.execute(
+            "SELECT 1 FROM gallery_favorites WHERE dir_name=? AND file_name=?",
+            (req.dir_name, req.file_name),
+        ).fetchone() is not None
         if req.favorite:
             conn.execute(
                 "INSERT OR IGNORE INTO gallery_favorites (dir_name, file_name, created_at) VALUES (?,?,?)",
@@ -869,8 +929,36 @@ def gallery_favorite(req: GalleryFavRequest):
                 "DELETE FROM gallery_favorites WHERE dir_name=? AND file_name=?",
                 (req.dir_name, req.file_name),
             )
+        # 只在真实状态变化时写事件（收藏→1 条 favorite，取消→1 条 unfavorite）。
+        if req.favorite and not already:
+            gallery_memory.record_event(
+                conn, req.dir_name, req.file_name, None, "favorite"
+            )
+        elif not req.favorite and already:
+            gallery_memory.record_event(
+                conn, req.dir_name, req.file_name, None, "unfavorite"
+            )
         conn.commit()
         return {"ok": True, "favorite": req.favorite}
+    finally:
+        conn.close()
+
+
+@app.post("/api/gallery/events")
+def gallery_events(body: GalleryEventBody):
+    """写入一条图库事件（favorite/unfavorite/continue_generate/restore/delete）。"""
+    _safe_gallery_path(body.dir_name)
+    conn = _conn()
+    try:
+        try:
+            gallery_memory.record_event(
+                conn, body.dir_name, body.file_name,
+                body.source_asset_id, body.event_type, body.context,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()
 
@@ -1003,7 +1091,7 @@ def gallery_item_delete(body: GalleryItemRef):
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, file_path FROM gallery WHERE dir_name=? AND file_name=?",
+            "SELECT * FROM gallery WHERE dir_name=? AND file_name=?",
             (body.dir_name, body.file_name),
         ).fetchone()
         if not row:
@@ -1014,6 +1102,13 @@ def gallery_item_delete(body: GalleryItemRef):
         file_path = file_path.resolve()
         if file_path.parent != target.resolve() or not file_path.is_file():
             raise HTTPException(404, "图库图片文件不存在")
+
+        # 删除前记录紧凑上下文事件（供偏好重建时排除已删资产）。
+        snap = gallery_memory.load_snapshot_state(conn, row["snapshot_id"])
+        gallery_memory.record_event(
+            conn, body.dir_name, body.file_name, row["source_asset_id"], "delete",
+            gallery_memory.compact_delete_context(conn, row, snap),
+        )
 
         moved: list[str] = []
         for candidate in [file_path, *_gallery_companion_files(file_path)]:
@@ -2467,7 +2562,191 @@ def _normalized_unique_tags(tags: list[str]) -> list[str]:
     return list(dict.fromkeys(search._norm(tag) for tag in tags if search._norm(tag)))
 
 
+# 学习事件权重（Phase A 只接线 successful_generate 正向学习；其余权重供后续阶段事件接入使用）。
+LEARNING_EVENT_WEIGHTS = {
+    "successful_generate": 1.0,
+    "continue_generate": 2.0,
+    "favorite": 4.0,
+    "unfavorite": -1.0,
+    "delete": -2.0,
+    "restore": 0.0,
+    "manual_snapshot": 0.0,
+}
+
+_IDENTITY_CATEGORIES = (4, 3)  # Danbooru Character / Copyright
+_RELATION_KINDS = ("source", "target", "mutual")
+
+
+def _resolve_identity(conn, tags: list[str]) -> str | None:
+    """从角色标签里挑稳定 canonical 身份：Character(4) 优先，其次 Copyright(3)。"""
+    if conn is None:
+        return None
+    for tag in tags:
+        row = conn.execute(
+            "SELECT category FROM tags WHERE lower(prompt_tag)=lower(?) OR lower(danbooru_name)=lower(?) LIMIT 1",
+            (tag, tag),
+        ).fetchone()
+        if row and row["category"] in _IDENTITY_CATEGORIES:
+            return tag.strip()
+    return None
+
+
+def _iter_entry_dicts(value):
+    """递归产出结构化状态里的 entry dict（含 tag 字段，保留 relation 等元数据）。"""
+    if isinstance(value, dict):
+        if isinstance(value.get("tag"), str) and value["tag"].strip():
+            yield value
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                yield from _iter_entry_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            if isinstance(child, (dict, list)):
+                yield from _iter_entry_dicts(child)
+
+
+def _collect_scoped_positive_tags(state, conn=None) -> dict:
+    """把结构化状态拆成按作用域隔离的正向标签集合。
+
+    返回：
+      {
+        "base": [base 正向标签],
+        "characters": [{"identity": 角色身份标签 or None, "tags": [该角色正向标签]}],
+        "relations": [(source_tag, target_tag, relation_type), ...]  # 来自 source#/target#/mutual#
+      }
+    仅收集 Base positive 与 Character positive 的 tag 条目；UC / 自由文本 / assistant_context 一律不采集。
+    """
+    result: dict = {"base": [], "characters": [], "relations": []}
+    if not isinstance(state, dict):
+        return result
+
+    sections = state.get("sections")
+    if isinstance(sections, dict):
+        result["base"] = _collect_structured_tags(sections)
+
+    source_by_action: dict[str, list[str]] = {}
+    target_by_action: dict[str, list[str]] = {}
+    mutual_by_action: dict[str, list[str]] = {}
+    characters: list[dict] = []
+
+    for character in state.get("characters") or []:
+        if not isinstance(character, dict):
+            continue
+        prompt_map = character.get("prompt_sections")
+        tags: list[str] = []
+        relations_here: list[tuple[str, str]] = []
+        if isinstance(prompt_map, dict):
+            entries = list(_iter_entry_dicts(prompt_map))
+            tags = [e["tag"].strip() for e in entries]
+            relations_here = [
+                (e["relation"], e["tag"].strip())
+                for e in entries
+                if e.get("relation") in _RELATION_KINDS
+            ]
+        identity = _resolve_identity(conn, tags)
+        characters.append({"identity": identity, "tags": tags})
+        for rel_kind, action in relations_here:
+            anchor = identity or action
+            bucket = {
+                "source": source_by_action,
+                "target": target_by_action,
+                "mutual": mutual_by_action,
+            }[rel_kind]
+            bucket.setdefault(action, []).append(anchor)
+
+    relations: list[tuple[str, str, str]] = []
+    for action in sorted(source_by_action):
+        for source in source_by_action[action]:
+            for target in target_by_action.get(action, []):
+                relations.append((source, target, action))
+    for action in sorted(mutual_by_action):
+        mutuals = mutual_by_action[action]
+        for i in range(len(mutuals)):
+            for j in range(i + 1, len(mutuals)):
+                relations.append((mutuals[i], mutuals[j], action))
+
+    result["characters"] = characters
+    result["relations"] = relations
+    return result
+
+
+def _record_scoped_cooccurrence(conn, scoped_tags: dict, event_weight: float = 1.0) -> list[str]:
+    """按作用域写入 tag_cooccurrence_scoped（修复跨角色污染）。
+
+    作用域语义：
+      - base：仅 Base 标签两两配对
+      - character：仅单角色内部标签两两配对（含身份标签，绝不跨角色）
+      - base_character_context：Base 标签 × 每个角色的「身份标签」only（绝不含外观标签）
+      - interaction：显式关系条目（source#/target#/mutual#）配出的身份对
+    硬规则：绝不记录跨角色外观对、绝不把 Base×角色外观写进 base/character。
+    positive_weight 按 event_weight 累加；负事件（unfavorite/delete）累加 negative_weight。
+    """
+    if event_weight == 0:
+        return []
+    base = _normalized_unique_tags(scoped_tags.get("base") or [])
+    characters = scoped_tags.get("characters") or []
+    relations = scoped_tags.get("relations") or []
+    now = db.now_iso()
+    positive = max(0.0, float(event_weight))
+    negative = max(0.0, -float(event_weight))
+
+    learned: list[str] = []
+
+    def add_pair(scope: str, a: str, b: str) -> None:
+        if not a or not b or a == b:
+            return
+        a, b = sorted((a, b))
+        conn.execute(
+            "INSERT INTO tag_cooccurrence_scoped (scope, tag_a, tag_b, positive_weight, negative_weight, updated_at) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(scope, tag_a, tag_b) DO UPDATE SET "
+            "positive_weight = tag_cooccurrence_scoped.positive_weight + excluded.positive_weight, "
+            "negative_weight = tag_cooccurrence_scoped.negative_weight + excluded.negative_weight, "
+            "updated_at = excluded.updated_at",
+            (scope, a, b, positive, negative, now),
+        )
+
+    # base scope
+    for i, a in enumerate(base):
+        for b in base[i + 1:]:
+            add_pair("base", a, b)
+
+    # character scope + base_character_context scope
+    for ch in characters:
+        raw_tags = ch.get("tags") or []
+        tags = _normalized_unique_tags(raw_tags)
+        identity = search._norm(ch.get("identity")) if ch.get("identity") else None
+        char_tags = _normalized_unique_tags(([identity] if identity else []) + tags)
+        for i, a in enumerate(char_tags):
+            for b in char_tags[i + 1:]:
+                add_pair("character", a, b)
+        if identity:
+            for b in base:
+                add_pair("base_character_context", b, identity)
+
+    # interaction scope
+    for source_tag, target_tag, _relation_type in relations:
+        add_pair("interaction", search._norm(source_tag), search._norm(target_tag))
+
+    # recent_tags：只反映真正被「正向学习」的标签；负事件不更新 recent_tags。
+    if event_weight > 0:
+        learned = _normalized_unique_tags(
+            base + [t for ch in characters for t in (ch.get("tags") or [])]
+        )
+        for tag in learned:
+            conn.execute(
+                "INSERT INTO recent_tags (tag_name, last_used_at, use_count) VALUES (?,?,1) "
+                "ON CONFLICT(tag_name) DO UPDATE SET last_used_at=excluded.last_used_at, use_count=recent_tags.use_count+1",
+                (tag, now),
+            )
+    return learned
+
+
 def _record_cooccurrence(conn, tags: list[str]) -> list[str]:
+    """（已弃用）旧扁平共现记录：写入旧 tag_cooccurrence 表，仅供向后兼容。
+
+    新学习路径请使用 _record_scoped_cooccurrence；此函数不再被 snapshot/cooccurrence 路由调用。
+    """
     tags = _normalized_unique_tags(tags)
     now = db.now_iso()
     for tag in tags:
@@ -2489,9 +2768,12 @@ def _record_cooccurrence(conn, tags: list[str]) -> list[str]:
 
 @app.post("/api/cooccurrence/record")
 def cooccurrence_record(body: TagsRequest):
+    """记录一组扁平标签的共现（路由到作用域记录，作为 base 作用域处理）。"""
     conn = _conn()
     try:
-        tags = _record_cooccurrence(conn, body.tags)
+        tags = _record_scoped_cooccurrence(
+            conn, {"base": body.tags, "characters": [], "relations": []}, event_weight=1.0
+        )
         conn.commit()
         return {"ok": True, "tags": tags, "pairs": len(tags) * (len(tags) - 1) // 2}
     finally:
@@ -2903,28 +3185,15 @@ def _collect_structured_tags(value) -> list[str]:
 
 
 def _collect_positive_tags(state) -> list[str]:
-    """只收集 Base positive 与 Character positive 的 tag 条目，用于共现记录。
+    """（已弃用）扁平化收集 Base + Character 正向标签。
 
-    覆盖：
-      - state.sections[*]（Base positive）
-      - state.characters[].prompt_sections[*]（Character positive）
-    明确不收集：
-      - characters[].uc_sections、global_uc_sections（UC 不作为正面共现样本）；
-      - 自由文本字符串 / 非条目结构（键盘输入不写 DB）。
-    同一 tag 在 Base 与 Character 同时出现时只返回一次语义（后续 _record_cooccurrence 去重）。
+    仅作向后兼容包装：调用 _collect_scoped_positive_tags 后把 base 与各角色标签拍平。
+    学习路径请使用 _collect_scoped_positive_tags + _record_scoped_cooccurrence。
     """
-    if not isinstance(state, dict):
-        return []
-    tags: list[str] = []
-    sections = state.get("sections")
-    if isinstance(sections, dict):
-        tags.extend(_collect_structured_tags(sections))
-    for character in state.get("characters") or []:
-        if not isinstance(character, dict):
-            continue
-        prompt_map = character.get("prompt_sections")
-        if isinstance(prompt_map, dict):
-            tags.extend(_collect_structured_tags(prompt_map))
+    scoped = _collect_scoped_positive_tags(state)
+    tags: list[str] = list(scoped["base"])
+    for character in scoped["characters"]:
+        tags.extend(character.get("tags") or [])
     return tags
 
 
@@ -2953,7 +3222,7 @@ def snapshot_create(body: SnapshotBody):
             (snapshot_id, body.positive_prompt, body.negative_prompt,
              json.dumps(body.structured_state, ensure_ascii=False), json.dumps(body.generation, ensure_ascii=False), db.now_iso()),
         )
-        _record_cooccurrence(conn, _collect_positive_tags(body.structured_state))
+        # 快照（含手动保存）不再触发学习：学习只在成功生成回写（gallery_item）时发生。
         conn.commit()
         return _snapshot_dict(conn.execute("SELECT * FROM prompt_snapshot WHERE id=?", (snapshot_id,)).fetchone())
     finally:

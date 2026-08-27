@@ -1,0 +1,8 @@
+{
+  "modelFamilies": {"v5": ["nai-diffusion-5-"], "v4_5_or_v4": []},
+  "quality": {
+    "standard": ["very aesthetic", "masterpiece", "no text"],
+    "light": ["very aesthetic", "amazing quality", "no text"]
+  },
+  "transparentBackgroundTag": "transparent background"
+}

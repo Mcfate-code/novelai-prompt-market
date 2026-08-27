@@ -169,15 +169,29 @@ class RecommendationService:
         if self.conn is None:
             return []
         if name == "local_cooccurrence":
+            # 作用域感知的本地共现：base 目标读 base/base_character_context，
+            # character 目标读 character，interaction 恒包含；未指定目标读全部作用域。
+            if ctx.target == "base":
+                scopes = ("base", "base_character_context", "interaction")
+            elif ctx.target == "character":
+                scopes = ("character", "interaction")
+            else:
+                scopes = ("base", "base_character_context", "character", "interaction")
+            placeholders = ",".join("?" for _ in scopes)
             rows = []
             for tag in ctx.tags:
-                rows.extend(self.conn.execute("SELECT tag_a, tag_b, count FROM tag_cooccurrence WHERE tag_a=? OR tag_b=?", (tag, tag)))
-            totals = defaultdict(int)
+                rows.extend(self.conn.execute(
+                    f"SELECT tag_a, tag_b, positive_weight, negative_weight FROM tag_cooccurrence_scoped "
+                    f"WHERE scope IN ({placeholders}) AND (tag_a=? OR tag_b=?)",
+                    (*scopes, tag, tag),
+                ))
+            totals = defaultdict(float)
             for row in rows:
                 other = row["tag_b"] if row["tag_a"] in ctx.tags else row["tag_a"]
                 if other not in ctx.tags:
-                    totals[other] += int(row["count"])
-            return [{"tag": tag, "count": count} for tag, count in totals.items()]
+                    totals[other] += (float(row["positive_weight"] or 0)
+                                      - float(row["negative_weight"] or 0))
+            return [{"tag": tag, "count": count} for tag, count in totals.items() if count > 0]
         if name == "personal_recent":
             return [{"tag": row["tag_name"], "use_count": row["use_count"]}
                     for row in self.conn.execute("SELECT tag_name, use_count FROM recent_tags ORDER BY use_count DESC, last_used_at DESC")]

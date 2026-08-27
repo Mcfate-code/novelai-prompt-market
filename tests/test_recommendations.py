@@ -215,7 +215,8 @@ class RecommendationTest(unittest.TestCase):
             app.catalog_semantic_tree(node_id="not_a_node")
         self.assertEqual(ctx.exception.status_code, 404)
 
-    def test_snapshot_records_only_base_and_character_positive(self):
+    def test_snapshot_does_not_trigger_learning(self):
+        """Phase A：snapshot（含手动保存）不再触发任何学习。"""
         app.snapshot_create(app.SnapshotBody(structured_state={
             "sections": {"style": [{"tag": "anime"}]},
             "characters": [{
@@ -228,43 +229,32 @@ class RecommendationTest(unittest.TestCase):
             "assistant_context": {"participant_count": 2, "stage": "MAIN_ACT"},
         }))
         conn = self.conn()
-        usage = {row["tag_name"] for row in conn.execute("SELECT tag_name FROM recent_tags")}
-        pairs = [row["tag_a"] for row in conn.execute("SELECT tag_a FROM tag_cooccurrence")]
-        pair_b = [row["tag_b"] for row in conn.execute("SELECT tag_b FROM tag_cooccurrence")]
-        all_tags = set(usage) | set(pairs) | set(pair_b)
+        usage = conn.execute("SELECT COUNT(*) FROM recent_tags").fetchone()[0]
+        scoped = conn.execute("SELECT COUNT(*) FROM tag_cooccurrence_scoped").fetchone()[0]
+        legacy = conn.execute("SELECT COUNT(*) FROM tag_cooccurrence").fetchone()[0]
         conn.close()
-        self.assertEqual(usage, {"anime", "blue eyes"})
-        self.assertNotIn("bad hands", all_tags)
-        self.assertNotIn("lowres", all_tags)
-        self.assertNotIn("typing keyboard", all_tags)
-        self.assertEqual(len(pairs), 1)
+        self.assertEqual(usage, 0)
+        self.assertEqual(scoped, 0)
+        self.assertEqual(legacy, 0)
 
-    def test_snapshot_dedupes_and_generation_does_not_double_record(self):
+    def test_snapshot_repeat_does_not_trigger_learning(self):
         body = app.SnapshotBody(structured_state={
             "sections": {"style": [{"tag": "anime"}, {"tag": "bedroom"}]},
             "characters": [{"name": "A", "prompt_sections": {"appearance": [{"tag": "anime"}]}}],
         })
         app.snapshot_create(body)
-        conn = self.conn()
-        self.assertEqual(
-            conn.execute("SELECT use_count FROM recent_tags WHERE tag_name='anime'").fetchone()["use_count"], 1
-        )
-        self.assertEqual(conn.execute("SELECT COUNT(*) FROM tag_cooccurrence").fetchone()[0], 1)
-        conn.close()
         app.snapshot_create(body)
         conn = self.conn()
         self.assertEqual(
-            conn.execute("SELECT use_count FROM recent_tags WHERE tag_name='anime'").fetchone()["use_count"], 2
+            conn.execute("SELECT COUNT(*) FROM tag_cooccurrence_scoped").fetchone()[0], 0
         )
-        pair = conn.execute("SELECT count FROM tag_cooccurrence").fetchone()["count"]
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM recent_tags").fetchone()[0], 0)
         conn.close()
-        self.assertEqual(pair, 2, "每次 snapshot 只记录一次正面共现")
 
-    def test_gallery_generation_does_not_write_cooccurrence(self):
-        snapshot = app.snapshot_create(app.SnapshotBody(structured_state={"sections": {"style": [{"tag": "anime"}]}}))
-        conn = self.conn()
-        before = conn.execute("SELECT COUNT(*) FROM recent_tags").fetchone()[0]
-        conn.close()
+    def test_gallery_generation_writes_scoped_cooccurrence_once(self):
+        snapshot = app.snapshot_create(app.SnapshotBody(structured_state={
+            "sections": {"style": [{"tag": "anime"}, {"tag": "bedroom"}]},
+        }))
         gallery_dir = Path(self.tmp.name) / "gallery"
         gallery_dir.mkdir()
         tiny_png = base64.b64encode(
@@ -283,10 +273,21 @@ class RecommendationTest(unittest.TestCase):
             created = asyncio.run(app.gallery_item(body))
         self.assertTrue(created["ok"])
         conn = self.conn()
-        after = conn.execute("SELECT COUNT(*) FROM recent_tags").fetchone()[0]
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM generation").fetchone()[0], 1)
+        rows = conn.execute(
+            "SELECT scope, tag_a, tag_b, positive_weight, negative_weight FROM tag_cooccurrence_scoped"
+        ).fetchall()
+        events = conn.execute(
+            "SELECT event_type FROM gallery_events WHERE event_type='successful_generate'"
+        ).fetchall()
         conn.close()
-        self.assertEqual(before, after, "gallery 回写不得重复记录共现")
+        # 单次成功生成 → 恰好一个 base 作用域配对，正权重 1.0，不重复记录。
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["scope"], "base")
+        self.assertEqual({rows[0]["tag_a"], rows[0]["tag_b"]}, {"anime", "bedroom"})
+        self.assertEqual(rows[0]["positive_weight"], 1.0)
+        self.assertEqual(rows[0]["negative_weight"], 0.0)
+        self.assertEqual(len(events), 1)
 
 
 if __name__ == "__main__":

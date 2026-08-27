@@ -230,6 +230,38 @@ CREATE TABLE IF NOT EXISTS generation (
 );
 
 CREATE INDEX IF NOT EXISTS idx_generation_snapshot ON generation(snapshot_id);
+
+CREATE TABLE IF NOT EXISTS tag_cooccurrence_scoped (
+    scope TEXT NOT NULL,
+    tag_a TEXT NOT NULL,
+    tag_b TEXT NOT NULL,
+    positive_weight REAL NOT NULL DEFAULT 0,
+    negative_weight REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, tag_a, tag_b),
+    CHECK (tag_a < tag_b)
+);
+CREATE INDEX IF NOT EXISTS idx_cooccur_scoped_scope ON tag_cooccurrence_scoped(scope);
+CREATE INDEX IF NOT EXISTS idx_cooccur_scoped_tag ON tag_cooccurrence_scoped(tag_a);
+CREATE INDEX IF NOT EXISTS idx_cooccur_scoped_tag2 ON tag_cooccurrence_scoped(tag_b);
+
+CREATE TABLE IF NOT EXISTS gallery_events (
+    dir_name TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    source_asset_id TEXT,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    context_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gallery_events_type ON gallery_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_gallery_events_asset ON gallery_events(dir_name, file_name);
+
+CREATE TABLE IF NOT EXISTS gallery_parent (
+    dir_name TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    parent_json TEXT,
+    PRIMARY KEY (dir_name, file_name)
+);
 """
 
 
@@ -272,6 +304,8 @@ def init_db(db_path: str | Path | None = None) -> None:
             conn.execute("ALTER TABLE gallery ADD COLUMN snapshot_id TEXT REFERENCES prompt_snapshot(id)")
         if gcols and "source_asset_id" not in gcols:
             conn.execute("ALTER TABLE gallery ADD COLUMN source_asset_id TEXT")
+        if gcols and "parent_json" not in gcols:
+            conn.execute("ALTER TABLE gallery ADD COLUMN parent_json TEXT")
         ucols = {r["name"] for r in conn.execute("PRAGMA table_info(user_tags)")}
         if ucols and "zh" not in ucols:
             conn.execute("ALTER TABLE user_tags ADD COLUMN zh TEXT NOT NULL DEFAULT ''")
@@ -289,7 +323,7 @@ def init_db(db_path: str | Path | None = None) -> None:
                 "INSERT OR IGNORE INTO tag_conflict (tag_a, tag_b, reason, created_at) VALUES (?,?,?,?)",
                 (tag_a, tag_b, reason, now_iso()),
             )
-        conn.execute("PRAGMA user_version=3")
+        conn.execute("PRAGMA user_version=4")
         conn.commit()
     finally:
         conn.close()
