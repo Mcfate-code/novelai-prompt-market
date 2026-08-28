@@ -24,7 +24,7 @@
 .semantic-inspector { min-height:220px; padding-left:14px; border-left:1px solid var(--border,#dfe4e8); }
 .semantic-inspector h2 { margin:0 0 14px; }
 .semantic-inspector section+section { margin-top:18px; }
-.selected-chips,.recommendations { display:grid; gap:7px; }
+.semantic-composer .selected-chips,.semantic-composer .recommendations { display:grid; gap:7px; }
 .composer-chip { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:7px 8px; border:1px solid var(--border,#dfe4e8); border-radius:7px; background:var(--panel-soft,#f8fafb); }
 .weight-control { display:flex; align-items:center; gap:2px; }
 .weight-control button { width:27px; height:27px; border:1px solid var(--border,#dfe4e8); background:#fff; cursor:pointer; }

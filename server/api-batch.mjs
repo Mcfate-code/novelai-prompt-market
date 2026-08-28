@@ -55,7 +55,9 @@ export class ApiBatchController {
       for (let index = 0; index < total; index++) {
         if (this.current.cancelled) break;
         const seed = makeSeed(seedMode, request.settings.seed, index);
-        const one = requestForSeed(request, seed);
+        // 姿势批次每一项都带自己的 Prompt/角色结构；无 variations 的旧请求
+        // 仍然走同一份 Prompt，仅按原有 seed 模式变化。
+        const one = requestForSeed(request, seed, index);
         this.emit({ type: "api-batch.update", batchId, status: "running", total, completed: index, current: index + 1, seed });
         try {
           const result = await this.provider.generateOne(one);

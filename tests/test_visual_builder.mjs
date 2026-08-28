@@ -53,7 +53,7 @@ const response = (json, ok = true, status = 200) => ({ ok, status, json: async (
 function bridgeFor(doc, getTarget, dispatched = []) { return { getDocument: () => doc, getActiveTarget: getTarget, setActiveTarget: () => { throw new Error("Visual must not own target"); }, subscribe: () => () => {}, dispatch: (action) => dispatched.push(action) }; }
 
 test("semantic symbols and aggregate status follow Phase D rules", () => {
-  assert.deepEqual(STATUS_SYMBOLS, { filled: "✓", filled_by_auto_preset: "✓", partial: "◐", empty: "○" });
+  assert.deepEqual(STATUS_SYMBOLS, { filled: "✓", filled_by_auto_preset: "✓", satisfied_by_alternative: "✓", partial: "◐", empty: "○" });
   assert.equal(aggregateStatus(["filled", "filled_by_auto_preset"]), "filled");
   assert.equal(aggregateStatus(["filled", "empty"]), "partial");
   assert.equal(aggregateStatus(["partial", "empty"]), "partial");
@@ -109,7 +109,7 @@ test("semantic failure exposes retry state and retry reloads tree/state", async 
   const root = { innerHTML: "", addEventListener() {}, removeEventListener() {} };
   const builder = new VisualBuilder({ root, bridge: bridgeFor(createEmpty(), () => "base"), fetchImpl: async () => response("boom", false, 500) });
   await builder.refreshSemantic();
-  assert.equal(builder.view.status, "error"); assert.match(root.innerHTML, /语义目录加载失败/); assert.match(root.innerHTML, /Retry/);
+  assert.equal(builder.view.status, "error"); assert.match(root.innerHTML, /语义目录加载失败/); assert.match(root.innerHTML, /重试/);
 });
 
 test("stale semantic response cannot overwrite the current target", async () => {
@@ -136,6 +136,18 @@ test("add destination label and exact active target are visible/authoritative", 
   assert.deepEqual(dispatched[0], buildAddTagAction("smile", "char:1", "expression"));
 });
 
+test("replace recommendation targets the selected slot instead of appending", () => {
+  const dispatched = []; let doc = addCharacter(createEmpty(), { name: "Furina" });
+  doc = addTag(doc, "char:1", "blue eyes", "appearance");
+  const builder = new VisualBuilder({ bridge: bridgeFor(doc, () => "char:1", dispatched) });
+  builder.view.tree = TREE; builder.view.semanticState = STATE; builder.view.target = "char:1"; builder.view.selectedNodeId = "char_eyes";
+  assert.equal(builder.addTag("green eyes", "appearance", "replace"), true);
+  assert.deepEqual(dispatched[0], {
+    type: "REPLACE_SLOT_TAG",
+    payload: { tag: "green eyes", target: "char:1", section: "appearance", replaceTags: ["blue eyes"] },
+  });
+});
+
 test("weight minus/input/plus clamp to 0.10-2.00, format two decimals, and remove dispatches", () => {
   assert.equal(formatWeight(1), "1.00"); assert.equal(adjustWeight(.1, -.05), MIN_WEIGHT); assert.equal(adjustWeight(2, .05), MAX_WEIGHT);
   const dispatched = []; const builder = new VisualBuilder({ bridge: bridgeFor(createEmpty(), () => "base", dispatched) });
@@ -148,7 +160,7 @@ test("weight minus/input/plus clamp to 0.10-2.00, format two decimals, and remov
 
 test("PromptBridge is sole target owner", () => {
   const builder = new VisualBuilder({ bridge: bridgeFor(createEmpty(), () => "base") });
-  assert.equal(builder._workspaceOverride, undefined); assert.equal(builder.selectWorkspace, undefined); assert.equal("activeTarget" in builder, false); assert.equal(workspaceForTarget("global_uc"), "");
+  assert.equal(builder._workspaceOverride, undefined); assert.equal(builder.selectWorkspace, undefined); assert.equal(Object.prototype.hasOwnProperty.call(builder, "activeTarget"), false); assert.equal(workspaceForTarget("global_uc"), "");
 });
 
 test("V3 recommendation payload includes structured_state and generation_config", async () => {
@@ -156,7 +168,7 @@ test("V3 recommendation payload includes structured_state and generation_config"
   const builder = new VisualBuilder({ bridge: bridgeFor(doc, () => "char:1"), getGenerationConfig: () => ({ positiveTier: "light" }), fetchImpl: async (_url, options) => { captured.push(JSON.parse(options.body)); return response({ recommendations: [], next_steps: [] }); } });
   builder.view.tree = TREE; builder.view.semanticState = STATE; builder.view.target = "char:1";
   await builder.selectNode("char_eyes");
-  assert.equal(captured[0].structured_state, doc); assert.deepEqual(captured[0].generation_config, { positiveTier: "light" }); assert.equal(captured[0].active_target, "char:1"); assert.equal(captured[0].node_id, "char_eyes");
+  assert.deepEqual(captured[0].structured_state, doc); assert.deepEqual(captured[0].generation_config, { positiveTier: "light" }); assert.equal(captured[0].active_target, "char:1"); assert.equal(captured[0].node_id, "char_eyes");
 });
 
 test("recommendation race validates selected node", async () => {

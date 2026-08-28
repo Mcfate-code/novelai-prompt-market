@@ -53,6 +53,8 @@ ADULT_TERMS = frozenset({
     "penis", "cock", "erection", "testicles", "scrotum", "anus",
     "dildo", "vibrator", "bondage", "bdsm", "shibari", "futanari",
     "ahegao", "threesome", "foursome", "orgy",
+    # 这些是服装/镜头类的性暗示标签，不应因离线 prior 误标为 general 而混入普通推荐。
+    "pantyshot", "upskirt", "cameltoe", "crotch",
 })
 
 

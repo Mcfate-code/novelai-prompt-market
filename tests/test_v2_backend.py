@@ -51,7 +51,7 @@ class V2BackendTest(unittest.TestCase):
         conn = self.conn()
         tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"tag_bundle", "tag_cooccurrence", "prompt_snapshot", "generation"} <= tables)
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM tag_conflict").fetchone()[0], 3)
         conn.close()
 

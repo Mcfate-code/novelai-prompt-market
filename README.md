@@ -160,7 +160,7 @@ PromptBridge 与 Tag Assistant 同源（`getDocument()` / `getActiveTarget()` / 
 - **环境/情境**：环境/情境为场景候选（`scenarios` 卧室/户外/旁观 + `environments` 白天/夜晚，带已校验 canonical tag，route → Base、section=scene），取代旧的高层「主场景」概念（该概念无独立语义，已删除）；`minParticipants` 用于人数兼容。
 - **UI 分区（渲染顺序）**：人数 → 主要行为 → 互动关系 → 阶段（`PREPARATION / FOREPLAY / MAIN_ACT / CLIMAX / AFTERMATH`，语义标识而非 canonical tag）→ 角色（**每个角色一条服装子组，全部同时可见**）→ 体位 → 附加活动 → 身体聚焦 → 镜头环境（构图 + 环境/情境）→ 推荐（分组展示）。
 - **人数增减策略**：`selectParticipants` 增多时 dispatch 单个 `SET_EXCLUSIVE_GROUP(participant_count)` + `SCENE_PROPOSAL{kind:"sync_participants"}`；减少时检查尾部角色：尾部全空则允许并附 `autoRemovableEmptyIndices`；任一尾部角色含内容则**不改 participant_count**，显示 `Character N 仍有内容，请手动移除` 提示并 dispatch `SCENE_PROPOSAL{kind:"remove_characters_blocked"}`——**不猜测性别、不静默删除**。
-- **strict exclusive groups**：`participant_count` / `primary_scene_type` / `stage` / `position` / `clothing_state:char:N`。新选择 dispatch **一个** `SET_EXCLUSIVE_GROUP` action，Integrator 原子删除同组旧 entries、加新 tag、更新 context、只通知一次。作用域：scene/position/stage/participant_count → `target:"base"`；clothing_state → `target:char:N`（Character Assignment）。
+- **strict exclusive groups**：`participant_count` / `primary_scene_type` / `stage` / `position` / `clothing_state:char:N`。新选择 dispatch **一个** `SET_EXCLUSIVE_GROUP` action，Integrator 原子删除同组旧 entries、加新 tag、更新 context、只通知一次。作用域：scene/stage/participant_count → `target:"base"`；position / primary_act → 各角色卡的 `action`；clothing_state → `target:char:N`（Character Assignment）。旧 Base 中的动作、表情和姿势状态在换姿势 / 选择体位时自动迁移到角色卡；镜头构图仍留在 Base。
 - **上下文不泄漏为 tags**：所有上下文 metadata 通过 `SET_ASSISTANT_CONTEXT`（对齐 Recommendation V2）交给 Integrator，不直接编译成 Prompt tags；只有带 canonical tag 的选择（活动新增、推荐点击）才 `ADD_TAG`。
 - **附加活动对称 + 溯源**：新增 = context + `ADD_TAG{source:"scene_activity", bundle_name:"scene-builder"}`；取消 = context + 仅移除带该溯源标记的 `REMOVE_TAG`——不删用户自有同名 tag。
 - **位置过滤**：按 `minParticipants` / `requiresScenes` 过滤；participant_count 为 1 或未选时隐藏并提示「选择多人以启用体位」。
@@ -605,6 +605,7 @@ WantedBy=multi-user.target
 | `GET /api/zh` / `POST /api/zh-notes` | 中文名映射 / 自定义中文备注 |
 | `GET /api/thumbs` | 标签例图 URL（懒抓取 + 本地缓存） |
 | `GET/POST /api/settings` | 读取 / 保存用户设置（凭据不回显） |
+| `GET /api/runtime-info` | 前后端运行契约版本检查，避免静态页面与旧后端进程错配 |
 | `POST /api/translate` | 百度翻译（手动触发） |
 | `GET /api/prompt/sections` | 固定 Prompt 分区定义 |
 | `POST /api/prompt/classify` | 本地确定性分类 |
@@ -618,6 +619,9 @@ WantedBy=multi-user.target
 | `GET/POST/DELETE /api/presets` | 生图 Preset |
 | `POST /api/cooccurrence/record` / `POST /api/recommendations` / `GET /api/conflicts` | 共现记录 / 确定性推荐（Recommendation V2 多源 RRF + 语义节点与成人上下文）/ 冲突提示 |
 | `POST /api/prompt/auto-split` / `GET /api/nsfw-builder/options` | 确定性 Auto-Split proposal（不修改文档）/ Scene Builder 候选（受限分类真实 tag） |
+| `POST /api/templates/import/text` / `POST /api/templates/import/file` | 导入文本或本地 PNG/JSON 元数据，生成待审核成人姿势模板 |
+| `POST /api/templates/import/civitai` | 按 Civitai 图片 ID/URL 读取公开元数据并生成待审核模板 |
+| `GET /api/templates?status=pending|approved|blocked|all` / `POST /api/templates/{id}/review` | 查看候选或已审核模板 / 批准或拒绝候选（成人模式） |
 | `POST/GET /api/snapshots` / `POST /api/snapshots/{id}/restore` | PromptSnapshot 创建 / 分区恢复 |
 | `GET /api/gallery` / `POST /api/gallery/import` / `POST /api/gallery/item` | 图库列表 / zip 导入 / 图片回写 |
 | `POST /api/gallery/favorite` / `DELETE /api/gallery/{dir}` | 图库收藏 / 删除（移入待清理） |

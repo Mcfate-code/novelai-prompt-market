@@ -229,6 +229,21 @@ test("builds a V5 multi-character payload without flattening characters", () => 
   assert.equal(payload.parameters.use_coords, true);
 });
 
+test("honors an independently disabled character prompt", () => {
+  const request = normalizeGenerationRequest({
+    prompt: "2girls, cafe",
+    settings: { model: "nai-diffusion-5-full", seed_mode: "random" },
+    characters: [
+      { name: "Visible", prompt: "girl, red hair", enabled: true },
+      { name: "Hidden", prompt: "girl, blue hair", enabled: false },
+    ],
+  });
+  const payload = provider.buildPayload(request);
+  assert.equal(payload.parameters.characterPrompts[0].enabled, true);
+  assert.equal(payload.parameters.characterPrompts[1].enabled, false);
+  assert.equal(payload.parameters.v4_prompt.caption.char_captions[1].char_caption, "");
+});
+
 test("passes cfg_rescale and autoSmea through to the V5 payload", () => {
   const request = normalizeGenerationRequest({
     prompt: "1girl",

@@ -37,6 +37,21 @@ test("runs requests strictly in sequence and stores a recipe per image", async (
   assert.deepEqual(saved.map((item) => item.recipe.settings.seed), [10, 11, 12]);
 });
 
+test("sends a distinct prompt and pose fingerprint for each variation", async () => {
+  const calls = [];
+  const runner = new ApiBatchController({
+    provider: { generateOne: async (one) => { calls.push(one); return { images: [{ base64: "AAAA" }], correlationId: "c" }; } },
+    saveImage: async (_image, meta) => ({ id: meta.batch_index, recipe: meta.recipe }),
+  });
+  const generation = { ...request(2), variations: [
+    { prompt: "2girls, missionary", negative_prompt: "", characters: [{ prompt: "A" }], pose_template_id: "missionary", pose_fingerprint: "fp-a" },
+    { prompt: "2girls, spooning", negative_prompt: "", characters: [{ prompt: "A" }], pose_template_id: "spooning", pose_fingerprint: "fp-b" },
+  ] };
+  await runner.run({ generation });
+  assert.deepEqual(calls.map((item) => item.prompt), ["2girls, missionary", "2girls, spooning"]);
+  assert.deepEqual(calls.map((item) => item.pose_fingerprint), ["fp-a", "fp-b"]);
+});
+
 test("enforces the configured local batch ceiling (hard-capped at 6)", () => {
   const runner = new ApiBatchController({
     provider: { generateOne: async () => ({ images: [], correlationId: "unused" }) },

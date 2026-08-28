@@ -36,15 +36,16 @@ test("SET_ASSISTANT_CONTEXT additional activities accumulate (no mutual delete)"
   assert.deepEqual(getAssistantContext(doc).additional_activities, ["kissing", "hug"]);
 });
 
-// ---- position scope（base/composition） ----
+// ---- position scope（per-character action） ----
 
-test("SET_EXCLUSIVE_GROUP position scope is base (composition)", () => {
+test("SET_EXCLUSIVE_GROUP position scope is each character action", () => {
   let doc = addTag(createEmpty(), "base", { tag: "missionary", section: "composition" }, "composition");
   doc = applyExclusiveGroup(doc, {
     group: "position", key: "standing", newTag: "standing",
     target: "base", characterIndex: null, members: ["missionary", "standing"],
   });
-  assert.deepEqual(getTargetEntries(doc, "base").map((e) => e.tag), ["standing"]);
+  assert.deepEqual(getTargetEntries(doc, "base").map((e) => e.tag), []);
+  assert.deepEqual(getTargetEntries(doc, "char:0").map((e) => e.tag), ["standing"]);
   assert.equal(getAssistantContext(doc).position, "standing");
 });
 

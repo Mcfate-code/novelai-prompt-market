@@ -75,6 +75,24 @@ test("creates a one-image request for a concrete seed", () => {
   assert.equal(request.count, 4);
 });
 
+test("routes each pose variation to its own one-image request", () => {
+  const request = normalizeGenerationRequest({
+    prompt: "2girls",
+    count: 2,
+    variations: [
+      { prompt: "2girls, missionary", pose_template_id: "missionary", pose_fingerprint: "a", characters: [{ prompt: "A" }, { prompt: "B" }] },
+      { prompt: "2girls, doggystyle", pose_template_id: "doggystyle", pose_fingerprint: "b", characters: [{ prompt: "A" }, { prompt: "B" }] },
+    ],
+  });
+  const first = requestForSeed(request, 11, 0);
+  const second = requestForSeed(request, 12, 1);
+  assert.equal(first.prompt, "2girls, missionary");
+  assert.equal(second.prompt, "2girls, doggystyle");
+  assert.equal(first.pose_template_id, "missionary");
+  assert.equal(second.pose_fingerprint, "b");
+  assert.equal(first.count, 1);
+});
+
 test("maps official resolution categories and permits a local serial batch", () => {
   const small = normalizeGenerationRequest({ prompt: "x", resolution_category: "small_portrait", count: 6 });
   assert.deepEqual([small.settings.width, small.settings.height], [512, 768]);

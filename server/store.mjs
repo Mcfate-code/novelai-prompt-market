@@ -162,7 +162,9 @@ export class AssetStore {
   updateBatch(id, patch) {
     const cols = Object.keys(patch).filter((k) => ["status", "done", "succeeded", "failed", "error_code", "error_message", "correlation_id", "finished_at"].includes(k));
     if (!cols.length) return;
-    this.db.prepare(`UPDATE batches SET ${cols.map((c) => `${c}=?`).join(", ")} WHERE id=?`).run(...cols.map((c) => patch[c]), id);
+    // better-sqlite3 不接受 undefined 作为绑定值；错误路径中 code/correlationId
+    // 可能不存在，统一落成 SQL NULL，避免“批次失败但状态仍卡在 running”。
+    this.db.prepare(`UPDATE batches SET ${cols.map((c) => `${c}=?`).join(", ")} WHERE id=?`).run(...cols.map((c) => patch[c] ?? null), id);
   }
 
   getBatch(id) {

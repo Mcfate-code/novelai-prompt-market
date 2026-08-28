@@ -210,6 +210,23 @@ test("recommend path calls POST /api/recommendations, filters selected and group
   assert.equal(ta.view.status, "ok");
 });
 
+test("silent recommendation refresh re-renders the mounted panel", async () => {
+  let renders = 0;
+  const root = {
+    set innerHTML(_value) { renders += 1; },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const ta = new TagAssistant({
+    root,
+    bridge: makeBridge(addTag(createEmpty(), "base", "1girl", "character"), "base"),
+    fetchImpl: async () => json({ recommendations: [REC()] }),
+  });
+  await ta.reloadRecommendations({ silent: true });
+  assert.equal(ta.view.status, "ok");
+  assert.equal(renders, 1, "PromptBridge 防抖刷新完成后必须更新已挂载的 DOM");
+});
+
 test("component keeps no second authoritative prompt state (reads document per reload)", async () => {
   let calls = 0;
   const doc = addTag(createEmpty(), "base", "solo", "character");
@@ -259,6 +276,28 @@ test("catalog node selection falls back to node seed tags when recommendations a
   assert.equal(ta.view.status, "ok");
   assert.equal(ta.view.seedFallback, true);
   assert.deepEqual(ta.view.groups[0].items.map((c) => c.tag), ["bedroom", "cafe", "window"]);
+});
+
+test("catalog node recommendation race cannot overwrite the latest selection", async () => {
+  let resolveIndoor;
+  const indoorPending = new Promise((resolve) => { resolveIndoor = resolve; });
+  const ta = new TagAssistant({
+    bridge: makeBridge(addTag(createEmpty(), "base", "1girl", "character"), "base"),
+    fetchImpl: async (url, opts) => {
+      if (String(url).includes("/api/catalog/semantic")) return json({ tree: TREE });
+      const body = JSON.parse(opts.body);
+      if (body.node_id === "env_indoor") return indoorPending;
+      return json({ recommendations: [REC({ tag: "indoors", section: "scene" })] });
+    },
+  });
+  await ta.reload("catalog");
+  const indoor = ta.selectNode("env_indoor");
+  const latest = ta.selectNode("base_environment");
+  await latest;
+  resolveIndoor(json({ recommendations: [REC({ tag: "bedroom" })] }));
+  await indoor;
+  assert.equal(ta.nodeId, "base_environment");
+  assert.equal(ta.view.groups[0].items[0].tag, "indoors");
 });
 
 // ---- 搜索路径：复用 /api/search ----

@@ -20,8 +20,9 @@
  *  - 不凭记忆造 canonical tags：环境/情境 / 体位 / 服装状态 / 附加活动 / 身体聚焦的真实
  *    候选一律由集成方通过 options 注入（后端 GET /api/nsfw-builder/options 已按
  *    config/scene_composer.json + data/nsfw_taxonomy.json 逐条校验 sqlite 后下发），
- *    或由推荐 API 返回。组件只内置 stage 语义标识（PREPARATION/FOREPLAY/MAIN_ACT/
- *    CLIMAX/AFTERMATH，非 canonical tag）与 participant 计数档（严格 1/2/3，非 canonical tag）。
+ *    或由推荐 API 返回。成人姿势模板是单独的显式库（pose-variation.js），只在本组件
+ *    渲染，不混入通用标签推荐；stage 仍只内置语义标识（PREPARATION/FOREPLAY/MAIN_ACT/
+ *    CLIMAX/AFTERMATH，非 canonical tag）与 participant 计数档（严格 1–6，非 canonical tag）。
  *
  * UI 分区（渲染顺序）：人数 → 主要行为 → 互动关系 → 阶段 → 角色（每角色衣着，全部同时可见）→
  *   体位 → 附加活动 → 身体焦点 → 镜头环境（构图 + 环境/情境）→ 推荐。
@@ -46,8 +47,8 @@
  *     clothing_state（clothing_state 按角色作用域 char:N）。新选择 dispatch 这一个
  *     action，Integrator 必须「原子删除同组旧 entries + 加入 newTag + 更新
  *     assistant_context + 只通知一次」。newTag 为空表示只设 group（无 canonical tag）。
- *     作用域：scene/position/stage/participant_count → target="base"；clothing_state →
- *     target=`char:${characterIndex}`（Character Assignment：场景/体位归 Base，服装归 char:N）。
+ *     作用域：scene/stage/participant_count → target="base"；position / primary_act
+ *     写入所有角色卡的 action；clothing_state → target=`char:${characterIndex}`。
  *   SET_ASSISTANT_CONTEXT { type:"SET_ASSISTANT_CONTEXT", payload:{ context } }
  *     非互斥上下文（body_focus / additional_activities / 全量 context 快照）——
  *     上下文 metadata 绝不直接编译成 Prompt tags。
@@ -56,6 +57,8 @@
  *     附加活动新增携带 source:"scene_activity" / bundle_name:"scene-builder" 溯源标记。
  *   REMOVE_TAG { type:"REMOVE_TAG", payload:{ target, entryId } }
  *     附加活动取消时，仅移除带 scene_activity / scene-builder 溯源标记的自身条目。
+ *   APPLY_POSE_VARIATION { type:"APPLY_POSE_VARIATION", payload:{ target:"characters", plan } }
+ *     姿势模板写入各角色卡的 action 与结构化 pose_variation / interactions，并由 Integrator 原子通知。
  *   SCENE_PROPOSAL { type:"SCENE_PROPOSAL", payload:{
  *       kind, count?, autoRemovableEmptyIndices?, blockedIndices? } }
  *     参与者增减的高层提议，由 Integrator 决定角色槽增删 / 基础主体数同步 / 手动移除提示。
@@ -63,6 +66,7 @@
  */
 
 import { getTargetEntries } from "./prompt-document.js";
+import { compatiblePoses, normalizePlan, POSE_LIBRARY } from "./pose-variation.js";
 
 // ---- 常量 ----
 
@@ -86,11 +90,14 @@ export const EXCLUSIVE_GROUP_ORDER = ["participants", "scene", "stage", "positio
 export const DEFAULT_PARTICIPANTS = [
   { key: "1", label: "1" }, { key: "2", label: "2" },
   { key: "3", label: "3" },
+  { key: "4", label: "4" }, { key: "5", label: "5" },
+  { key: "6", label: "6" },
 ];
 
 export const DEFAULT_STAGES = STAGE_KEYS.map((key) => ({ key, label: STAGE_LABELS[key], zh: STAGE_LABELS[key] }));
 
 export const REC_LIMIT = 20;
+export const TEMPLATE_API_VERSION = 1;
 
 // ---- 小工具（无 DOM） ----
 
@@ -122,6 +129,33 @@ export function normalizeOption(raw, fallbackKey = "") {
 
 export function normalizeOptions(rawList) {
   return (Array.isArray(rawList) ? rawList : []).map(normalizeOption).filter(Boolean);
+}
+
+// 后端已审核模板兼容 pose-variation.js 的计划字段；保留结构信息，避免把
+// 导入模板误当成普通标签选项。
+export function normalizePoseTemplates(rawList) {
+  return (Array.isArray(rawList) ? rawList : []).map((raw, index) => {
+    const structure = (raw?.structure && typeof raw.structure === "object") ? raw.structure : raw;
+    if (!structure || typeof structure !== "object") return null;
+    const id = String(raw.id ?? structure.id ?? `imported-pose-${index + 1}`);
+    // 选项可能先经过后端 DTO 再经过构造器归一化；避免二次归一化把
+    // `imported-7` 变成 `imported-imported-7`，导致按钮无法应用模板。
+    const normalizedId = id.startsWith("imported-") ? id : `imported-${id}`;
+    const count = Number(structure.participant_count ?? raw.minParticipants ?? 1);
+    return {
+      id: normalizedId,
+      label: String(raw.label ?? structure.label ?? `导入姿势 ${index + 1}`),
+      minParticipants: Number.isFinite(count) ? count : 1,
+      maxParticipants: Number.isFinite(count) ? count : 1,
+      baseTags: Array.isArray(raw.baseTags) ? raw.baseTags.map(String) : (structure.base_tags || []).map(String),
+      cameraTags: Array.isArray(raw.cameraTags) ? raw.cameraTags.map(String) : (structure.camera_tags || []).map(String),
+      camera: Array.isArray(raw.camera) ? raw.camera.map(String) : (structure.camera_tags || []).map(String),
+      roleTags: Array.isArray(raw.roleTags) ? raw.roleTags : (structure.role_tags || []),
+      relations: Array.isArray(raw.relations) ? raw.relations : (structure.relations || []),
+      sourceLabel: String(raw.sourceLabel ?? raw.source?.source_type ?? "导入"),
+      adultOnly: true,
+    };
+  }).filter(Boolean);
 }
 
 // 位置候选按 participant / scene 过滤：
@@ -163,7 +197,7 @@ export function participantNumber(participants) {
   const m = p.match(/^(\d+)/);
   if (!m) return null;
   const n = Number(m[1]);
-  return n >= 4 ? 4 : (n >= 1 ? n : null);
+  return n >= 1 ? Math.min(6, n) : null;
 }
 
 export function buildContext({
@@ -276,13 +310,17 @@ export function normalizeRecommendation(item) {
   if (!item || typeof item !== "object") return null;
   const tag = String(item.tag ?? item.canonical ?? "");
   if (!tag) return null;
-  return {
+  const normalized = {
     tag,
     canonical: String(item.canonical ?? item.tag ?? ""),
     zh: String(item.zh ?? ""),
     reason: String(item.reason ?? ""),
     section: String(item.section ?? ""),
   };
+  // Keep the field absent for injected/legacy recommendations, so the public
+  // DTO stays backward compatible.  A backend-provided target is authoritative.
+  if (item.target != null && String(item.target)) normalized.target = String(item.target);
+  return normalized;
 }
 
 export function normalizeRecommendations(data) {
@@ -290,6 +328,12 @@ export function normalizeRecommendations(data) {
   const raw = Array.isArray(data) ? data : (Array.isArray(data.recommendations) ? data.recommendations : []);
   return raw.map(normalizeRecommendation).filter(Boolean);
 }
+
+const RECOMMEND_GROUP_LABELS = {
+  adult_context: "成人场景语境", contextual: "当前语境", related: "相关标签",
+  next_steps: "建议下一步", global_related: "全局关联", cooccurrence: "共现关联",
+};
+function recommendationGroupLabel(value) { const key = String(value || ""); return RECOMMEND_GROUP_LABELS[key] || key || "推荐"; }
 
 // ---- ARIA / 键盘辅助（无 DOM，便于测试） ----
 
@@ -328,7 +372,7 @@ function emptyView() {
  *   fetchImpl       自定义 fetch（测试注入）
  *   adolescentMode  是否青少年模式（后端 /api/settings；true=禁用/隐藏本组件）
  *   mode            Recommendation V2 的 mode（默认 "nsfw"）
- *   participants    计数档候选（默认 1/2/3/4+，非 canonical tag）
+ *   participants    计数档候选（默认 1–6，非 canonical tag）
  *   scenes          环境/情境（scenarios）候选（canonical tag 可选）
  *   stages          阶段候选（默认内置语义标识）
  *   positions       体位候选（支持 minParticipants / requiresScenes 过滤）
@@ -343,6 +387,7 @@ export class NsfwBuilder {
     this.apiBase = String(options.apiBase || "");
     this.bridge = options.bridge || (typeof window !== "undefined" && window.PromptBridge ? window.PromptBridge : null);
     this.fetchImpl = options.fetchImpl || null;
+    this.active = options.active !== false;
     this.mode = String(options.mode || "nsfw");
     this.adolescentMode = options.adolescentMode === true || options.settings?.adolescent_mode === true;
     this.options = {
@@ -359,6 +404,7 @@ export class NsfwBuilder {
       expressions: normalizeOptions(options.expressions),
       compositions: normalizeOptions(options.compositions),
       bodyFocus: normalizeOptions(options.bodyFocus),
+      poseTemplates: normalizePoseTemplates(options.poseTemplates),
     };
     this.recommendImpl = typeof options.recommend === "function" ? options.recommend : null;
     this.openState = {};
@@ -373,14 +419,37 @@ export class NsfwBuilder {
     this.onKeydown = (event) => this.handleKeydown(event);
     this._recommendationSeq = 0;
     this._recommendTimer = null;
+    this.templateCandidates = [];
+    this.templateNotice = "";
+    this.templateApiStatus = "unknown";
     this.getGenerationConfig = typeof options.getGenerationConfig === "function" ? options.getGenerationConfig : () => ({});
-    this.onBridgeChange = (_doc, action) => { if (!this._destroyed) { this.refresh(); if (action?.type !== "SCENE_WARNING") this.scheduleRecommend(); } };
+    this.onBridgeChange = (_doc, action) => {
+      if (this._destroyed || !this.active) return;
+      this.refresh();
+      if (action?.type !== "SCENE_WARNING") this.scheduleRecommend();
+    };
   }
 
   isDisabled() { return !!this.adolescentMode; }
   setAdolescentMode(value) {
     this.adolescentMode = value === true;
     if (this.root) this.render();
+  }
+
+  setActive(value) {
+    const next = value !== false;
+    if (this.active === next) return;
+    this.active = next;
+    clearTimeout(this._recommendTimer);
+    if (!next) {
+      this._recommendationSeq += 1;
+      return;
+    }
+    if (!this._destroyed) {
+      this.refresh();
+      this.scheduleRecommend();
+      void this.refreshTemplateLibrary();
+    }
   }
 
   mount() {
@@ -395,6 +464,7 @@ export class NsfwBuilder {
     if (bridge && typeof bridge.subscribe === "function") {
       this._unsubscribe = bridge.subscribe(this.onBridgeChange);
     }
+    if (this.active) void this.refreshTemplateLibrary();
   }
 
   destroy() {
@@ -432,13 +502,13 @@ export class NsfwBuilder {
     if (this._destroyed) return;
     const bridge = this.bridge;
     if (!bridge || typeof bridge.getDocument !== "function") {
-      this.view = { ...emptyView(), status: "empty", message: "未检测到 PromptBridge：NSFW Scene Builder 需要 getDocument / getActiveTarget / dispatch。" };
+      this.view = { ...emptyView(), status: "empty", message: "未检测到提示词桥接：成人场景构建器需要文档、当前目标和调度能力。" };
       if (this.root) this.render();
       return;
     }
     const doc = bridge.getDocument();
     if (!doc || typeof doc !== "object") {
-      this.view = { ...emptyView(), status: "empty", message: "PromptBridge 未返回 PromptDocument（schema v2）。" };
+      this.view = { ...emptyView(), status: "empty", message: "提示词桥接未返回有效的提示词文档（schema v2）。" };
       if (this.root) this.render();
       return;
     }
@@ -464,16 +534,28 @@ export class NsfwBuilder {
     const doc = this.bridge?.getDocument?.() || {};
     const blocked = (doc.characters || []).slice(requestedN).map((ch, offset) => this._characterNonEmpty(ch, requestedN + offset) ? requestedN + offset : null).filter((i) => i != null);
     if (blocked.length) {
-      this.view = { ...this.view, blockedIndices: blocked.map((i) => ({ index: i, label: `Character ${i + 1} 仍有内容` })) };
+      this.view = { ...this.view, blockedIndices: blocked.map((i) => ({ index: i, label: `角色 ${i + 1} 仍有内容` })) };
       if (this.root) this.render();
+      this._dispatchProposal({ kind: "remove_characters_blocked", blockedIndices: blocked });
       return false;
     }
-    return this._dispatchProposal({ kind: "sync_participants", count: requestedN });
+    const setOk = dispatchAction(this.bridge, buildSetExclusiveGroupAction({
+      group: GROUP_KEYS.participants,
+      key: String(key),
+      newTag: "",
+      target: "base",
+      characterIndex: null,
+      members: exclusiveMembers(GROUP_KEYS.participants, this.options),
+    }));
+    if (!setOk) return false;
+    const autoRemovableEmptyIndices = requestedN < (doc.characters || []).length
+      ? (doc.characters || []).slice(requestedN).map((_, offset) => requestedN + offset)
+      : [];
+    return this._dispatchProposal({ kind: "sync_participants", count: requestedN, autoRemovableEmptyIndices });
   }
 
   _characterNonEmpty(character, index) {
     if (!character || typeof character !== "object") return false;
-    if (String(character.name || "") && String(character.name) !== `Character ${index + 1}`) return true;
     if (character.position) return true;
     for (const section of [character.prompt_sections, character.uc_sections, character.prompt, character.uc]) {
       if (Array.isArray(section)) {
@@ -487,8 +569,8 @@ export class NsfwBuilder {
     return false;
   }
 
-  // ---- 严格互斥组（base 作用域）：scene / stage / position ----
-  // Character Assignment：场景 / 体位归 Base；participant_count 走 selectParticipants；服装走 selectClothing。
+  // ---- 严格互斥组：scene / stage 写入 Base；position / primary_act 写入角色卡 ----
+  // Character Assignment：场景 / 阶段归 Base；体位 / 主要行为归每个角色 action。
   selectExclusive(group, key) {
     if (this.isDisabled()) return false;
     const groupKey = GROUP_KEYS[group];
@@ -627,11 +709,11 @@ export class NsfwBuilder {
 
   // ---- 推荐：注入 recommend 或默认 POST /api/recommendations ----
   async recommend() {
-    if (this.isDisabled()) return false;
+    if (this.isDisabled() || !this.active) return false;
     const bridge = this.bridge;
     const doc = bridge && typeof bridge.getDocument === "function" ? bridge.getDocument() : null;
     if (!doc || typeof doc !== "object") {
-      this.view = { ...this.view, recStatus: "empty", message: "未检测到 PromptBridge：推荐需要当前 Prompt 数据。" };
+      this.view = { ...this.view, recStatus: "empty", message: "未检测到提示词桥接：推荐需要当前提示词数据。" };
       if (this.root) this.render();
       return [];
     }
@@ -687,7 +769,10 @@ export class NsfwBuilder {
     if (this.isDisabled()) return false;
     const item = normalizeRecommendation(rec);
     if (!item) return false;
-    const target = item.target && /^char:\d+$/.test(item.target) ? item.target : "base";
+    const activeTarget = this._activeTarget();
+    const target = item.target && /^(?:base|char:\d+)$/.test(item.target)
+      ? item.target
+      : (/^(?:base|char:\d+)$/.test(activeTarget) ? activeTarget : "base");
     return dispatchAction(this.bridge, buildAddTagAction(item.tag, target, item.section || ""));
   }
 
@@ -718,10 +803,32 @@ export class NsfwBuilder {
       this.toggleActivity(node.dataset.key);
     } else if (action === "recommend") {
       this.recommend();
+    } else if (action === "pose-template") {
+      const ok = this.applyPoseTemplate(node.dataset.id);
+      if (!ok) this.flashStatus("当前人数下没有兼容的姿势模板。");
+    } else if (action === "template-import-civitai") {
+      this.importCivitaiTemplate();
+    } else if (action === "template-approve") {
+      this.approveTemplate(node.dataset.id);
+    } else if (action === "template-reject") {
+      this.rejectTemplate(node.dataset.id);
+    } else if (action === "template-refresh") {
+      this.refreshTemplateLibrary();
     } else if (action === "rec-add") {
       const ok = this.applyRecommendation({ tag: node.dataset.tag, section: node.dataset.section || "" });
       if (!ok) this.flashStatus("未连接 PromptBridge，无法加入推荐标签。");
     }
+  }
+
+  applyPoseTemplate(id) {
+    if (this.isDisabled()) return false;
+    const count = participantNumber(this.context.participant_count) || 1;
+    const pose = compatiblePoses(count, [...POSE_LIBRARY, ...this.options.poseTemplates]).find((item) => item.id === String(id));
+    if (!pose) return false;
+    // 导入模板可能带有 source/target 关系；保留 relations，内置模板则由
+    // normalizePlan 按人数生成默认环形关系。
+    const plan = normalizePlan(pose, count);
+    return dispatchAction(this.bridge, { type: "APPLY_POSE_VARIATION", payload: { target: "characters", plan } });
   }
 
   handleChange(event) {
@@ -735,6 +842,9 @@ export class NsfwBuilder {
         this.interactionDraft = { ...(this.interactionDraft || { actor: 0, target: 1, relation: "directional" }), [field]: node.value };
         if (this.root) this.render();
       }
+    } else if (node.dataset.action === "template-import-file") {
+      this.importTemplateFile(node.files?.[0]);
+      node.value = "";
     }
   }
 
@@ -773,10 +883,10 @@ export class NsfwBuilder {
     if (!this.root) return;
     if (!this.isDisabled()) this._hydrateContext();
     this.root.innerHTML = this.isDisabled()
-      ? `<div class="nsfw-builder is-disabled" role="region" aria-label="NSFW Scene Builder">
-           <div class="nb-disabled" role="status">当前为青少年模式，NSFW Scene Builder 已禁用。</div>
+      ? `<div class="nsfw-builder is-disabled" role="region" aria-label="成人场景构建器">
+           <div class="nb-disabled" role="status">当前为青少年模式，成人场景构建器已禁用。</div>
          </div>`
-      : `<div class="nsfw-builder" role="region" aria-label="NSFW Scene Builder">
+      : `<div class="nsfw-builder" role="region" aria-label="成人场景构建器">
           ${this.summaryHtml()}
           ${this.dashboardHtml()}
           ${this.statusHtml()}
@@ -786,9 +896,10 @@ export class NsfwBuilder {
           ${this.primaryActHtml()}
           ${this.interactionsHtml()}
           ${this.stageHtml()}
-          ${this.charactersHtml()}
-          ${this.positionHtml()}
-          ${this.activitiesHtml()}
+         ${this.charactersHtml()}
+         ${this.positionHtml()}
+          ${this.poseTemplatesHtml()}
+         ${this.activitiesHtml()}
           ${this.bodyFocusHtml()}
           ${this.compositionEnvironmentHtml()}
           ${this.recommendHtml()}
@@ -796,15 +907,15 @@ export class NsfwBuilder {
   }
 
   dashboardHtml() {
-    const groups = [["人物", this.context.participant_count], ["主要行为", this.context.primary_act], ["互动关系", this.context.interactions?.length], ["阶段体位", this.context.stage || this.context.position], ["角色状态", Object.keys(this.context.clothing_state || {}).length + Object.keys(this.context.character_state || {}).length], ["镜头环境", this.context.composition || this.context.environment || this.context.primary_scene_type]];
+    const groups = [["人物", this.context.participant_count], ["主要行为", this.context.primary_act], ["互动关系", this.context.interactions?.length], ["阶段体位", this.context.stage || this.context.pose_variation?.label || this.context.position], ["角色状态", Object.keys(this.context.clothing_state || {}).length + Object.keys(this.context.character_state || {}).length], ["镜头环境", this.context.composition || this.context.environment || this.context.primary_scene_type]];
     const done = groups.filter(([, value]) => value).length;
     return `<nav class="nb-dashboard" aria-label="场景自由跳转">${groups.map(([label,value]) => `<a href="#nb-${esc(label)}" class="nb-${value ? "filled" : "empty"}">${esc(label)}<small>${value ? "已填" : "未填"}</small></a>`).join("")}<span>${done}/${groups.length}</span></nav>`;
   }
   summaryHtml() {
     const doc = this.bridge?.getDocument?.() || {}; const c = this.context;
-    const chars = (doc.characters || []).map((ch,i) => `C${i+1} ${ch.name || ""}: ${c.clothing_state?.[i] || "-"}/${c.expressions?.[i] || "-"}/${c.character_state?.[i] || "-"}`);
-    const rows = (c.interactions || []).map((r) => `C${r.actor+1} ${r.action} C${r.target+1}`);
-    return `<header class="nb-summary"><strong>Scene Composer V2</strong><div>${esc(`${c.participant_count || doc.characters?.length || 1}人 · ${c.primary_scene_type || c.environment || "环境未定"} · ${c.primary_act || "主要行为未定"} · ${c.stage || "阶段未定"} · ${c.position || "体位未定"}`)}</div><small>${esc([...chars,...rows].join(" | "))}</small></header>`;
+    const chars = (doc.characters || []).map((ch,i) => `角色 ${i+1} ${/^Character \d+$/.test(String(ch.name || "")) ? "" : ch.name || ""}: ${c.clothing_state?.[i] || "-"}/${c.expressions?.[i] || "-"}/${c.character_state?.[i] || "-"}`);
+    const rows = (c.interactions || []).map((r) => `角色 ${r.actor+1} ${r.action} 角色 ${r.target+1}`);
+    return `<header class="nb-summary"><strong>成人场景编排 V2</strong><div>${esc(`${c.participant_count || doc.characters?.length || 1}人 · ${c.primary_scene_type || c.environment || "环境未定"} · ${c.primary_act || "主要行为未定"} · ${c.stage || "阶段未定"} · ${c.pose_variation?.label || c.position || "体位未定"}`)}</div><small>${esc([...chars,...rows].join(" | "))}</small></header>`;
   }
 
   statusHtml() {
@@ -817,7 +928,7 @@ export class NsfwBuilder {
   noticesHtml() {
     const blocked = this.view.blockedIndices || [];
     if (!blocked.length) return "";
-    return blocked.map((b) => `<div class="nb-notice" role="status">${esc(b.label || `Character ${Number(b.index) + 1} 仍有内容，请手动移除`)}</div>`).join("");
+    return blocked.map((b) => `<div class="nb-notice" role="status">${esc(b.label || `角色 ${Number(b.index) + 1} 仍有内容，请手动移除`)}</div>`).join("");
   }
 
   participantsHtml() {
@@ -825,19 +936,19 @@ export class NsfwBuilder {
     return this.radioGroupHtml("人数", this.options.participants, this.context.participant_count == null ? null : String(this.context.participant_count), { action: "participants", dataGroup: "participants", id: "nb-人物" });
   }
 
-  primaryActHtml() { return this.radioGroupHtml("主要行为 · 写入 Base", this.options.primaryActs, this.context.primary_act || null, { action: "exclusive", dataGroup: "primaryAct", id: "nb-主要行为" }); }
+  primaryActHtml() { return this.radioGroupHtml("主要行为 · 写入基础提示词", this.options.primaryActs, this.context.primary_act || null, { action: "exclusive", dataGroup: "primaryAct", id: "nb-主要行为" }); }
   interactionsHtml() {
     const count = participantNumber(this.context.participant_count) || 1;
-    if (count < 2) return `<div class="nb-notice">选择 2–3 人以启用互动关系</div>`;
+    if (count < 2) return `<div class="nb-notice">选择 2–6 人以启用互动关系</div>`;
     const draft = this.interactionDraft || (this.interactionDraft = { actor: 0, target: 1, relation: "directional" });
     const clamp = (v, fallback) => { const n = Number(v); return Number.isFinite(n) ? Math.min(Math.max(n, 0), count - 1) : fallback; };
     const actor = clamp(draft.actor, 0);
     const target = clamp(draft.target, 1);
     this.interactionDraft = { ...draft, actor, target };
-    const actors = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===actor?"selected":""}>C${i+1}</option>`).join("");
-    const targets = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===target?"selected":""}>C${i+1}</option>`).join("");
+    const actors = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===actor?"selected":""}>角色 ${i+1}</option>`).join("");
+    const targets = Array.from({length:count},(_,i)=>`<option value="${i}" ${i===target?"selected":""}>角色 ${i+1}</option>`).join("");
     const relationSel = `<option value="directional" ${draft.relation!=="mutual"?"selected":""}>定向</option><option value="mutual" ${draft.relation==="mutual"?"selected":""}>相互</option>`;
-    return `<section class="nb-fieldset" id="nb-互动关系"><legend class="nb-legend">互动关系 · Actor → Action → Target</legend><div class="nb-interaction-controls"><select data-action="interaction-select" data-input="actor">${actors}</select><select data-action="interaction-select" data-input="target">${targets}</select><select data-action="interaction-select" data-input="relation">${relationSel}</select>${this.options.interactionActions.map(o=>`<button data-action="interaction-add" data-key="${esc(o.key)}">${esc(o.label)} <small>互动 C${actor+1} → C${target+1}</small></button>`).join("")}</div>${(this.context.interactions||[]).map(r=>`<div>C${r.actor+1} → ${esc(r.action)} → C${r.target+1} <button data-action="interaction-remove" data-id="${esc(r.id)}">移除</button></div>`).join("")}</section>`;
+    return `<section class="nb-fieldset" id="nb-互动关系"><legend class="nb-legend">互动关系 · 发起者 → 行为 → 目标</legend><div class="nb-interaction-controls"><select data-action="interaction-select" data-input="actor">${actors}</select><select data-action="interaction-select" data-input="target">${targets}</select><select data-action="interaction-select" data-input="relation">${relationSel}</select>${this.options.interactionActions.map(o=>`<button data-action="interaction-add" data-key="${esc(o.key)}">${esc(o.label)} <small>互动：角色 ${actor+1} → 角色 ${target+1}</small></button>`).join("")}</div>${(this.context.interactions||[]).map(r=>`<div>角色 ${r.actor+1} → ${esc(r.action)} → 角色 ${r.target+1} <button data-action="interaction-remove" data-id="${esc(r.id)}">移除</button></div>`).join("")}</section>`;
   }
 
   stageHtml() {
@@ -852,10 +963,10 @@ export class NsfwBuilder {
     for (let i = 0; i < n; i++) parts.push(this.charClothingHtml(i) + this.charStateHtml(i, "expression", "表情", this.options.expressions, this.context.expressions?.[i]) + this.charStateHtml(i, "state", "状态", this.options.characterStates, this.context.character_state?.[i]));
     return `<section class="nb-group nb-char-clothing-group" aria-label="角色服装状态" id="nb-角色状态">${parts.join("")}</section>`;
   }
-  charStateHtml(i, kind, label, options, current) { return `<fieldset class="nb-fieldset"><legend>C${i+1} ${label} · 写入 C${i+1}</legend><div class="nb-options">${options.map(o=>`<button data-action="char-state" data-kind="${kind}" data-char="${i}" data-key="${esc(o.key)}" class="${isSelected(current,o.key)?"active":""}">${esc(o.label)}</button>`).join("")}</div></fieldset>`; }
+  charStateHtml(i, kind, label, options, current) { return `<fieldset class="nb-fieldset"><legend>角色 ${i+1} ${label} · 写入角色 ${i+1}</legend><div class="nb-options">${options.map(o=>`<button data-action="char-state" data-kind="${kind}" data-char="${i}" data-key="${esc(o.key)}" class="${isSelected(current,o.key)?"active":""}">${esc(o.label)}</button>`).join("")}</div></fieldset>`; }
 
   charClothingHtml(characterIndex) {
-    const label = `Character ${characterIndex + 1} 衣着`;
+    const label = `角色 ${characterIndex + 1} 衣着`;
     const current = this.context.clothing_state?.[characterIndex] || null;
     const options = this.options.clothingStates;
     return `<fieldset class="nb-fieldset nb-char-clothing">
@@ -892,6 +1003,145 @@ export class NsfwBuilder {
     return this.radioGroupHtml("体位", visiblePositions, this.context.position || null, { action: "exclusive", dataGroup: "position" });
   }
 
+  poseTemplatesHtml() {
+    const count = participantNumber(this.context.participant_count) || 1;
+    const poses = compatiblePoses(count, [...POSE_LIBRARY, ...this.options.poseTemplates]);
+    const cards = poses.map((pose) => { const active = this.context.pose_variation?.id === pose.id; const source = pose.sourceLabel ? `<small class="nb-template-source">${esc(pose.sourceLabel)}</small>` : ""; return `<button type="button" data-action="pose-template" data-id="${esc(pose.id)}" class="${active ? "active" : ""}" aria-pressed="${active}">${esc(pose.label)}${source}<small class="nb-tag">${esc((pose.baseTags || []).join(", "))}</small></button>`; }).join("");
+    const candidates = this.templateCandidates.map((item) => this.templateCandidateHtml(item)).join("");
+    const notice = this.templateNotice ? `<div class="nb-hint" role="status">${esc(this.templateNotice)}</div>` : "";
+    const apiHint = this.templateApiStatus === "error" ? `<div class="nb-notice" role="alert">模板服务暂不可用，请先重启后端服务。<button type="button" data-action="template-refresh">重新连接</button></div>` : "";
+    return `<fieldset class="nb-fieldset nb-pose-templates"><legend class="nb-legend">成人姿势模板 <small class="nb-multi-note">（只在成人场景构建器管理）</small></legend><div class="nb-options">${cards || `<span class="nb-hint">暂无已审核模板，请导入一个候选。</span>`}</div><div class="nb-hint">模板只替换姿势和互动关系，不改角色身份、画风或生成参数。</div><div class="nb-template-import"><div class="nb-template-import-title">导入带元数据的模板</div><div class="nb-template-import-row"><input type="text" data-template-civitai-input placeholder="Civitai 图片 ID 或 URL" aria-label="Civitai 图片 ID 或 URL"><button type="button" data-action="template-import-civitai">导入在线元数据</button></div><label class="nb-template-file">或选择本地 PNG / JSON / Prompt <input type="file" data-action="template-import-file" accept=".png,.json,.workflow,.txt,.prompt,.parameters"></label>${apiHint}${notice}${candidates}</div></fieldset>`;
+  }
+
+  templateCandidateHtml(item) {
+    const structure = item?.structure && typeof item.structure === "object" ? item.structure : {};
+    const status = String(item?.status || item?.review?.status || "pending");
+    const participantCount = Number(structure.participant_count || item?.participant_count || 1);
+    const baseTags = Array.isArray(structure.base_tags) ? structure.base_tags.map(String).filter(Boolean) : [];
+    const cameraTags = Array.isArray(structure.camera_tags) ? structure.camera_tags.map(String).filter(Boolean) : [];
+    const roles = Array.isArray(structure.role_tags) ? structure.role_tags.map((tags, index) => `角色 ${index + 1}：${(Array.isArray(tags) ? tags : []).map(String).filter(Boolean).join("、") || "未分配"}`) : [];
+    const relations = Array.isArray(structure.relations) ? structure.relations.map((row) => `角色 ${Number(row.source) + 1} → ${String(row.action || "互动")} → 角色 ${Number(row.target) + 1}`) : [];
+    const removed = Array.isArray(structure.removed_tags) ? structure.removed_tags.map((row) => String(row?.tag || "")).filter(Boolean) : [];
+    const unresolved = Array.isArray(structure.unresolved_tags) ? structure.unresolved_tags.map(String).filter(Boolean) : [];
+    const metrics = structure.metrics && typeof structure.metrics === "object" ? structure.metrics : {};
+    const issues = Array.isArray(item?.quality_issues) ? item.quality_issues.map(String).filter(Boolean) : [];
+    let actions = `<span class="nb-template-status">${esc(status === "approved" ? "已批准" : status === "rejected" ? "已拒绝" : status === "blocked" ? "已阻断" : "待审核")}</span>`;
+    if (status === "pending") {
+      actions = `<button type="button" data-action="template-approve" data-id="${esc(item.id)}">批准加入</button><button type="button" data-action="template-reject" data-id="${esc(item.id)}">拒绝</button>`;
+    }
+    const sourceUrl = item?.source?.source_url ? `<a href="${esc(item.source.source_url)}" target="_blank" rel="noreferrer">查看来源</a>` : "";
+    const list = (label, values) => values.length ? `<div><strong>${label}</strong>：${esc(values.join("；"))}</div>` : "";
+    return `<details class="nb-template-candidate"><summary><span>${esc(item?.label || `模板 ${item?.id || ""}`)}</span><small>${esc(status)}</small></summary><div class="nb-template-review-detail"><div><strong>参与者</strong>：${esc(`${participantCount} 人`)}</div>${list("姿势/动作", baseTags)}${list("镜头/构图", cameraTags)}${list("角色分配", roles)}${list("互动关系", relations)}${list("已移除", removed)}${list("未识别", unresolved)}<div><strong>评分</strong>：标签有效率 ${esc(`${Math.round(Number(metrics.tag_validity || 0) * 100)}%`)}，完整度 ${esc(`${Math.round(Number(metrics.completeness || 0) * 100)}%`)}</div>${issues.length ? list("结构问题", issues) : ""}<div class="nb-template-review-actions">${sourceUrl}${actions}</div></div></details>`;
+  }
+
+  _templateFetch() {
+    return this.fetchImpl || (typeof fetch === "function" ? fetch : null);
+  }
+
+  async refreshTemplateLibrary() {
+    const fetchImpl = this._templateFetch();
+    if (!fetchImpl || this.isDisabled()) return false;
+    this.templateApiStatus = "loading";
+    try {
+      const readJson = async (url) => {
+        const response = await fetchImpl(url);
+        if (response.status === 404) throw new Error("后端服务版本过旧，请重启应用后再试");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      };
+      const runtime = await readJson(`${this.apiBase}/api/runtime-info`);
+      if (Number(runtime?.template_api_version || 0) < TEMPLATE_API_VERSION) throw new Error("后端模板接口版本过旧，请重启应用后再试");
+      const [approved, pending] = await Promise.all([
+        readJson(`${this.apiBase}/api/templates?status=approved`),
+        readJson(`${this.apiBase}/api/templates?status=pending`),
+      ]);
+      this.options.poseTemplates = normalizePoseTemplates(approved?.templates || []);
+      this.templateCandidates = Array.isArray(pending?.templates) ? pending.templates : [];
+      this.templateApiStatus = "ready";
+      if (this.root) this.render();
+      return true;
+    } catch (error) {
+      this.templateApiStatus = "error";
+      this.templateNotice = `模板刷新失败：${error.message}`;
+      if (this.root) this.render();
+      return false;
+    }
+  }
+
+  async refreshPoseTemplates() { return this.refreshTemplateLibrary(); }
+
+  async importCivitaiTemplate() {
+    const input = this.root?.querySelector("[data-template-civitai-input]");
+    const value = String(input?.value || "").trim();
+    if (!value) { this.templateNotice = "请输入 Civitai 图片 ID 或 URL"; if (this.root) this.render(); return; }
+    const fetchImpl = this._templateFetch();
+    if (!fetchImpl) return;
+    try {
+      const response = await fetchImpl(`${this.apiBase}/api/templates/import/civitai`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ image_id_or_url: value }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+      this.templateCandidates = [data.template, ...this.templateCandidates.filter((item) => item.id !== data.template?.id)].filter(Boolean);
+      this.templateNotice = data.duplicate ? "该姿势结构已存在，未重复保存。" : "已导入候选，请人工确认后加入模板库。";
+      if (input) input.value = "";
+      if (this.root) this.render();
+    } catch (error) {
+      this.templateNotice = `导入失败：${error.message}`;
+      if (this.root) this.render();
+    }
+  }
+
+  async importTemplateFile(file) {
+    if (!file) return;
+    const fetchImpl = this._templateFetch();
+    if (!fetchImpl) return;
+    try {
+      const form = new FormData(); form.append("upload", file, file.name);
+      const response = await fetchImpl(`${this.apiBase}/api/templates/import/file`, { method: "POST", body: form });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+      this.templateCandidates = [data.template, ...this.templateCandidates.filter((item) => item.id !== data.template?.id)].filter(Boolean);
+      this.templateNotice = data.duplicate ? "该姿势结构已存在，未重复保存。" : "已导入候选，请人工确认后加入模板库。";
+      if (this.root) this.render();
+    } catch (error) {
+      this.templateNotice = `导入失败：${error.message}`;
+      if (this.root) this.render();
+    }
+  }
+
+  async approveTemplate(id) {
+    const fetchImpl = this._templateFetch();
+    if (!fetchImpl) return;
+    try {
+      const response = await fetchImpl(`${this.apiBase}/api/templates/${encodeURIComponent(id)}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "approved" }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+      this.templateCandidates = this.templateCandidates.filter((item) => String(item.id) !== String(id));
+      this.templateNotice = "模板已加入 NSFW Builder。";
+      const refreshed = await this.refreshPoseTemplates();
+      if (!refreshed) this.templateNotice = "模板已批准，但列表刷新失败，请重新连接模板服务。";
+      if (this.root) this.render();
+    } catch (error) {
+      this.templateNotice = `批准失败：${error.message}`;
+      if (this.root) this.render();
+    }
+  }
+
+  async rejectTemplate(id) {
+    const fetchImpl = this._templateFetch();
+    if (!fetchImpl) return;
+    try {
+      const response = await fetchImpl(`${this.apiBase}/api/templates/${encodeURIComponent(id)}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "rejected", note: "用户拒绝" }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+      this.templateNotice = "候选已拒绝。";
+      await this.refreshTemplateLibrary();
+      if (this.root) this.render();
+    } catch (error) {
+      this.templateNotice = `拒绝失败：${error.message}`;
+      if (this.root) this.render();
+    }
+  }
+
   activitiesHtml() {
     if (!this.options.activities.length) return "";
     return `<section class="nb-group" aria-label="附加活动">
@@ -914,7 +1164,7 @@ export class NsfwBuilder {
     if (!this.options.bodyFocus.length) return "";
     return this.radioGroupHtml("身体聚焦", this.options.bodyFocus, this.context.body_focus || null, { action: "body-focus", dataGroup: "bodyfocus" });
   }
-  compositionEnvironmentHtml() { return `<section id="nb-镜头环境"><div class="nb-legend">镜头环境 · 写入 Base</div>${this.radioGroupHtml("构图", this.options.compositions, this.context.composition, { action:"exclusive", dataGroup:"composition" })}${this.radioGroupHtml("环境 / 情境", [...this.options.scenes,...this.options.environments], this.context.primary_scene_type || this.context.environment, { action:"exclusive", dataGroup:"scene" })}</section>`; }
+  compositionEnvironmentHtml() { return `<section id="nb-镜头环境"><div class="nb-legend">镜头环境 · 写入基础提示词</div>${this.radioGroupHtml("构图", this.options.compositions, this.context.composition, { action:"exclusive", dataGroup:"composition" })}${this.radioGroupHtml("环境 / 情境", [...this.options.scenes,...this.options.environments], this.context.primary_scene_type || this.context.environment, { action:"exclusive", dataGroup:"scene" })}</section>`; }
 
   radioGroupHtml(label, options, current, { action = "exclusive", dataGroup = "", disabled = false, hint = "", id = "" } = {}) {
     if (!options || !options.length) return "";
@@ -943,7 +1193,7 @@ export class NsfwBuilder {
       </button>`;
     const groups = Array.isArray(v.groups) && v.groups.length
       ? v.groups.map((g) => `<div class="nb-rec-group">
-          <div class="nb-rec-group-title">${esc(g.group)}</div>
+          <div class="nb-rec-group-title">${esc(recommendationGroupLabel(g.group))}</div>
           <div class="nb-recs">${g.recommendations.map(recButtonHtml).join("")}</div>
         </div>`).join("")
       : "";

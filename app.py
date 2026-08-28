@@ -36,7 +36,7 @@ import gallery_memory  # noqa: E402
 import imageutil  # noqa: E402
 import search  # noqa: E402
 from importer import build_catalog, import_aliases, import_danbooru_zh, import_restricted, import_taxonomy, sync_danbooru  # noqa: E402
-from prompt import auto_split, composer, import_parser, novelai_export, prior, recommendation, related_client, sections as prompt_sections  # noqa: E402
+from prompt import auto_split, composer, import_parser, novelai_export, prior, recommendation, related_client, sections as prompt_sections, template_import  # noqa: E402
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -78,6 +78,9 @@ DEFAULT_USER_SETTINGS = {
     "baidu_translate_appid": "",
     "baidu_translate_secret": "",
 }
+# 运行时契约版本：前端可据此识别“静态文件已更新、后端进程仍是旧版本”的情况。
+TEMPLATE_API_VERSION = 1
+DB_SCHEMA_VERSION = 5
 BAIDU_TRANSLATE_URL = "https://fanyi-api.baidu.com/api/trans/vip/translate"
 BAIDU_TRANSLATE_TIMEOUT = 12
 _translate_lock = threading.Lock()
@@ -1653,6 +1656,16 @@ def get_settings():
     }
 
 
+@app.get("/api/runtime-info")
+def runtime_info():
+    """返回前后端运行契约，避免旧进程继续服务新静态页面。"""
+    return {
+        "service": "tags-market",
+        "template_api_version": TEMPLATE_API_VERSION,
+        "db_schema_version": DB_SCHEMA_VERSION,
+    }
+
+
 @app.post("/api/cache/clear")
 def clear_thumb_cache():
     removed = 0
@@ -3149,7 +3162,7 @@ SCENE_COMPOSER_CONFIG_PATH = BASE_DIR / "config" / "scene_composer.json"
 NSFW_TAXONOMY_PATH = BASE_DIR / "data" / "nsfw_taxonomy.json"
 
 # 青少年模式下返回的空候选组 key（保持 /api/nsfw-builder/options 响应形状稳定）。
-NSFW_BUILDER_GROUPS = ("participants", "primaryActs", "scenarios", "environments", "stages", "positions", "clothingStates", "characterStates", "expressions", "additionalActivities", "interactionActions", "bodyFocus", "compositions")
+NSFW_BUILDER_GROUPS = ("participants", "primaryActs", "scenarios", "environments", "stages", "positions", "clothingStates", "characterStates", "expressions", "additionalActivities", "interactionActions", "bodyFocus", "compositions", "poseTemplates")
 
 _scene_composer_config_cache: dict | None = None
 _nsfw_taxonomy_cache: dict | None = None
@@ -3303,6 +3316,9 @@ def nsfw_builder_options():
                 {"key": "1", "label": "1"},
                 {"key": "2", "label": "2"},
                 {"key": "3", "label": "3"},
+                {"key": "4", "label": "4"},
+                {"key": "5", "label": "5"},
+                {"key": "6", "label": "6"},
             ],
             "primaryActs": _verified(config.get("primary_acts")),
             # `scenarios` + `environments` 是环境/情境的唯一来源；旧的 `primary_scenes`（主场景）
@@ -3325,6 +3341,7 @@ def nsfw_builder_options():
             "interactionActions": _verified(config.get("interaction_actions")),
             "bodyFocus": _verified(config.get("body_focus"), require_tag=False),
             "compositions": _verified(config.get("compositions")),
+            "poseTemplates": _approved_pose_templates(conn),
         }
     finally:
         conn.close()
@@ -3611,6 +3628,306 @@ def import_preview(req: ImportPreviewRequest):
         }
     finally:
         conn.close()
+
+
+# ---------- 成人姿势模板导入（候选隔离 → 人工审核 → NSFW Builder） ----------
+
+TEMPLATE_MAX_FILE_BYTES = 50 * 1024 * 1024
+TEMPLATE_ALLOWED_EXT = {".png", ".json", ".workflow", ".txt", ".prompt", ".parameters"}
+
+
+class TemplateImportTextRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=100_000)
+    source_url: str = ""
+
+
+class CivitaiTemplateImportRequest(BaseModel):
+    image_id_or_url: str = Field(min_length=1, max_length=500)
+
+
+class TemplateReviewRequest(BaseModel):
+    status: str = Field(pattern="^(approved|rejected)$")
+    note: str = Field(default="", max_length=2_000)
+
+
+def _template_source_dto(row) -> dict:
+    if not row:
+        return {}
+    data = dict(row)
+    try:
+        data["metadata"] = json.loads(data.pop("metadata_json", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        data["metadata"] = {}
+    data.pop("metadata_hash", None)
+    return data
+
+
+def _template_quality_issues(structure: dict) -> list[str]:
+    """返回不涉及内容分级的结构质量问题，供审核界面和批准门槛共用。"""
+    value = structure if isinstance(structure, dict) else {}
+    issues: list[str] = []
+    try:
+        count = int(value.get("participant_count") or 1)
+    except (TypeError, ValueError):
+        count = 1
+    base_tags = [str(tag).strip() for tag in value.get("base_tags") or [] if str(tag).strip()]
+    role_tags = value.get("role_tags") if isinstance(value.get("role_tags"), list) else []
+    role_tags = [tags for tags in role_tags if isinstance(tags, list)]
+    if not base_tags and not any(role_tags):
+        issues.append("缺少可应用的姿势或动作标签")
+    if count >= 2:
+        relations = value.get("relations") if isinstance(value.get("relations"), list) else []
+        valid = []
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            source = relation.get("source")
+            target = relation.get("target")
+            if (isinstance(source, int) and not isinstance(source, bool)
+                    and isinstance(target, int) and not isinstance(target, bool)
+                    and 0 <= source < count and 0 <= target < count and source != target):
+                valid.append(relation)
+        if not valid:
+            issues.append("多人模板缺少有效角色关系")
+    return issues
+
+
+def _template_dto(conn, template_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT p.*, s.source_type, s.external_id, s.source_url, s.license, s.metadata_json, s.created_at AS source_created_at "
+        "FROM pose_template p LEFT JOIN template_source s ON s.id=p.source_id WHERE p.id=?",
+        (template_id,),
+    ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    try:
+        structure = json.loads(data.pop("structure_json", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        structure = {}
+    source = {
+        "source_type": data.pop("source_type", ""),
+        "external_id": data.pop("external_id", ""),
+        "source_url": data.pop("source_url", ""),
+        "license": data.pop("license", ""),
+        "created_at": data.pop("source_created_at", ""),
+    }
+    try:
+        source["metadata"] = json.loads(data.pop("metadata_json", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        source["metadata"] = {}
+    tags = [dict(tag) for tag in conn.execute(
+        "SELECT tag, role, slot, weight, confidence, sort_order FROM pose_template_tag WHERE template_id=? ORDER BY sort_order,id",
+        (template_id,),
+    ).fetchall()]
+    review = conn.execute(
+        "SELECT status, note, reviewer, created_at, updated_at FROM template_review WHERE template_id=? ORDER BY updated_at DESC,id DESC LIMIT 1",
+        (template_id,),
+    ).fetchone()
+    result = {**data, "id": int(data["id"]), "source": source, "structure": structure, "tags": tags, "review": dict(review) if review else {}, "quality_issues": _template_quality_issues(structure)}
+    # Front-end pose-variation.js 兼容字段；原始 snake_case 结构仍保留在 structure。
+    result.update({
+        "label": structure.get("label") or data.get("label") or f"姿势模板 {template_id}",
+        "minParticipants": int(data.get("participant_count") or 1),
+        "maxParticipants": int(data.get("participant_count") or 1),
+        "baseTags": structure.get("base_tags") or [],
+        "cameraTags": structure.get("camera_tags") or [],
+        "camera": structure.get("camera_tags") or [],
+        "roleTags": structure.get("role_tags") or [],
+        "relations": structure.get("relations") or [],
+        "sourceLabel": source.get("source_type") or "本地导入",
+    })
+    return result
+
+
+def _template_persist(conn, candidate: dict) -> tuple[dict, bool]:
+    source = candidate["source"]
+    structure = candidate["distilled"]
+    now = db.now_iso()
+    conn.execute(
+        "INSERT OR IGNORE INTO template_source (source_type, external_id, source_url, license, metadata_hash, metadata_json, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (source.get("source_type", "text"), source.get("external_id", ""), source.get("source_url", ""), "", source["metadata_hash"], json.dumps(source.get("metadata") or {}, ensure_ascii=False), now),
+    )
+    source_row = conn.execute("SELECT id FROM template_source WHERE metadata_hash=?", (source["metadata_hash"],)).fetchone()
+    source_id = source_row["id"] if source_row else None
+    duplicate = conn.execute("SELECT id FROM pose_template WHERE fingerprint=?", (structure["fingerprint"],)).fetchone()
+    if duplicate:
+        existing = _template_dto(conn, int(duplicate["id"]))
+        return existing, True
+    metrics = structure.get("metrics") or {}
+    status = "blocked" if structure.get("blocked") else "pending"
+    cur = conn.execute(
+        "INSERT INTO pose_template (source_id,label,participant_count,status,confidence,completeness,fingerprint,structure_json,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (source_id, structure.get("label") or "导入姿势", int(structure.get("participant_count") or 1), status,
+         float(metrics.get("relationship_confidence") or 0), float(metrics.get("completeness") or 0), structure["fingerprint"], json.dumps(structure, ensure_ascii=False), now, now),
+    )
+    template_id = int(cur.lastrowid)
+    tag_rows: list[tuple] = []
+    for tag in structure.get("base_tags") or []:
+        tag_rows.append((template_id, str(tag), "base", "adult_position", 1.0, 0.8, len(tag_rows)))
+    for tag in structure.get("camera_tags") or []:
+        tag_rows.append((template_id, str(tag), "base", "camera_angle", 1.0, 0.8, len(tag_rows)))
+    for index, values in enumerate(structure.get("role_tags") or []):
+        for tag in values or []:
+            tag_rows.append((template_id, str(tag), f"char:{index}", "adult_position", 1.0, 0.8, len(tag_rows)))
+    for tag in structure.get("optional_tags") or []:
+        tag_rows.append((template_id, str(tag), "optional", "optional_context", 1.0, 0.6, len(tag_rows)))
+    if tag_rows:
+        conn.executemany(
+            "INSERT INTO pose_template_tag (template_id,tag,role,slot,weight,confidence,sort_order) VALUES (?,?,?,?,?,?,?)",
+            tag_rows,
+        )
+    conn.execute(
+        "INSERT INTO template_review (template_id,status,note,reviewer,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+        (template_id, status, structure.get("blocked_reason") or "等待人工确认", "local_user", now, now),
+    )
+    conn.commit()
+    return _template_dto(conn, template_id), False
+
+
+def _assert_adult_template_mode() -> None:
+    if _load_user_settings().get("adolescent_mode"):
+        raise HTTPException(403, "青少年模式下不能导入或查看成人姿势模板")
+
+
+def _template_remote_opener():
+    """在线元数据导入复用设置页代理；关闭代理时明确使用直连。"""
+    settings = _load_user_settings()
+    proxy = str(settings.get("proxy_url") or "").strip() if settings.get("proxy_enabled") else ""
+    handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy}) if proxy else urllib.request.ProxyHandler({})
+    return urllib.request.build_opener(handler)
+
+
+def _import_candidate(candidate: dict) -> dict:
+    conn = _conn()
+    try:
+        template, duplicate = _template_persist(conn, candidate)
+        return {"ok": True, "duplicate": duplicate, "template": template, "preview": candidate["distilled"], "document": candidate["document"], "review": candidate["review"]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/templates/import/text")
+def template_import_text(body: TemplateImportTextRequest):
+    _assert_adult_template_mode()
+    conn = _conn()
+    try:
+        candidate = template_import.import_text(body.text, source_url=body.source_url, conn=conn)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        conn.close()
+    return _import_candidate(candidate)
+
+
+@app.post("/api/templates/import/file")
+async def template_import_file(upload: UploadFile = File(...)):
+    _assert_adult_template_mode()
+    filename = str(upload.filename or "template").strip()
+    if Path(filename).suffix.lower() not in TEMPLATE_ALLOWED_EXT:
+        raise HTTPException(400, "仅支持 PNG、JSON、Workflow JSON 或 Prompt 文本文件")
+    data = await upload.read(TEMPLATE_MAX_FILE_BYTES + 1)
+    await upload.close()
+    if len(data) > TEMPLATE_MAX_FILE_BYTES:
+        raise HTTPException(400, "模板文件过大（>50MB）")
+    conn = _conn()
+    try:
+        candidate = template_import.import_bytes(data, filename=filename, conn=conn)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        conn.close()
+    return _import_candidate(candidate)
+
+
+@app.post("/api/templates/import/civitai")
+def template_import_civitai(body: CivitaiTemplateImportRequest):
+    _assert_adult_template_mode()
+    conn = _conn()
+    try:
+        candidate = template_import.import_civitai(body.image_id_or_url, opener=_template_remote_opener().open, conn=conn)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    finally:
+        conn.close()
+    return _import_candidate(candidate)
+
+
+@app.get("/api/templates")
+def template_list(status: str = Query(default="approved"), limit: int = Query(default=100, ge=1, le=200)):
+    if _load_user_settings().get("adolescent_mode"):
+        return {"templates": [], "total": 0}
+    # 允许测试/内部调用直接调用函数时仍兼容 FastAPI Query 默认对象。
+    status = getattr(status, "default", status)
+    limit = getattr(limit, "default", limit)
+    allowed = {"pending", "approved", "rejected", "blocked", "all"}
+    if status not in allowed:
+        raise HTTPException(400, "invalid template status")
+    conn = _conn()
+    try:
+        where = "" if status == "all" else "WHERE p.status=?"
+        args = () if status == "all" else (status,)
+        rows = conn.execute(f"SELECT p.id FROM pose_template p {where} ORDER BY p.updated_at DESC, p.id DESC LIMIT ?", (*args, limit)).fetchall()
+        templates = [_template_dto(conn, int(row["id"])) for row in rows]
+        return {"templates": [item for item in templates if item], "total": len(templates)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/templates/{template_id}")
+def template_get(template_id: int):
+    if _load_user_settings().get("adolescent_mode"):
+        raise HTTPException(404, "template not found")
+    conn = _conn()
+    try:
+        result = _template_dto(conn, template_id)
+        if result is None:
+            raise HTTPException(404, "template not found")
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/templates/{template_id}/review")
+def template_review(template_id: int, body: TemplateReviewRequest):
+    _assert_adult_template_mode()
+    conn = _conn()
+    try:
+        row = conn.execute("SELECT * FROM pose_template WHERE id=?", (template_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "template not found")
+        structure = json.loads(row["structure_json"] or "{}")
+        metrics = structure.get("metrics") or {}
+        quality_issues = _template_quality_issues(structure)
+        if body.status == "approved" and (structure.get("blocked") or not structure.get("adult_evidence")):
+            raise HTTPException(400, "模板缺少成人证据或包含年龄风险，不能批准")
+        if body.status == "approved" and float(metrics.get("tag_validity") or 0) < 0.8:
+            raise HTTPException(400, "模板本地标签有效率低于 80%，请先修正未识别标签")
+        if body.status == "approved" and quality_issues:
+            raise HTTPException(400, "模板结构不完整：" + "；".join(quality_issues))
+        now = db.now_iso()
+        conn.execute("UPDATE pose_template SET status=?, updated_at=? WHERE id=?", (body.status, now, template_id))
+        conn.execute("INSERT INTO template_review (template_id,status,note,reviewer,created_at,updated_at) VALUES (?,?,?,?,?,?)", (template_id, body.status, body.note.strip(), "local_user", now, now))
+        conn.commit()
+        return {"ok": True, "template": _template_dto(conn, template_id)}
+    finally:
+        conn.close()
+
+
+def _approved_pose_templates(conn, limit: int = 200) -> list[dict]:
+    if _load_user_settings().get("adolescent_mode"):
+        return []
+    rows = conn.execute("SELECT id FROM pose_template WHERE status='approved' ORDER BY updated_at DESC,id DESC LIMIT ?", (limit,)).fetchall()
+    result = []
+    for row in rows:
+        item = _template_dto(conn, int(row["id"]))
+        if item:
+            result.append(item)
+    return result
 
 
 class UserTagRequest(BaseModel):

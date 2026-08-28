@@ -36,11 +36,32 @@ export const SECTION_LABELS = {
   composition: "构图", scene: "场景", style: "画风", quality: "质量", other: "其他",
 };
 export const SECTION_IDS_ORDER = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
-export const TARGET_LABELS = { base: "Base Prompt", global_uc: "Global UC", character: "Character" };
+export const TARGET_LABELS = { base: "基础提示词", global_uc: "全局负面词", character: "角色" };
 export const DEFAULT_DEBOUNCE_MS = 400;
 export const DEFAULT_SEARCH_DEBOUNCE_MS = 250;
 export const REC_LIMIT = 20;
 export const SEARCH_LIMIT = 20;
+const RECOMMEND_GROUP_LABELS = {
+  adult_context: "成人场景语境", contextual: "当前语境", related: "相关标签",
+  next_steps: "建议下一步", global_related: "全局关联", cooccurrence: "共现关联",
+  local_cooccurrence: "本地共现", personal_recent: "最近使用", semantic_context: "语义关联",
+  node_seed: "节点种子标签", semantic_alternative: "语义替代",
+};
+const RECOMMEND_SOURCE_LABELS = {
+  adult_context: "成人场景语境", contextual: "当前语境", related: "相关标签",
+  next_steps: "建议下一步", global_related: "全局关联", cooccurrence: "共现关联",
+  local_cooccurrence: "本地共现", personal_recent: "最近使用", semantic_context: "语义关联",
+  node_seed: "节点种子标签", semantic_alternative: "语义替代",
+};
+function localizeRecommendationLabel(value) {
+  const key = String(value || "").trim();
+  return RECOMMEND_GROUP_LABELS[key] || key || "推荐";
+}
+function localizeRecommendationMeta(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw.split(/[+,|]/).map((part) => RECOMMEND_SOURCE_LABELS[part.trim()] || part.trim()).filter(Boolean).join("、");
+}
 
 // ---- 小工具（无 DOM） ----
 export function debounce(fn, ms = DEFAULT_DEBOUNCE_MS) {
@@ -55,6 +76,9 @@ export function debounce(fn, ms = DEFAULT_DEBOUNCE_MS) {
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function normalizeTag(value) {
+  return String(value ?? "").trim().toLocaleLowerCase().replaceAll("_", " ").replace(/\s+/g, " ");
 }
 
 function abbreviateCount(n) {
@@ -79,7 +103,7 @@ export function mapBackendTarget(target) {
 }
 
 export function buildRecommendPayload(doc, target, options = {}) {
-  const { nodeId = "", activeSection = "", limit = REC_LIMIT } = options;
+  const { nodeId = "", activeSection = "", limit = REC_LIMIT, generationConfig = null, lastAddedTag = "" } = options;
   const t = String(target || "base");
   const ctx = (doc && typeof doc === "object" && doc.assistant_context && typeof doc.assistant_context === "object") ? doc.assistant_context : {};
   return {
@@ -95,6 +119,11 @@ export function buildRecommendPayload(doc, target, options = {}) {
     position: ctx?.position ?? "",
     body_focus: ctx?.body_focus ?? "",
     limit: Number(limit) > 0 ? Number(limit) : REC_LIMIT,
+    // V3 is enabled by sending the authoritative document.  Keep these fields
+    // optional so the component remains compatible with lightweight embedders.
+    structured_state: doc,
+    generation_config: generationConfig && typeof generationConfig === "object" ? generationConfig : undefined,
+    last_added_tag: String(lastAddedTag || ""),
   };
 }
 
@@ -175,7 +204,10 @@ export function flattenSemanticTree(tree, activeTarget = null) {
       for (const child of node.children || []) walk(child, depth + 1);
     };
     for (const child of root.children || []) walk(child, 1);
-    return { key, label: String(root.label ?? (key === "base" ? "Base" : "Character")), nodes };
+    const fallback = key === "base" ? "基础" : "角色";
+    const rawLabel = String(root.label ?? fallback);
+    const label = { Base: "基础", Character: "角色" }[rawLabel] || rawLabel;
+    return { key, label, nodes };
   };
   const targetKey = semanticRootKeyForTarget(activeTarget);
   if (targetKey) {
@@ -216,7 +248,7 @@ export function dispatchAddTag(bridge, action) {
 }
 
 function emptyView() {
-  return { status: "idle", error: "", message: "", groups: [], cards: [], nodes: [], activeNode: null, seedFallback: false, targetLabel: "", nodeLabel: "", query: "" };
+  return { status: "idle", error: "", message: "", groups: [], cards: [], nodes: [], activeNode: null, seedFallback: false, targetLabel: "", nodeLabel: "", query: "", nextSteps: [], alternatives: [] };
 }
 
 /**
@@ -237,19 +269,38 @@ export class TagAssistant {
     this.debounceMs = Number(options.debounceMs) > 0 ? Number(options.debounceMs) : DEFAULT_DEBOUNCE_MS;
     this.bridge = options.bridge || (typeof window !== "undefined" && window.PromptBridge ? window.PromptBridge : null);
     this.fetchImpl = options.fetchImpl || null;
+    this.active = options.active !== false;
+    this.getGenerationConfig = typeof options.getGenerationConfig === "function" ? options.getGenerationConfig : () => ({});
+    this.getMode = typeof options.getMode === "function" ? options.getMode : () => "general";
     this.nodeId = String(options.nodeId || "");
     this.tab = "recommend"; // 默认推荐入口
     this.searchQuery = "";
     this.view = emptyView();
     this.nodesCache = null;
     this._searchSeq = 0;
+    this._recommendationSeq = 0;
+    this._lastAddedTag = "";
+    this._lastTarget = typeof this.bridge?.getActiveTarget === "function" ? this.bridge.getActiveTarget() : "base";
     this._destroyed = false;
     this._unsubscribe = null;
-    this._refresh = debounce(() => { if (!this._destroyed) this.reloadRecommendations({ silent: true }); }, this.debounceMs);
+    this._refresh = debounce(() => { if (!this._destroyed && this.active && this.tab === "recommend") this.reloadRecommendations({ silent: true }); }, this.debounceMs);
     this._searchRefresh = debounce(() => { if (!this._destroyed) this.reloadSearch().then(() => this.renderResults()); }, DEFAULT_SEARCH_DEBOUNCE_MS);
     this.onClick = (event) => this.handleClick(event);
     this.onKeydown = (event) => this.handleKeydown(event);
-    this.onBridgeChange = () => { if (!this._destroyed) this._refresh(); };
+    this.onBridgeChange = (_doc, action) => {
+      if (this._destroyed || !this.active) return;
+      if (action?.type === "ADD_TAG") this._lastAddedTag = String(action.payload?.tag || "");
+      const target = typeof this.bridge?.getActiveTarget === "function" ? this.bridge.getActiveTarget() : "base";
+      if (target !== this._lastTarget) {
+        this._lastTarget = target;
+        this.nodeId = "";
+        this.nodesCache = null;
+      }
+      // 先让正在返回的旧请求失效，再进入防抖窗口；否则快速添加标签时，
+      // 旧结果可能在新请求发出前短暂覆盖当前面板。
+      this._recommendationSeq += 1;
+      if (this.tab === "recommend") this._refresh();
+    };
   }
 
   mount() {
@@ -263,11 +314,12 @@ export class TagAssistant {
     if (bridge && typeof bridge.subscribe === "function") {
       this._unsubscribe = bridge.subscribe(this.onBridgeChange);
     }
-    this.reload(this.tab);
+    if (this.active) this.reload(this.tab);
   }
 
   destroy() {
     this._destroyed = true;
+    this._recommendationSeq += 1;
     if (this._unsubscribe) { try { this._unsubscribe(); } catch { /* 忽略 */ } this._unsubscribe = null; }
     this._refresh.cancel();
     this._searchRefresh.cancel();
@@ -275,6 +327,18 @@ export class TagAssistant {
       this.root.removeEventListener("click", this.onClick);
       this.root.removeEventListener("keydown", this.onKeydown);
     }
+  }
+
+  setActive(value) {
+    const next = value !== false;
+    if (this.active === next) return;
+    this.active = next;
+    this._refresh.cancel();
+    if (!next) {
+      this._recommendationSeq += 1;
+      return;
+    }
+    if (!this._destroyed) this.reload(this.tab);
   }
 
   setBridge(bridge) {
@@ -293,7 +357,7 @@ export class TagAssistant {
   }
 
   async reload(tab) {
-    if (this._destroyed) return;
+    if (this._destroyed || !this.active) return;
     this.tab = tab;
     if (tab === "recommend") await this.reloadRecommendations({ silent: false });
     else if (tab === "catalog") await this.reloadCatalog();
@@ -324,39 +388,64 @@ export class TagAssistant {
   }
 
   async reloadRecommendations({ silent = false } = {}) {
+    if (this._destroyed || !this.active) return;
     const bridge = this.bridge;
     const doc = bridge && typeof bridge.getDocument === "function" ? bridge.getDocument() : null;
     if (!doc || typeof doc !== "object") {
-      this.view = { ...emptyView(), status: "empty", message: "未检测到 PromptBridge：推荐需要当前 Prompt 数据，其余入口（目录 / 搜索 / 收藏）不受影响。" };
+      this.view = { ...emptyView(), status: "empty", message: "未检测到提示词桥接：推荐需要当前提示词数据，其余入口（目录 / 搜索 / 收藏）不受影响。" };
+      if (this.root) this.render();
       return;
     }
     if (!silent) this.view = { ...emptyView(), status: "loading" };
     const target = typeof bridge.getActiveTarget === "function" ? bridge.getActiveTarget() : "base";
     if (isUcTarget(target)) {
       this.view = { ...emptyView(), status: "empty", message: "负面目标（UC）不参与正向推荐。" };
+      if (this.root) this.render();
       return;
     }
-    const payload = buildRecommendPayload(doc, target, { nodeId: this.nodeId, limit: this.limit });
+    const seq = ++this._recommendationSeq;
+    const payload = buildRecommendPayload(doc, target, {
+      nodeId: this.nodeId,
+      limit: this.limit,
+      generationConfig: this.getGenerationConfig(),
+      lastAddedTag: this._lastAddedTag,
+    });
+    payload.mode = this.getMode() || "general";
     const selected = selectedTagKeysForTarget(doc, target);
     try {
       const data = await this.api("/api/recommendations", { method: "POST", body: JSON.stringify(payload) });
+      if (seq !== this._recommendationSeq || target !== (this.bridge?.getActiveTarget?.() || "base")) return;
       const recs = filterSelected(data.recommendations || [], selected);
-      const groups = groupRecommendations(recs);
+      const apiGroups = Array.isArray(data.groups)
+        ? data.groups.map((group) => ({
+            section: `api:${String(group?.group || "推荐")}`,
+            label: localizeRecommendationLabel(group?.group),
+            items: toCards(filterSelected(group?.recommendations || [], selected)),
+          })).filter((group) => group.items.length)
+        : [];
+      const groups = apiGroups.length ? apiGroups : groupRecommendations(recs);
       const activeNode = this.findNode(this.nodeId);
       const fallback = recommendFallback(activeNode);
+      const nextSteps = Array.isArray(data.next_steps) ? data.next_steps : [];
+      const alternatives = filterSelected(Array.isArray(data.alternatives) ? data.alternatives : [], selected);
       this.view = {
         ...emptyView(),
         status: groups.length ? "ok" : (fallback.length ? "ok" : "empty"),
         groups: groups.length ? groups : (fallback.length ? [{ section: "node_seed", label: "节点种子（词库真实标签）", items: fallback }] : []),
         seedFallback: !groups.length && fallback.length > 0,
-        targetLabel: TARGET_LABELS[mapBackendTarget(target)] || target,
+        targetLabel: /^char:\d+$/.test(target) ? `角色 ${Number(target.split(":")[1]) + 1}` : (TARGET_LABELS[mapBackendTarget(target)] || target),
         nodeLabel: activeNode ? (activeNode.label || this.nodeId) : "",
+        nextSteps,
+        alternatives,
         message: (!groups.length && !fallback.length)
           ? "暂无推荐：继续添加标签后会自动刷新；或从「目录」选择一个创作意图节点（如 Indoor → bedroom）。"
           : "",
       };
+      if (this.root) this.render();
     } catch (error) {
+      if (seq !== this._recommendationSeq) return;
       this.view = { ...emptyView(), status: "error", error: String(error?.message || error) };
+      if (this.root) this.render();
     }
   }
 
@@ -381,13 +470,15 @@ export class TagAssistant {
   }
 
   async selectNode(nodeId) {
+    if (this._destroyed || !this.active) return false;
     this.nodeId = String(nodeId || "");
+    const requestNodeId = this.nodeId;
     const node = this.findNode(this.nodeId);
     const base = { ...emptyView(), nodes: this.view.nodes, activeNode: node, nodeLabel: node ? node.label : this.nodeId };
     const bridge = this.bridge;
     const doc = bridge && typeof bridge.getDocument === "function" ? bridge.getDocument() : null;
     if (!doc || typeof doc !== "object") {
-      this.view = { ...base, status: "empty", message: "未检测到 PromptBridge：该节点的推荐需要当前 Prompt 数据。" };
+      this.view = { ...base, status: "empty", message: "未检测到提示词桥接：该节点的推荐需要当前提示词数据。" };
       if (this.root) this.render();
       return;
     }
@@ -399,9 +490,18 @@ export class TagAssistant {
       if (this.root) this.render();
       return;
     }
-    const payload = buildRecommendPayload(doc, target, { nodeId: this.nodeId, activeSection: (node && node.section) || "", limit: this.limit });
+    const seq = ++this._recommendationSeq;
+    const payload = buildRecommendPayload(doc, target, {
+      nodeId: this.nodeId,
+      activeSection: (node && node.section) || "",
+      limit: this.limit,
+      generationConfig: this.getGenerationConfig(),
+      lastAddedTag: this._lastAddedTag,
+    });
+    payload.mode = this.getMode() || "general";
     try {
       const data = await this.api("/api/recommendations", { method: "POST", body: JSON.stringify(payload) });
+      if (seq !== this._recommendationSeq || requestNodeId !== this.nodeId || target !== (this.bridge?.getActiveTarget?.() || "base")) return false;
       const recs = filterSelected(data.recommendations || [], selectedTagKeysForTarget(doc, target));
       const groups = groupRecommendations(recs);
       const fallback = recommendFallback(node);
@@ -415,8 +515,10 @@ export class TagAssistant {
       };
       if (this.root) this.render();
     } catch (error) {
+      if (seq !== this._recommendationSeq || requestNodeId !== this.nodeId || target !== (this.bridge?.getActiveTarget?.() || "base")) return false;
       this.view = { ...base, status: "error", error: String(error?.message || error) };
       if (this.root) this.render();
+      return false;
     }
   }
 
@@ -471,7 +573,7 @@ export class TagAssistant {
       const ok = this.addTag(node.dataset.tag, node.dataset.section || "");
       if (!ok && this.root) {
         const status = this.root.querySelector(".ta-status");
-        if (status) status.textContent = "未连接 PromptBridge，无法加入标签。";
+        if (status) status.textContent = "未连接提示词桥接，无法加入标签。";
       }
     } else if (action === "search") {
       const input = this.root && this.root.querySelector(".ta-search-input");
@@ -559,7 +661,7 @@ export class TagAssistant {
 
   cardHtml(card) {
     const heat = card.postCount ? abbreviateCount(card.postCount) : "";
-    const meta = [card.reason || card.matchReason, card.source && card.source.length ? card.source.join("+") : ""].filter(Boolean).join(" · ");
+    const meta = [card.reason || card.matchReason, card.source && card.source.length ? card.source.map(localizeRecommendationMeta).filter(Boolean).join("、") : ""].filter(Boolean).join(" · ");
     return `<div class="ta-card">
       <button type="button" class="ta-add" data-action="add" data-tag="${esc(card.tag)}" data-section="${esc(card.section || "")}"
         title="加入「${esc(card.tag)}」到当前目标" aria-label="加入 ${esc(card.tag)}">+</button>
@@ -573,6 +675,19 @@ export class TagAssistant {
   cardsHtml(cards) {
     if (!cards || !cards.length) return "";
     return `<div class="ta-cards">${cards.map((card) => this.cardHtml(card)).join("")}</div>`;
+  }
+
+  // 推荐各层使用同一个已展示集合：Next Step 、相关扩展和替代项不再重复占首屏。
+  uniqueCards(items, seen, limit = 6) {
+    const out = [];
+    for (const card of toCards(items)) {
+      const key = normalizeTag(card.canonical || card.tag);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(card);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   groupedHtml(groups) {
@@ -593,7 +708,24 @@ export class TagAssistant {
     if (v.status === "error") return ctx + this.statusHtml("error");
     if (v.status === "loading") return ctx + this.statusHtml("loading");
     if (v.status === "empty") return ctx + this.statusHtml("empty");
-    return ctx + this.groupedHtml(v.groups);
+    const seen = new Set();
+    const nextRaw = (v.nextSteps || []).flatMap((step) => Array.isArray(step?.recommendations) ? step.recommendations : []);
+    const nextCards = this.uniqueCards(nextRaw, seen, 6);
+    const guidance = nextCards.length ? this.groupedHtml([{ section: "next_steps", label: "建议下一步", items: nextCards }]) : "";
+    const relatedGroups = [];
+    let relatedCount = 0;
+    for (const group of v.groups || []) {
+      const items = this.uniqueCards(group.items || [], seen, Math.max(0, 6 - relatedCount));
+      if (items.length) {
+        relatedGroups.push({ ...group, items });
+        relatedCount += items.length;
+      }
+      if (relatedCount >= 6) break;
+    }
+    const related = relatedGroups.length ? this.groupedHtml(relatedGroups) : "";
+    const alternatives = this.uniqueCards(v.alternatives || [], seen, 6);
+    const alternativeHtml = alternatives.length ? this.groupedHtml([{ section: "alternatives", label: "相似替代（仅替换，不直接追加）", items: alternatives }]) : "";
+    return ctx + guidance + related + alternativeHtml;
   }
 
   renderCatalog() {
@@ -609,7 +741,7 @@ export class TagAssistant {
             <button type="button" class="ta-node ${n.id === this.nodeId ? "active" : ""}" data-action="node" data-node="${esc(n.id)}"
               style="padding-left:${10 + n.depth * 12}px" title="${n.zh ? esc(n.zh) : ""}"
               aria-pressed="${n.id === this.nodeId}">
-              ${esc(n.label)}${n.seedTags.length ? ` <small class="ta-node-seed-count">${n.seedTags.length}</small>` : ""}
+              ${esc(n.zh || n.label)}${n.zh && n.label !== n.zh ? ` <small class="ta-node-en">${esc(n.label)}</small>` : ""}${n.seedTags.length ? ` <small class="ta-node-seed-count">${n.seedTags.length}</small>` : ""}
             </button>`).join("")}
         </div>
       </div>`).join("");

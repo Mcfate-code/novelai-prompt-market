@@ -92,3 +92,20 @@ test("persists cfg_rescale and auto_smea verbatim in saved image metadata", () =
     rmSync(libDir, { recursive: true, force: true });
   }
 });
+
+test("updateBatch binds missing error details as SQL NULL", () => {
+  const libDir = mkdtempSync(path.join(tmpdir(), "tags-market-store-"));
+  const store = new AssetStore(libDir);
+  try {
+    const id = store.createBatch({ name: "failed", config_json: "{}", total: 1 });
+    store.updateBatch(id, { status: "failed", error_code: undefined, error_message: "upstream failed", correlation_id: undefined, finished_at: Date.now() });
+    const batch = store.getBatch(id);
+    assert.equal(batch.status, "failed");
+    assert.equal(batch.error_code, null);
+    assert.equal(batch.correlation_id, null);
+    assert.equal(batch.error_message, "upstream failed");
+  } finally {
+    store.close();
+    rmSync(libDir, { recursive: true, force: true });
+  }
+});

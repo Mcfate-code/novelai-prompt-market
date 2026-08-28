@@ -16,6 +16,7 @@ const DEFAULTS = [
   "static/tag-assistant.js",
   "static/prompt-document.js",
   "static/prompt-tokenizer.js",
+  "static/pose-variation.js",
   "static/app.js",
 ];
 

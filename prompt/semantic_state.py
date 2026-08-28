@@ -21,6 +21,7 @@ EMPTY = "empty"
 PARTIAL = "partial"
 FILLED = "filled"
 FILLED_BY_AUTO_PRESET = "filled_by_auto_preset"
+SATISFIED_BY_ALTERNATIVE = "satisfied_by_alternative"
 
 SUBJECT_COUNT_SLOT = {
     "node_id": "base_subject_count",
@@ -352,6 +353,18 @@ def _build_base_slots(state: dict, conn, generation_config) -> list[SlotInfo]:
             evidence_tags=ev[:10], semantic_node=nid if is_filled else None,
             reason=f"已有 {', '.join(ev[:3])}" if is_filled else "尚未设置"))
 
+    # Indoor / Outdoor 是同一个 Environment 分支，不是两个必填槽位。
+    # 已选中一方时，将另一方标记为“由互斥分支满足”，但不伪造证据。
+    by_id = {slot.node_id: slot for slot in result}
+    indoor = by_id.get("env_indoor")
+    outdoor = by_id.get("env_outdoor")
+    if indoor and outdoor:
+        if indoor.status in (FILLED, FILLED_BY_AUTO_PRESET) and outdoor.status in (EMPTY, PARTIAL):
+            outdoor.status = SATISFIED_BY_ALTERNATIVE
+            outdoor.reason = "已选择室内环境，无需同时设置室外环境"
+        elif outdoor.status in (FILLED, FILLED_BY_AUTO_PRESET) and indoor.status in (EMPTY, PARTIAL):
+            indoor.status = SATISFIED_BY_ALTERNATIVE
+            indoor.reason = "已选择室外环境，无需同时设置室内环境"
     return result
 
 
@@ -450,7 +463,7 @@ def _build_scene_slots(state: dict) -> list[SlotInfo]:
     count = ctx.get("participant_count")
     count_exact = False
     try:
-        count_exact = int(count) == len(characters) and 1 <= int(count) <= 3
+        count_exact = int(count) == len(characters) and 1 <= int(count) <= 6
     except (TypeError, ValueError):
         pass
     participants = _slot("scene_participants", "Participants", "人物", _filled(count), [str(count or "")])
@@ -523,11 +536,11 @@ def build_semantic_state(structured_state, *, conn=None, generation_config=None,
 
     # Summary
     all_slots = list(base_slots) + [s for chars in character_slots for s in chars] + list(scene_slots)
-    filled = sum(1 for s in all_slots if s.status in (FILLED, FILLED_BY_AUTO_PRESET))
+    filled = sum(1 for s in all_slots if s.status in (FILLED, FILLED_BY_AUTO_PRESET, SATISFIED_BY_ALTERNATIVE))
     partial = sum(1 for s in all_slots if s.status == PARTIAL)
     empty = sum(1 for s in all_slots if s.status == EMPTY)
     missing = [s for s in all_slots if s.status in (EMPTY, PARTIAL)]
-    scene_filled = sum(1 for s in scene_slots if s.status in (FILLED, FILLED_BY_AUTO_PRESET))
+    scene_filled = sum(1 for s in scene_slots if s.status in (FILLED, FILLED_BY_AUTO_PRESET, SATISFIED_BY_ALTERNATIVE))
     scene_partial = sum(1 for s in scene_slots if s.status == PARTIAL)
     summary = {"filled": filled, "partial": partial, "empty": empty,
                "total": len(all_slots), "missing_slots": len(missing)}
@@ -539,4 +552,4 @@ def build_semantic_state(structured_state, *, conn=None, generation_config=None,
 
 
 __all__ = ["SlotInfo", "SemanticState", "build_semantic_state",
-           "EMPTY", "PARTIAL", "FILLED", "FILLED_BY_AUTO_PRESET"]
+           "EMPTY", "PARTIAL", "FILLED", "FILLED_BY_AUTO_PRESET", "SATISFIED_BY_ALTERNATIVE"]

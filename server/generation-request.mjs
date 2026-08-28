@@ -80,9 +80,11 @@ function normalizePosition(position) {
 
 function normalizeCharacter(character = {}) {
   return {
+    name: String(character.name || "").trim(),
     prompt: String(character.prompt || "").trim(),
     negative_prompt: String(character.negative_prompt ?? character.uc ?? "").trim(),
     position: normalizePosition(character.position),
+    enabled: booleanValue(character.enabled, true),
   };
 }
 
@@ -159,6 +161,28 @@ export function normalizeGenerationRequest(input = {}) {
   const characters = Array.isArray(input.characters)
     ? input.characters.map(normalizeCharacter).filter((character) => character.prompt)
     : [];
+  // 姿势批次：每个元素是一份已经独立编译好的 Prompt/角色结构。
+  // 旧客户端不传 variations 时保持原有“同 Prompt + 不同 seed”行为。
+  const variationInput = Array.isArray(input.variations) ? input.variations : [];
+  if (variationInput.length && variationInput.length !== count) {
+    throw new Error("姿势变体数量必须与批次数量一致");
+  }
+  const variations = variationInput.map((variation, index) => {
+    const value = variation && typeof variation === "object" ? variation : {};
+    const variationPrompt = String(value.prompt || "").trim();
+    if (!variationPrompt) throw new Error("第 " + (index + 1) + " 个姿势变体缺少提示词");
+    const variationCharacters = Array.isArray(value.characters)
+      ? value.characters.map(normalizeCharacter).filter((character) => character.prompt)
+      : characters;
+    return {
+      prompt: variationPrompt,
+      negative_prompt: String(value.negative_prompt ?? input.negative_prompt ?? "").trim(),
+      characters: variationCharacters,
+      pose_template_id: value.pose_template_id == null ? null : String(value.pose_template_id),
+      pose_fingerprint: value.pose_fingerprint == null ? null : String(value.pose_fingerprint),
+      structured_state: value.structured_state && typeof value.structured_state === "object" ? value.structured_state : null,
+    };
+  });
   let img2img = null;
   if (mode === "img2img") {
     const source = input.img2img && typeof input.img2img === "object" ? input.img2img : {};
@@ -202,6 +226,7 @@ export function normalizeGenerationRequest(input = {}) {
     settings: { ...settings, resolution_category: resolutionCategory || null },
     resolution_category: resolutionCategory || null,
     characters,
+    variations,
     img2img,
     references: [],
     count,
@@ -209,9 +234,16 @@ export function normalizeGenerationRequest(input = {}) {
   };
 }
 
-export function requestForSeed(request, seed) {
+export function requestForSeed(request, seed, index = 0) {
+  const variation = Array.isArray(request.variations) ? request.variations[index] : null;
   return {
     ...request,
+    prompt: variation?.prompt || request.prompt,
+    negative_prompt: variation?.negative_prompt ?? request.negative_prompt,
+    characters: variation?.characters || request.characters,
+    pose_template_id: variation?.pose_template_id ?? null,
+    pose_fingerprint: variation?.pose_fingerprint ?? null,
+    structured_state: variation?.structured_state ?? null,
     settings: { ...request.settings, seed },
     count: 1,
     meta: request.meta ?? null,
@@ -233,10 +265,15 @@ export function createGenerationRecipe(request, seed = request.settings.seed) {
     settings: { ...request.settings, seed },
     resolution_category: request.resolution_category || null,
     characters: request.characters.map((character) => ({
+      name: character.name || "",
       prompt: character.prompt,
       negative_prompt: character.negative_prompt,
       position: character.position ? { ...character.position } : null,
+      enabled: character.enabled !== false,
     })),
+    pose_template_id: request.pose_template_id ?? null,
+    pose_fingerprint: request.pose_fingerprint ?? null,
+    structured_state: request.structured_state ?? null,
     img2img: request.img2img ? {
       source_image_path: request.img2img.source_image_path,
       source_image_name: request.img2img.source_image_name,

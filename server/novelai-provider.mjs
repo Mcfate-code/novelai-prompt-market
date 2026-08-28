@@ -363,7 +363,9 @@ function centerFor(character) {
 
 function characterCaption(character, field) {
   return {
-    char_caption: field === "prompt" ? character.prompt : character.negative_prompt,
+    // 保留角色槽位以维持顺序，但停用角色不向 v4 caption 注入任何文本；
+    // characterPrompts.enabled 同时保留官网侧的显式开关语义。
+    char_caption: character.enabled === false ? "" : (field === "prompt" ? character.prompt : character.negative_prompt),
     centers: [centerFor(character)],
   };
 }
@@ -433,7 +435,9 @@ function buildV5Parameters(parameters, model, prompt, negativePrompt, characters
     prompt: character.prompt,
     uc: character.negative_prompt,
     center: centerFor(character),
-    enabled: true,
+    // 与官网 Character Prompt 开关一致：保留槽位和位置，但由 enabled
+    // 决定该角色是否参与本次生成。
+    enabled: character.enabled !== false,
   }));
 
   // V5 behavioral flags (match website defaults)

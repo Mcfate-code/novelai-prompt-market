@@ -275,6 +275,62 @@ CREATE TABLE IF NOT EXISTS gallery_parent (
     parent_json TEXT,
     PRIMARY KEY (dir_name, file_name)
 );
+
+-- 外部/本地元数据来源。只保存来源标识与经过筛选的少量元数据，不保存在线原图。
+CREATE TABLE IF NOT EXISTS template_source (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    license TEXT NOT NULL DEFAULT '',
+    metadata_hash TEXT NOT NULL UNIQUE,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_template_source_external ON template_source(source_type, external_id);
+
+-- 已蒸馏的姿势/构图模板；status=pending|approved|rejected|blocked。
+CREATE TABLE IF NOT EXISTS pose_template (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER REFERENCES template_source(id) ON DELETE SET NULL,
+    label TEXT NOT NULL,
+    participant_count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'pending',
+    confidence REAL NOT NULL DEFAULT 0,
+    completeness REAL NOT NULL DEFAULT 0,
+    fingerprint TEXT NOT NULL UNIQUE,
+    structure_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pose_template_status ON pose_template(status, participant_count, updated_at);
+
+CREATE TABLE IF NOT EXISTS pose_template_tag (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES pose_template(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'base',
+    slot TEXT NOT NULL DEFAULT 'optional_context',
+    weight REAL NOT NULL DEFAULT 1.0,
+    confidence REAL NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_pose_template_tag_template ON pose_template_tag(template_id, sort_order, id);
+
+CREATE TABLE IF NOT EXISTS template_review (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES pose_template(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    note TEXT NOT NULL DEFAULT '',
+    reviewer TEXT NOT NULL DEFAULT 'local_user',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_template_review_template ON template_review(template_id, updated_at);
 """
 
 
@@ -336,7 +392,7 @@ def init_db(db_path: str | Path | None = None) -> None:
                 "INSERT OR IGNORE INTO tag_conflict (tag_a, tag_b, reason, created_at) VALUES (?,?,?,?)",
                 (tag_a, tag_b, reason, now_iso()),
             )
-        conn.execute("PRAGMA user_version=4")
+        conn.execute("PRAGMA user_version=5")
         conn.commit()
     finally:
         conn.close()

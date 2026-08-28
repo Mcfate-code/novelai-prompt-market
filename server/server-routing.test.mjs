@@ -82,6 +82,9 @@ test("serves /static assets and proxies V2 API routes to Python", async (t) => {
     { path: "/api/gallery/item", method: "POST", body: JSON.stringify({ image_base64: "Zm9v", dir_name: "nai_generated", mime: "image/png" }) },
     { path: "/api/presets", method: "GET", body: "" },
     { path: "/api/sync", method: "POST", body: JSON.stringify({ cursor: 42 }) },
+    { path: "/api/runtime-info", method: "GET", body: "" },
+    { path: "/api/templates?status=approved", method: "GET", body: "" },
+    { path: "/api/templates/7", method: "GET", body: "" },
   ];
   for (const request of requests) {
     const response = await fetch(`http://127.0.0.1:${panelPort}${request.path}`, {

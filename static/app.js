@@ -1,5 +1,7 @@
 "use strict";
 import { splitPromptTokens, joinPromptTokens, tokenRangeAtCaret, serializePromptToken } from "./prompt-tokenizer.js";
+import { QUALITY_PRESETS, UC_PRESETS } from "./prompt-compiler.js";
+import { buildPosePlans, POSE_LIBRARY, poseFingerprint } from "./pose-variation.js";
 
 // ===== 状态 =====
 const SECTION_IDS = ["character", "appearance", "clothing", "expression", "action", "composition", "scene", "style", "quality", "other"];
@@ -12,7 +14,11 @@ const promptDocumentReady = import("/static/prompt-document.js").then((module) =
 function emptySections() { return promptDocument.emptySections(); }
 function emptyPromptState() { return promptDocument.createEmpty(); }
 function normalizeEntry(value, section = "other", extra = {}) { return promptDocument.normalizeEntry(value, section, extra); }
-function migratePromptState(raw) { return promptDocument.normalize(raw); }
+function migratePromptState(raw) {
+  const normalized = promptDocument.normalize(raw);
+  // 工作台读取旧草稿 / 导入文档时即修复 Base 中的姿势与角色状态归属。
+  return promptDocument.migrateBasePoseState(normalized);
+}
 
 const state = { model: "v5", target: "base", prompt: null, characters: [], base: [], global_uc: [], free_text: "", categories: [], activeCategory: null, activeDbCat: null, view: "browse", favorites: new Set(), recent: [], models: [], history: [] };
 const promptSubscribers = new Set();
@@ -35,10 +41,15 @@ const promptBridgeTarget = resolveDisplayTarget;
 function dispatchPromptAction(action = {}) {
   if (!promptDocument || !state.prompt) return state.prompt;
   const payload = action.payload || {};
-  const target = resolveMutationTarget(payload.target || state.target);
+  // APPLY_POSE_VARIATION 是整份 PromptDocument 的原子操作；"characters"
+  // 是它的逻辑作用域，不是 char:N 目标。若按普通目标解析会得到 null，
+  // 直接静默 return，导致工作台 / Scene Builder 点击换姿势后提示词完全不变。
+  const target = action.type === "APPLY_POSE_VARIATION" && payload.target === "characters"
+    ? "base"
+    : resolveMutationTarget(payload.target || state.target);
   if (!target) return state.prompt;
   if (action.type === "ADD_TAG" && !String(payload.tag || "").trim()) return state.prompt;
-    if (!["ADD_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP", "SCENE_PROPOSAL", "APPLY_INTERACTION", "REMOVE_INTERACTION"].includes(action.type)) return state.prompt;
+  if (!["ADD_TAG", "REPLACE_SLOT_TAG", "REMOVE_TAG", "UPDATE_ENTRY", "SET_WEIGHT", "MOVE_SECTION", "RECONCILE_TEXT", "ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_ENABLED", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SET_ASSISTANT_CONTEXT", "SET_EXCLUSIVE_GROUP", "SCENE_PROPOSAL", "APPLY_INTERACTION", "REMOVE_INTERACTION", "APPLY_POSE_VARIATION", "RESTORE_DOCUMENT"].includes(action.type)) return state.prompt;
   // RECONCILE_TEXT 不逐键 pushHistory：一次编辑会话只压一个快照（见 #nai-editor focus/blur 事务）。
   if (action.type !== "RECONCILE_TEXT") pushHistory();
   const remapTarget = (target, type, from, to) => {
@@ -61,26 +72,32 @@ function dispatchPromptAction(action = {}) {
       }, section);
       break;
     }
+    case "REPLACE_SLOT_TAG": {
+      const tag = String(payload.tag || "").trim();
+      if (!tag) { state.history.pop(); return state.prompt; }
+      state.prompt = promptDocument.replaceSlotTag(state.prompt, target, { tag, section: payload.section || "other" }, payload.section || "other", payload.replaceTags || []);
+      break;
+    }
     case "REMOVE_TAG": state.prompt = promptDocument.removeTag(state.prompt, target, payload.entryId); break;
     case "UPDATE_ENTRY": state.prompt = promptDocument.updateEntry(state.prompt, target, payload.entryId, payload.patch || {}); break;
     case "SET_WEIGHT": state.prompt = promptDocument.updateEntry(state.prompt, target, payload.entryId, { weight: Number(payload.weight) }); break;
     case "MOVE_SECTION": state.prompt = promptDocument.updateEntry(state.prompt, target, payload.entryId, { section: payload.section }); break;
     case "RECONCILE_TEXT": state.prompt = promptDocument.reconcileTargetText(state.prompt, target, payload.text || "", new Map(knownCatalogTags)); break;
     case "ADD_CHARACTER": {
-      if (state.prompt.characters.length >= 3) { state.history.pop(); return state.prompt; }
+      if (state.prompt.characters.length >= 6) { state.history.pop(); return state.prompt; }
       state.prompt = promptDocument.addCharacter(state.prompt, payload);
       state.prompt = promptDocument.setAssistantContext(state.prompt, { participant_count: state.prompt.characters.length });
       break;
     }
     case "REMOVE_CHARACTER": {
       const idx = Number(payload.index);
-      if (idx !== state.prompt.characters.length - 1 || promptDocument.characterHasContent(state.prompt.characters[idx], idx)) { state.history.pop(); notifyPromptSubscribers({ type: "SCENE_WARNING", payload: { message: `Character ${idx + 1} 仍有内容` } }); return state.prompt; }
       state.prompt = promptDocument.removeCharacter(state.prompt, idx);
       state.prompt = promptDocument.setAssistantContext(state.prompt, { participant_count: state.prompt.characters.length });
       break;
     }
     case "MOVE_CHARACTER": state.prompt = promptDocument.moveCharacter(state.prompt, payload.fromIndex, payload.toIndex); break;
     case "RENAME_CHARACTER": state.prompt = promptDocument.renameCharacter(state.prompt, payload.index, payload.name); break;
+    case "SET_CHARACTER_ENABLED": state.prompt = promptDocument.setCharacterEnabled(state.prompt, payload.index, payload.enabled); break;
     case "SET_CHARACTER_POSITION": state.prompt = promptDocument.setCharacterPosition(state.prompt, payload.index, payload.position); break;
     case "APPLY_AUTO_SPLIT": {
       // 一次 proposal -> PromptDocument 整体替换 -> 单次 notify；不逐 tag dispatch。
@@ -94,25 +111,46 @@ function dispatchPromptAction(action = {}) {
     case "SCENE_PROPOSAL": {
       if (payload.kind !== "sync_participants") { state.history.pop(); return state.prompt; }
       const result = promptDocument.syncSceneParticipants(state.prompt, payload.count);
-      if (!result.ok) { state.history.pop(); notifyPromptSubscribers({ type: "SCENE_WARNING", payload: { message: result.blockedIndices.map((idx) => `Character ${idx + 1} 仍有内容`).join("；"), blockedIndices: result.blockedIndices } }); return state.prompt; }
+      if (!result.ok) { state.history.pop(); notifyPromptSubscribers({ type: "SCENE_WARNING", payload: { message: result.blockedIndices.map((idx) => `角色 ${idx + 1} 仍有内容`).join("；"), blockedIndices: result.blockedIndices } }); return state.prompt; }
       state.prompt = result.document;
       break;
     }
     case "APPLY_INTERACTION": state.prompt = promptDocument.applyInteraction(state.prompt, payload.interaction || payload); break;
     case "REMOVE_INTERACTION": state.prompt = promptDocument.removeInteraction(state.prompt, payload.id); break;
+    case "APPLY_POSE_VARIATION": state.prompt = promptDocument.applyPoseVariation(state.prompt, payload); break;
+    case "RESTORE_DOCUMENT": {
+      if (!payload.document || typeof payload.document !== "object") { state.history.pop(); return state.prompt; }
+      // 旧快照 / 外部导入可能把姿势和角色状态放在 Base；恢复时统一归类到角色卡。
+      state.prompt = promptDocument.migrateBasePoseState(promptDocument.normalize(payload.document));
+      break;
+    }
   }
   if (action.type === "REMOVE_CHARACTER") state.target = remapTarget(state.target, "remove", Number(payload.index));
   if (action.type === "MOVE_CHARACTER") state.target = remapTarget(state.target, "move", Number(payload.fromIndex), Number(payload.toIndex));
+  // 生图角色 Tab 与 PromptDocument 使用同一组下标；删除/移动后同步当前目标，
+  // 避免激活态跳到错误角色或继续指向已删除的角色。
+  if (action.type === "REMOVE_CHARACTER" || action.type === "MOVE_CHARACTER") {
+    remapNaiCharacterSelection(
+      action.type === "REMOVE_CHARACTER" ? "remove" : "move",
+      Number(action.type === "REMOVE_CHARACTER" ? payload.index : payload.fromIndex),
+      Number(payload.toIndex),
+    );
+  }
   // RECONCILE_TEXT 走轻量提交：不重建购物车 DOM、不触发推荐/冲突网络请求（编辑器 UI 由
   // PromptBridge 订阅者 renderWorkbenchEditorFromDocument 更新，且聚焦时跳过）。
-  if (action.type === "RECONCILE_TEXT") commitPromptChange({ render: false, refresh: false });
-  else commitPromptChange({ refresh: true });
-  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "RENAME_CHARACTER", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SCENE_PROPOSAL"].includes(action.type)) {
+  if (action.type === "RECONCILE_TEXT") commitPromptChange({ render: false, refresh: false, action });
+  else commitPromptChange({ refresh: true, action });
+  if (["ADD_CHARACTER", "REMOVE_CHARACTER", "MOVE_CHARACTER", "SET_CHARACTER_ENABLED", "SET_CHARACTER_POSITION", "APPLY_AUTO_SPLIT", "SCENE_PROPOSAL", "RESTORE_DOCUMENT"].includes(action.type)) {
     rebuildTargetSelect();
     if (typeof naiRenderCharacters === "function") {
       syncNaiCharactersFromState();
       naiRenderCharacters();
     }
+  }
+  if (action.type === "RENAME_CHARACTER") {
+    rebuildTargetSelect();
+    syncNaiCharactersFromState();
+    if (typeof renderNaiCharacterTabs === "function") renderNaiCharacterTabs();
   }
   return state.prompt;
 }
@@ -141,8 +179,9 @@ let activeWorkspaceTarget = "base"; // 高级购物车当前 Tab：'base' | 角�
 let workspaceSectionFilter = "";    // '' = 全部分区，或 SECTION_IDS 之一
 let workspaceShowEmpty = false;     // 显示空分区（默认关）
 let activeNaiTarget = "base";       // 生图视图角色 Tab：'base' | 角色索引（number）
-// Workbench 单一编辑器视图模型：mode ∈ text|visual|scene；pane ∈ prompt|uc；charIndex = null(base) | number。
+// 生图工作台保持单一文本编辑器；推荐 / 图形化 / Scene 放在标签超市。
 let workbenchMode = "text";
+let marketBuilderMode = "catalog";
 let workbenchPane = "prompt";
 let workbenchCharIndex = null;       // null = Base；number = 角色下标
 let editTransactionSnapshot = null;  // 一次编辑会话（focus→blur）只压一个 undo 快照
@@ -197,7 +236,7 @@ const cssEsc = (s) => {
 function flattenSections(sections) { return SECTION_IDS.flatMap((id) => (sections?.[id] || []).map((e) => ({ ...e, strength: e.weight === 1 ? null : e.weight, brackets: 0, relation: null }))); }
 function syncLegacyProjection() {
   state.base = flattenSections(state.prompt.sections);
-  state.characters = state.prompt.characters.map((ch) => ({ name: ch.name, prompt: flattenSections(ch.prompt_sections), uc: flattenSections(ch.uc_sections), position: ch.position || null }));
+  state.characters = state.prompt.characters.map((ch) => ({ name: ch.name, prompt: flattenSections(ch.prompt_sections), uc: flattenSections(ch.uc_sections), position: ch.position || null, enabled: ch.enabled !== false }));
   state.global_uc = flattenSections(state.prompt.global_uc_sections);
   state.free_text = state.prompt.free_text;
 }
@@ -249,12 +288,22 @@ function effectiveFreeText() {
   return state.prompt.use_free_text_en && state.prompt.free_text_en.trim() ? state.prompt.free_text_en.trim() : state.prompt.free_text.trim();
 }
 function negativePreviewText() { return negativePromptEntries().map(weightText).join(", "); }
-const refreshPromptServices = debounce(() => { loadRecommendations(); loadConflicts(); }, 250);
-function commitPromptChange({ render = true, refresh = true } = {}) {
+// 推荐由当前激活的 Workbench 组件统一负责。旧版 loadRecommendations 会与
+// Tag Assistant / Visual / Scene 同时请求同一接口，导致一次编辑产生多条并发请求。
+const refreshPromptServices = debounce(() => { loadConflicts(); }, 250);
+function commitPromptChange({ render = true, refresh = true, action = null } = {}) {
+  // A prepared pose batch is a snapshot of the current document. Any other
+  // mutation invalidates it; applying a pose variation itself is the one
+  // mutation that intentionally keeps the batch alive.
+  const preservesPoseBatch = action?.type === "APPLY_POSE_VARIATION" && action?.payload?.source === "workbench";
+  if (typeof naiPoseBatch !== "undefined" && naiPoseBatch && !preservesPoseBatch) naiPoseBatch = null;
+  // 所有写入都先更新旧版投影；Preset/Export 等兼容入口不能继续读到旧角色名
+  // 或旧的启用状态，而 PromptDocument 仍是唯一权威来源。
+  syncLegacyProjection();
   persistDraft();
   if (render) renderCart();
   if (refresh) refreshPromptServices();
-  notifyPromptSubscribers();
+  notifyPromptSubscribers(action);
 }
 
 // ===== 用户设置 =====
@@ -341,7 +390,9 @@ async function saveUserSettings() {
     }
     userSettings = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
     window.WorkbenchComponents?.nsfwBuilder?.setAdolescentMode(!!userSettings.adolescent_mode);
-    window.WorkbenchMode?.set(workbenchMode);
+    const poseButton = document.getElementById("nai-pose-next");
+    if (poseButton) poseButton.hidden = !!userSettings.adolescent_mode;
+    window.WorkbenchMode?.set(marketBuilderMode);
     naiSyncResolutionFromInputs();
     closeSettings();
     await loadNaiApiStatus();
@@ -385,13 +436,14 @@ async function clearNovelAIExampleCache() {
 
 // ===== 目标槽位 =====
 function targetOptions() {
-  const opts = [{ value: "base", label: "Base Prompt" }, { value: "global_uc", label: "Global UC" }];
+  const opts = [{ value: "base", label: "基础提示词" }, { value: "global_uc", label: "全局负面词" }];
   // 角色目标必须与 cartAdvanced 无关地派生自权威 PromptDocument（state.prompt.characters），
   // 否则 setActiveTarget('char:N') 后 rebuildTargetSelect() 会把 state.target 重置回 'base'，
   // PromptBridge.getActiveTarget() 永远拿不到角色目标（破坏 Visual/Scene/模板捕获）。
   (state.prompt?.characters || []).forEach((ch, i) => {
-    opts.push({ value: `char:${i}`, label: `${ch.name || "Character " + (i + 1)} Prompt` });
-    opts.push({ value: `char:${i}:uc`, label: `${ch.name || "Character " + (i + 1)} UC` });
+    const name = displayCharacterName(ch, i);
+    opts.push({ value: `char:${i}`, label: `${name} 提示词` });
+    opts.push({ value: `char:${i}:uc`, label: `${name} 负面词` });
   });
   return opts;
 }
@@ -462,23 +514,25 @@ function naiResolveRestoredPrompt(rawPrompt, rawNegative, savedCharacters) {
   const parsed = window.NaiStructured.parseStructuredRawPrompt(rawPrompt, rawNegative);
   if (parsed) {
     const characters = charactersSrc.length
-      ? charactersSrc.map((character) => ({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: character.position ? { ...character.position } : null }))
-      : parsed.characters.map((character) => ({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: null }));
+      ? charactersSrc.map((character, index) => ({ name: character.name || `Character ${index + 1}`, prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: character.position ? { ...character.position } : null, enabled: character.enabled !== false }))
+      : parsed.characters.map((character, index) => ({ name: character.name || `Character ${index + 1}`, prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: null, enabled: true }));
     return { basePrompt: parsed.basePrompt, globalUc: parsed.globalUc, characters };
   }
   return {
     basePrompt: rawPrompt != null ? rawPrompt : null,
     globalUc: rawNegative != null ? rawNegative : null,
-    characters: charactersSrc.length ? charactersSrc.map((character) => ({ prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: character.position ? { ...character.position } : null })) : null,
+    characters: charactersSrc.length ? charactersSrc.map((character, index) => ({ name: character.name || `Character ${index + 1}`, prompt: character.prompt || "", negative_prompt: character.negative_prompt || "", position: character.position ? { ...character.position } : null, enabled: character.enabled !== false })) : null,
   };
 }
 // naiCharacters 是 state.prompt.characters 的 view adapter（单一权威来源 = PromptDocument）。
 // 仅在权威状态变化后（dispatch / restore / 进入生图视图）单向同步；不引入第二份权威状态。
 function syncNaiCharactersFromState() {
   naiCharacters = (state.prompt?.characters || []).map((character, index) => ({
+    name: character.name || `Character ${index + 1}`,
     prompt: promptDocument.serializeTarget(state.prompt, `char:${index}`),
     negative_prompt: promptDocument.serializeTarget(state.prompt, `char:${index}:uc`),
     position: character.position || null,
+    enabled: character.enabled !== false,
   }));
 }
 
@@ -572,7 +626,7 @@ function renderNaiAutocomplete() {
     const zh = item.zh || "";
     const count = abbreviateCount(item.post_count);
     const viaAlias = /别名/.test(item.match_reason || "");
-    const second = [zh, count, viaAlias ? "via 别名" : ""].filter(Boolean).join(" · ");
+    const second = [zh, count, viaAlias ? "别名命中" : ""].filter(Boolean).join(" · ");
     return `<div role="option" data-autocomplete-index="${i}" aria-selected="${i === selected}"><span class="ac-tag">${esc(item.tag)}</span><small>${esc(second)}</small></div>`;
   }).join("");
   const hint = (typeof window !== "undefined" && window.NaiInputKeys) ? window.NaiInputKeys.buildHintHtml() : "";
@@ -665,14 +719,28 @@ function remapNaiTagTarget(target, op, a, b) {
   return target;
 }
 
+function remapNaiCharacterSelection(op, a, b = null) {
+  const remapIndex = (value) => {
+    if (value === "base" || value == null) return value;
+    const n = Number(value);
+    if (!Number.isInteger(n)) return "base";
+    if (op === "remove") return n === a ? "base" : (n > a ? n - 1 : n);
+    if (n === a) return b;
+    if (n === b) return a;
+    return n;
+  };
+  activeNaiTarget = remapIndex(activeNaiTarget);
+  workbenchCharIndex = activeNaiTarget === "base" ? null : Number(activeNaiTarget);
+}
+
 function rebuildNaiTagTarget() {
   const sel = $("#nai-tag-target");
   if (!sel) return;
   // 权威来源 = PromptDocument（state.prompt.characters），绝不依赖 view adapter naiCharacters，
   // 否则页面加载时 naiCharacters 尚未同步（undefined）会让 init() 抛错中断。
   const characters = (state.prompt?.characters || []);
-  const options = [`<option value="base">Base / Scene</option>`];
-  characters.forEach((_, i) => options.push(`<option value="char:${i}">Character ${i + 1}</option>`));
+  const options = [`<option value="base">基础 / 场景</option>`];
+  characters.forEach((_, i) => options.push(`<option value="char:${i}">角色 ${i + 1}</option>`));
   sel.innerHTML = options.join("");
   const m = String(state.target || "").match(/^char:(\d+)$/);
   if (m && characters[Number(m[1])]) {
@@ -713,12 +781,17 @@ async function init() {
 
 async function mountWorkbenchComponents() {
   const [assistantModule, builderModule, nsfwModule] = await Promise.all([import("/static/tag-assistant.js"), import("/static/visual-builder.js"), import("/static/nsfw-builder.js")]);
-  const assistant = assistantModule.createTagAssistant({ root: $("#tag-assistant-root"), bridge: window.PromptBridge });
+  const assistant = assistantModule.createTagAssistant({
+    root: $("#tag-assistant-root"), bridge: window.PromptBridge, active: false,
+    getGenerationConfig: () => ({ positiveTier: naiPositiveTier }),
+    getMode: () => userSettings.adolescent_mode ? "general" : (marketBuilderMode === "scene" ? "adult" : "general"),
+  });
   const builder = builderModule.createVisualBuilder({
     root: $("#visual-prompt-root"),
     bridge: window.PromptBridge,
+    active: false,
     getGenerationConfig: () => ({ positiveTier: naiPositiveTier }),
-    getMode: () => userSettings.adolescent_mode ? "general" : (workbenchMode === "scene" ? "adult" : "general"),
+    getMode: () => userSettings.adolescent_mode ? "general" : (marketBuilderMode === "scene" ? "adult" : "general"),
   });
   assistant.mount();
   builder.mount();
@@ -728,6 +801,7 @@ async function mountWorkbenchComponents() {
     nsfwBuilder = nsfwModule.createNsfwBuilder({
       root: $("#nsfw-builder-root"),
       bridge: window.PromptBridge,
+      active: false,
       adolescentMode: !!userSettings.adolescent_mode,
       mode: "adult",
       participants: options.participants || [],
@@ -743,45 +817,60 @@ async function mountWorkbenchComponents() {
       interactionActions: options.interactionActions || [],
       bodyFocus: options.bodyFocus || [],
       compositions: options.compositions || [],
+      poseTemplates: options.poseTemplates || [],
       getGenerationConfig: () => ({ positiveTier: naiPositiveTier }),
     });
     nsfwBuilder.mount();
   } catch (e) {
     // 候选加载失败仍挂载（仅内置 participants/stage + 推荐），不影响其它组件
-    nsfwBuilder = nsfwModule.createNsfwBuilder({ root: $("#nsfw-builder-root"), bridge: window.PromptBridge, adolescentMode: !!userSettings.adolescent_mode, mode: "adult" });
+    nsfwBuilder = nsfwModule.createNsfwBuilder({ root: $("#nsfw-builder-root"), bridge: window.PromptBridge, active: false, adolescentMode: !!userSettings.adolescent_mode, mode: "adult" });
     nsfwBuilder.mount();
   }
   window.WorkbenchComponents = { assistant, builder, nsfwBuilder };
   const switcher = $("#prompt-mode-switch");
+  const syncActivity = () => {
+    const marketVisible = !["generate", "gallery"].includes(state.view);
+    assistant.setActive?.(marketVisible && marketBuilderMode === "text");
+    builder.setActive?.(marketVisible && marketBuilderMode === "visual");
+    nsfwBuilder?.setActive?.(marketVisible && marketBuilderMode === "scene");
+  };
   const setMode = (mode) => {
+    if (!["catalog", "text", "visual", "scene"].includes(mode)) mode = "catalog";
     if (mode === "scene" && userSettings.adolescent_mode) mode = "text"; // 青少年模式隐藏 Scene
-    endEditTransaction(); // 模式切换结束上一次编辑会话
-    workbenchMode = mode;
+    marketBuilderMode = mode;
     switcher?.querySelectorAll("[data-prompt-mode]").forEach((button) => {
       button.classList.toggle("active", button.dataset.promptMode === mode);
+      button.setAttribute("aria-selected", String(button.dataset.promptMode === mode));
       if (button.dataset.promptMode === "scene") button.hidden = !!userSettings.adolescent_mode;
     });
+    const isCatalog = mode === "catalog";
     const isText = mode === "text";
     const isVisual = mode === "visual";
     const isScene = mode === "scene";
-    // Base / C1 / C2 是 Generate 工作台的持久正面目标栏；UC 仍仅由 Text Prompt/UC pane 控制。
-    $("#nai-editor").hidden = !isText;
-    $(".nai-prompt-meta")?.toggleAttribute("hidden", !isText);
-    $("#nai-free-text-collapse")?.toggleAttribute("hidden", !isText);
-    document.querySelector(".nai-tabs")?.toggleAttribute("hidden", !isText);
+    // 生图工作台的 Base / 角色目标栏始终可见；超市工具切换不应改写它。
     $("#nai-character-tabs")?.removeAttribute("hidden");
-    $("#nai-character-list")?.toggleAttribute("hidden", !isText);
+    $("#market-catalog-root").hidden = !isCatalog;
+    $("#market-builder-root").hidden = isCatalog;
     $("#tag-assistant-root").hidden = !isText;
-    // Visual / Scene 独占
     $("#visual-prompt-root").hidden = !isVisual;
     $("#nsfw-builder-root").hidden = !isScene;
-    if (isText) renderWorkbenchEditorFromDocument({ force: true });
+    const labels = { catalog: "标签目录", text: "提示词推荐", visual: "图形化构建", scene: "成人场景构建" };
+    if ($("#browse-title")) $("#browse-title").textContent = labels[mode] || "标签目录";
+    syncActivity();
   };
   switcher?.addEventListener("click", (event) => { const button = event.target.closest("[data-prompt-mode]"); if (button) setMode(button.dataset.promptMode); });
-  setMode("text");
-  window.WorkbenchMode = { set: setMode };
-  // PromptDocument 变化 → 单一编辑器回流：编辑器聚焦时由 GUARD 跳过，避免打字被重写。
-  window.PromptBridge.subscribe(() => renderWorkbenchEditorFromDocument());
+  setMode("catalog");
+  syncCharacterTabsPlacement();
+  window.WorkbenchMode = { set: setMode, syncActivity };
+  // PromptDocument 变化 → 单一编辑器和“实际发送内容”同步回流。
+  // 即使在超市里加标签，进入生图前的预览也不能停留在旧 Prompt。
+  window.PromptBridge.subscribe((_doc, action) => {
+    // 用户在准备批次后又手动改了 Prompt，旧计划必须失效，避免把过期
+    // 的姿势应用到新角色/新画风上；APPLY_POSE_VARIATION 自身除外。
+    if (action?.type && action.type !== "SET_ACTIVE_TARGET" && !(action.type === "APPLY_POSE_VARIATION" && action.payload?.source === "workbench")) naiPoseBatch = null;
+    renderWorkbenchEditorFromDocument();
+    naiUpdateEffectivePreview();
+  });
 }
 
 async function loadPromptSections() {
@@ -920,7 +1009,7 @@ async function openCatalog(cid, page = 1, opts = {}) {
 
 function tagCardHtml(t) {
   const fav = state.favorites.has(t.tag);
-  const meta = t.post_count ? `Danbooru posts: ${t.post_count.toLocaleString()}` : (t.is_deprecated ? "deprecated" : "");
+  const meta = t.post_count ? `Danbooru 投稿：${t.post_count.toLocaleString()}` : (t.is_deprecated ? "已弃用" : "");
   const abbrev = t.post_count ? abbreviateCount(t.post_count) : "";
   return `<div class="tag-card ${t.is_deprecated ? "tag-deprecated" : ""}" data-tag="${esc(t.tag)}">` +
     `<div class="tag-thumb-wrap" data-thumb-wrap="${esc(t.tag)}"><img class="tag-thumb" data-thumb="${esc(t.tag)}" alt="" loading="lazy" decoding="async" /></div>` +
@@ -928,8 +1017,8 @@ function tagCardHtml(t) {
     `<button class="fav-toggle ${fav ? "on" : ""}" data-fav="${esc(t.tag)}" title="${fav ? "取消收藏" : "收藏"}">${fav ? "★" : "☆"}</button>` +
     `<div class="tag-en">${esc(t.tag)}</div>` +
     (t.zh ? `<div class="tag-zh">${esc(t.zh)}</div>` : "") +
-    (abbrev ? `<div class="tag-count" title="Danbooru posts: ${esc(String(t.post_count.toLocaleString()))}">${esc(abbrev)}</div>` : "") +
-    `<div class="tag-meta">${esc(meta || "General")}</div>` +
+    (abbrev ? `<div class="tag-count" title="Danbooru 投稿：${esc(String(t.post_count.toLocaleString()))}">${esc(abbrev)}</div>` : "") +
+    `<div class="tag-meta">${esc(meta || "通用")}</div>` +
     `<span class="tag-add-hint" aria-hidden="true">+</span>` +
     (t.match_reason ? `<div class="match-reason">${esc(t.match_reason)}</div>` : "") +
     `</div>`;
@@ -1430,7 +1519,7 @@ function sectionDetailsHtml(sections, slotKey) {
     entries.forEach((e) => { if (e.bundle_id) groups.set(String(e.bundle_id), { name: e.bundle_name || "标签模板", count: entries.filter((x) => String(x.bundle_id) === String(e.bundle_id)).length }); });
     let lastBundle = null;
     const chips = entries.map((e) => {
-      const group = e.bundle_id && String(e.bundle_id) !== lastBundle ? `<div class="bundle-marker">[${esc(e.bundle_name || "标签模板")} · ${groups.get(String(e.bundle_id))?.count || 1} tags]</div>` : "";
+      const group = e.bundle_id && String(e.bundle_id) !== lastBundle ? `<div class="bundle-marker">[${esc(e.bundle_name || "标签模板")} · ${groups.get(String(e.bundle_id))?.count || 1} 个标签]</div>` : "";
       lastBundle = e.bundle_id ? String(e.bundle_id) : null;
       return group + entryHtml(e, slotKey);
     }).join("");
@@ -1449,31 +1538,36 @@ function compactEntryHtml(entry, slotKey, prefix = "") {
 function compactEntriesHtml() {
   const groups = [{ slot: "base", label: "", entries: flattenSections(state.prompt.sections) }];
   state.prompt.characters.forEach((character, index) => groups.push({
-    slot: `char:${index}`, label: character.name || `角色 ${index + 1}`, entries: flattenSections(character.prompt_sections),
+    slot: `char:${index}`, label: displayCharacterName(character, index), entries: flattenSections(character.prompt_sections),
   }));
   const entries = groups.flatMap((group) => group.entries.map((entry) => compactEntryHtml(entry, group.slot, group.label)));
-  return entries.length ? entries.join("") : `<div class="compact-empty">从左侧点选标签，即可加入 Prompt</div>`;
+  return entries.length ? entries.join("") : `<div class="compact-empty">从左侧点选标签，即可加入提示词</div>`;
 }
 
 function compactUcHtml() {
   const groups = [{ slot: "global_uc", label: "", entries: flattenSections(state.prompt.global_uc_sections) }];
   state.prompt.characters.forEach((character, index) => groups.push({
-    slot: `char:${index}:uc`, label: character.name || `角色 ${index + 1}`, entries: flattenSections(character.uc_sections),
+    slot: `char:${index}:uc`, label: displayCharacterName(character, index), entries: flattenSections(character.uc_sections),
   }));
   const entries = groups.flatMap((group) => group.entries.map((entry) => compactEntryHtml(entry, group.slot, group.label)));
   return entries.length ? entries.join("") : `<div class="compact-empty">暂无 UC 标签</div>`;
 }
 
 // ===== Prompt Workspace（高级购物车：Tab + 单一目标编辑器） =====
+function displayCharacterName(character, index) {
+  const name = String(character?.name || "").trim();
+  const generic = `角色 ${Number(index) + 1}`;
+  return !name || name === generic || name === `Character ${Number(index) + 1}` ? generic : name;
+}
 function targetLabel(target) {
-  if (target === "base") return "Base";
-  if (target === "global_uc") return "Global UC";
+  if (target === "base") return "基础";
+  if (target === "global_uc") return "全局负面词";
   const m = String(target || "").match(/^char:(\d+)(:uc)?$/);
   if (m) {
     const ch = state.prompt.characters[+m[1]];
-    return (ch?.name || `Character ${+m[1] + 1}`) + (m[2] ? " UC" : "");
+    return displayCharacterName(ch, +m[1]) + (m[2] ? " 负面词" : "");
   }
-  return "Base";
+  return "基础";
 }
 function workspaceTargetKey() {
   return activeWorkspaceTarget === "base" ? "base" : `char:${activeWorkspaceTarget}`;
@@ -1485,9 +1579,9 @@ function workspaceTabToTarget(tabValue) {
   return String(tabValue) === "base" ? "base" : `char:${Number(tabValue)}`;
 }
 function workspaceTargetName() {
-  if (activeWorkspaceTarget === "base") return "Base";
+  if (activeWorkspaceTarget === "base") return "基础";
   const ch = state.prompt.characters[activeWorkspaceTarget];
-  return ch?.name || `Character ${Number(activeWorkspaceTarget) + 1}`;
+  return displayCharacterName(ch, activeWorkspaceTarget);
 }
 function workspacePromptTagsText(key) {
   if (key === "base") return flattenSections(state.prompt.sections).map(weightText).join(", ");
@@ -1553,9 +1647,9 @@ function renderWorkspace() {
   const el = $("#cart");
   const key = workspaceTargetKey();
   const isBase = activeWorkspaceTarget === "base";
-  let tabs = `<button class="workspace-tab ${activeWorkspaceTarget === "base" ? "active" : ""}" data-ws-tab="base">Base</button>`;
+  let tabs = `<button class="workspace-tab ${activeWorkspaceTarget === "base" ? "active" : ""}" data-ws-tab="base">基础</button>`;
   state.prompt.characters.forEach((ch, i) => {
-    tabs += `<button class="workspace-tab ${activeWorkspaceTarget === i ? "active" : ""}" data-ws-tab="${i}">${esc(ch.name || `Character ${i + 1}`)}<span class="workspace-tab-remove" data-ws-rm="${i}" title="移除角色">×</span></button>`;
+    tabs += `<button class="workspace-tab ${activeWorkspaceTarget === i ? "active" : ""}" data-ws-tab="${i}">${esc(displayCharacterName(ch, i))}<span class="workspace-tab-remove" data-ws-rm="${i}" title="移除角色">×</span></button>`;
   });
   tabs += `<button class="workspace-tab workspace-tab-add" data-ws-add title="添加角色">+</button>`;
   const ucCount = workspaceUcCount(key);
@@ -1563,11 +1657,11 @@ function renderWorkspace() {
   const html =
     `<div class="workspace-tabs">${tabs}</div>` +
     `<div class="workspace-editor">` +
-      `<textarea id="ws-prompt" class="ws-prompt" placeholder="${isBase ? "Base prompt：标签 + 自然语言补充…" : "角色提示词…"}">${esc(workspaceFullText(key))}</textarea>` +
+      `<textarea id="ws-prompt" class="ws-prompt" placeholder="${isBase ? "基础提示词：标签 + 自然语言补充…" : "角色提示词…"}">${esc(workspaceFullText(key))}</textarea>` +
       `<div class="ws-section-filter">${workspaceFilterHtml(key)}</div>` +
       `<div class="ws-sections" id="ws-sections">${workspaceChipsHtml(key)}</div>` +
       `<details class="ws-collapse"><summary><span>▸ UC（${ucCount}）</span></summary><div class="ws-collapse-body"><div class="ws-section-chips" id="ws-uc-chips">${ucChipsHtml(workspaceUcKey(key))}</div></div></details>` +
-      `<details class="ws-collapse"><summary><span>▸ Effective Prompt</span></summary><div class="ws-collapse-body"><pre id="ws-effective">${esc(effectiveText || "(空)")}</pre></div></details>` +
+      `<details class="ws-collapse"><summary><span>▸ 实际生效提示词</span></summary><div class="ws-collapse-body"><pre id="ws-effective">${esc(effectiveText || "(空)")}</pre></div></details>` +
       (isBase ? `<details class="ws-collapse"><summary><span>▸ 自然语言补充 / 翻译</span></summary><div class="ws-collapse-body"><div class="ws-free-text"><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></div></div></details>` : "") +
     `</div>`;
   el.innerHTML = html;
@@ -1684,9 +1778,9 @@ function updateCartHeader() {
 }
 function renderCompactCart() {
   const el = $("#cart");
-  const html = `<section class="compact-cart"><label class="cart-tag-input"><span>添加标签</span><div><input id="cart-tag-input" autocomplete="off" placeholder="输入中文或英文，回车直接加入" /><button id="cart-tag-submit" type="button">添加</button></div><small>输入时会在中间自动查找；回车会加入完全匹配的标签。</small></label><button id="cart-custom-tag" type="button" class="ghost add-custom-btn">＋ 自定义标签</button><div class="compact-cart-head"><strong>Prompt</strong><span>${positivePromptEntries().length} 个标签</span></div><div class="compact-tags">${compactEntriesHtml()}</div>` +
-    `<details class="compact-uc"><summary>Undesired Content（${negativePromptEntries().length}）</summary><div class="compact-tags">${compactUcHtml()}</div></details>` +
-     `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><small class="setting-help">Raw 中文始终保留；英文译文仅在勾选后作为 Effective Prompt。</small><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></label></section>`;
+  const html = `<section class="compact-cart"><label class="cart-tag-input"><span>添加标签</span><div><input id="cart-tag-input" autocomplete="off" placeholder="输入中文或英文，回车直接加入" /><button id="cart-tag-submit" type="button">添加</button></div><small>输入时会在中间自动查找；回车会加入完全匹配的标签。</small></label><button id="cart-custom-tag" type="button" class="ghost add-custom-btn">＋ 自定义标签</button><div class="compact-cart-head"><strong>提示词</strong><span>${positivePromptEntries().length} 个标签</span></div><div class="compact-tags">${compactEntriesHtml()}</div>` +
+    `<details class="compact-uc"><summary>不希望出现的内容（负面词）（${negativePromptEntries().length}）</summary><div class="compact-tags">${compactUcHtml()}</div></details>` +
+     `<label class="compact-free-text"><span>自然语言补充</span><textarea class="free-text-box" id="free-text" placeholder="复杂空间关系 / 连续动作 / 画面意图…">${esc(state.prompt.free_text)}</textarea><div class="free-text-actions"><button type="button" id="free-text-translate">翻译为英语</button><label><input type="checkbox" id="free-text-use-en" ${state.prompt.use_free_text_en ? "checked" : ""} /> 使用英文译文</label></div><small class="setting-help">中文原文始终保留；勾选后仅使用英文译文作为实际生效提示词。</small><textarea class="free-text-box free-text-translation" id="free-text-en" placeholder="英文译文（可编辑）">${esc(state.prompt.free_text_en)}</textarea></label></section>`;
   el.innerHTML = html;
   bindEntryControls(el);
   if (openWeightEntryId) {
@@ -1932,7 +2026,9 @@ async function moveEntrySection(slot, id, section) {
 function addCharacter() {
   cartAdvanced = true;
   pushHistory(); state.prompt = promptDocument.addCharacter(state.prompt);
+  syncNaiCharactersFromState();
   commitPromptChange(); rebuildTargetSelect();
+  naiRenderCharacters?.();
 }
 function removeCharacter(i) {
   pushHistory();
@@ -1945,7 +2041,10 @@ function removeCharacter(i) {
     else if (activeWorkspaceTarget > i) activeWorkspaceTarget -= 1;
     if (activeWorkspaceTarget >= state.prompt.characters.length) activeWorkspaceTarget = "base";
   }
+  remapNaiCharacterSelection("remove", Number(i));
+  syncNaiCharactersFromState();
   rebuildTargetSelect(); commitPromptChange();
+  naiRenderCharacters?.();
 }
 
 const favoritePending = new Set();  // 正在请求中的 tag，防止同一 tag 快速连点造成并发重复 POST/DELETE
@@ -2016,8 +2115,8 @@ function exportPayload() {
 }
 function updatePromptPreview() {
   const text = promptPreviewText();
-  $("#prompt-preview-text").textContent = text || "当前 Prompt 为空";
-  $("#prompt-preview-meta").textContent = `${positivePromptEntries().length} tags`;
+  $("#prompt-preview-text").textContent = text || "当前提示词为空";
+  $("#prompt-preview-meta").textContent = `${positivePromptEntries().length} 个标签`;
 }
 // ===== 导出 =====
 async function doExport() {
@@ -2091,13 +2190,13 @@ async function loadBundles() {
 }
 function renderBundles() {
   const list = $("#bundles-list"); if (!bundles.length) { list.innerHTML = `<div class="empty">暂无标签模板</div>`; return; }
-  list.innerHTML = bundles.map((b) => `<article class="workspace-item"><div class="workspace-item-head"><strong>${esc(b.name)}</strong><span>${(b.items || []).length} tags</span></div><div class="bundle-tags">${(b.items || []).map((e) => `<span>${esc(e.tag)}</span>`).join("")}</div><div class="workspace-item-actions"><button data-add="${esc(b.id)}" class="primary">添加</button><button data-delete="${esc(b.id)}">删除</button></div></article>`).join("");
+  list.innerHTML = bundles.map((b) => `<article class="workspace-item"><div class="workspace-item-head"><strong>${esc(b.name)}</strong><span>${(b.items || []).length} 个标签</span></div><div class="bundle-tags">${(b.items || []).map((e) => `<span>${esc(e.tag)}</span>`).join("")}</div><div class="workspace-item-actions"><button data-add="${esc(b.id)}" class="primary">添加</button><button data-delete="${esc(b.id)}">删除</button></div></article>`).join("");
   list.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => addBundle(b.dataset.add)));
   list.querySelectorAll("[data-delete]").forEach((b) => b.addEventListener("click", () => deleteBundle(b.dataset.delete)));
 }
 async function createBundle(name = "") {
   const value = (name || $("#bundle-name").value).trim(); if (!value) { toast("请填写标签模板名称"); return null; }
-  const items = bundleItemsFromPrompt(); if (!items.length) { toast("当前 Prompt 为空"); return null; }
+  const items = bundleItemsFromPrompt(); if (!items.length) { toast("当前提示词为空"); return null; }
   const data = await api("/api/bundles", { method: "POST", body: JSON.stringify({ name: value, items }) }); $("#bundle-name").value = ""; toast("标签模板已保存");
   closeBundlesModal(); return data.bundle || data;
 }
@@ -2142,7 +2241,7 @@ async function loadSnapshots() {
   catch (e) { list.innerHTML = `<div class="empty">历史加载失败：${esc(e.message)}</div>`; }
 }
 function renderSnapshots(items) {
-  const list = $("#snapshot-list"); if (!items.length) { list.innerHTML = `<div class="empty">暂无 Prompt 历史</div>`; return; }
+  const list = $("#snapshot-list"); if (!items.length) { list.innerHTML = `<div class="empty">暂无提示词历史</div>`; return; }
   list.innerHTML = items.map((s) => `<article class="workspace-item"><div class="workspace-item-head"><strong>${esc(new Date(s.created_at || Date.now()).toLocaleString())}</strong><span>${esc(String(s.positive_prompt || "").split(",").slice(0, 3).join(", "))}</span></div><div class="workspace-item-actions"><button data-restore="${esc(s.id)}" class="primary">恢复</button><button data-copy="${esc(s.id)}">复制</button><button data-bundle="${esc(s.id)}">另存为标签模板</button></div></article>`).join("");
   list.querySelectorAll("[data-restore]").forEach((b) => b.addEventListener("click", () => restoreSnapshot(b.dataset.restore)));
   list.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => { const s = await getSnapshot(b.dataset.copy); await navigator.clipboard.writeText(s.positive_prompt || ""); toast("已复制"); }));
@@ -2162,7 +2261,7 @@ async function restoreSnapshot(id, sections = "") {
   }
   // 恢复后让 view adapter 镜像权威状态，保证后续生图视图不残留旧角色；UI 由 render 回流。
   syncNaiCharactersFromState();
-  commitPromptChange(); renderWorkbenchEditorFromDocument({ force: true }); closeSnapshotModal(); await showView("browse"); toast("Prompt 已恢复");
+  commitPromptChange(); renderWorkbenchEditorFromDocument({ force: true }); closeSnapshotModal(); await showView("browse"); toast("提示词已恢复");
 }
 
 // ===== Prompt 导入 =====
@@ -2258,11 +2357,11 @@ function renderAutoSplitPreview(proposal, summary) {
   const baseCount = (proposal.base || []).filter((e) => e && e.tag).length;
   const characters = proposal.characters || [];
   const unassignedCount = (proposal.unassigned || []).length;
-  let html = `<div class="import-seg import-guide">${esc(summary || "")} 仅预览归属，点击「应用拆分」才会写入 Prompt；当前文档不会被改动。</div>`;
-  html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">Base</span><span>· ${baseCount} 个标签</span></div></div>`;
+  let html = `<div class="import-seg import-guide">${esc(summary || "")} 仅预览归属，点击「应用拆分」才会写入提示词；当前文档不会被改动。</div>`;
+  html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">基础</span><span>· ${baseCount} 个标签</span></div></div>`;
   characters.forEach((c, i) => {
     const count = ((c?.prompt || []).length + (c?.uc || []).length);
-    html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">Character ${i + 1} ${esc(c?.name || "")}</span><span>· ${count} 个标签</span></div></div>`;
+    html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">角色 ${i + 1} ${esc(c?.name || "")}</span><span>· ${count} 个标签</span></div></div>`;
   });
   html += `<div class="import-seg"><div class="imp-seg-head"><span class="imp-seg-label">无法确定</span><span>· ${unassignedCount} 个标签</span></div></div>`;
   box.innerHTML = html;
@@ -2341,7 +2440,7 @@ function renderImportPreview(data) {
   $("#import-auto-split-actions").style.display = "none";
   autoSplitProposal = null;
   const box = $("#import-preview-box"); box.style.display = "block";
-  if (!data.segments && Array.isArray(data.entries)) data.segments = [{ kind: "base", label: "Prompt", entries: data.entries }];
+  if (!data.segments && Array.isArray(data.entries)) data.segments = [{ kind: "base", label: "提示词", entries: data.entries }];
   if (!data.stats) { const entries = (data.segments || []).flatMap((s) => s.entries || []); data.stats = { total: entries.length, unmatched: entries.filter((e) => !e.match).length }; }
   if (!data.segments || !data.segments.length) { box.innerHTML = `<div class="import-seg"><div class="imp-seg-head">无可解析的标签分段</div>${data.free_text ? `<div class="imp-free">自然语言：${esc(data.free_text)}</div>` : ""}</div>`; return; }
   let html = `<div class="import-seg import-guide">共 ${data.stats.total} 个标签。建议匹配默认不导入，请选择候选或保留原文。</div>`;
@@ -2457,11 +2556,12 @@ async function doImportFromModal() {
 }
 
 function normalizeCharacterSlot(v, idx = 0) {
-  if (!v || typeof v !== "object") return { name: `角色 ${idx + 1}`, prompt: [], uc: [] };
+  if (!v || typeof v !== "object") return { name: `角色 ${idx + 1}`, prompt: [], uc: [], enabled: true };
   return {
     name: v.name || `角色 ${idx + 1}`,
     prompt: Array.isArray(v.prompt) ? v.prompt : [],
     uc: Array.isArray(v.uc) ? v.uc : [],
+    enabled: v.enabled !== false,
   };
 }
 
@@ -2560,7 +2660,8 @@ let semanticResults = [];
 function semanticCardHtml(item, index) {
   const status = item.local_status || "unresolved";
   const score = Number.isFinite(Number(item.score)) ? `${(Number(item.score) * 100).toFixed(1)}%` : "-";
-  const category = item.category_name || item.category || "General";
+  const categoryMap = { General: "通用", Character: "角色", Artist: "画师", Copyright: "作品", Meta: "元数据" };
+  const category = categoryMap[item.category_name] || categoryMap[item.category] || item.category_name || item.category || "通用";
   const meta = [
     `匹配层：${item.layer || "语义"}`,
     `分数：${score}`,
@@ -2576,7 +2677,7 @@ function semanticCardHtml(item, index) {
     `<div class="semantic-meta">${esc(meta)}</div>` +
     (item.wiki ? `<div class="semantic-wiki">${esc(item.wiki)}</div>` : "") +
     `</div><span class="semantic-status ${esc(status)}">${esc(semanticStatusLabels[status] || status)}</span></div>` +
-    `<button class="semantic-add" type="button" data-semantic-add="${index}" ${addDisabled}>加入 Prompt · ${esc(section)}</button>` +
+    `<button class="semantic-add" type="button" data-semantic-add="${index}" ${addDisabled}>加入提示词 · ${esc(section)}</button>` +
     `</article>`;
 }
 
@@ -2596,7 +2697,7 @@ function renderSemanticResults(results, query = "") {
       button.disabled = true;
       try {
         await addEntry(item.tag, { section: SECTION_IDS.includes(item.section) ? item.section : undefined, source: "semantic" });
-        button.textContent = "已加入 Prompt";
+        button.textContent = "已加入提示词";
       } catch (e) {
         button.disabled = false;
         toast("加入失败：" + e.message);
@@ -2673,7 +2774,7 @@ function renderRecentView() {
 }
 
 async function showView(view) {
-  if (view === state.view) return;
+  if (view === state.view) { syncCharacterTabsPlacement(); window.WorkbenchMode?.syncActivity?.(); return; }
   // 离开图库视图时退出审阅模式，恢复普通图库布局
   if (view !== "gallery" && galleryReviewMode) setGalleryReviewMode(false);
   // 保存当前视图位置：滚动 + 分类浏览的完整浏览状态
@@ -2704,6 +2805,8 @@ async function showView(view) {
   if (layout) layout.style.display = (isGallery || isGenerate) ? "none" : "grid";
   const subbar = $(".subbar");
   if (subbar) subbar.style.display = isGenerate || isGallery ? "none" : "flex";
+  syncCharacterTabsPlacement();
+  window.WorkbenchMode?.syncActivity?.();
 
   if (isGallery) {
     pendingScroll = viewScrolls.gallery || 0;
@@ -2715,10 +2818,12 @@ async function showView(view) {
     return;
   }
   if (view === "favorites") {
+    window.WorkbenchMode?.set("catalog");
     renderFavoritesView();
     $("#tag-list").scrollTop = viewScrolls.favorites || 0;
     setTimeout(() => { $("#tag-list").scrollTop = viewScrolls.favorites || 0; }, 60);
   } else if (view === "recent") {
+    window.WorkbenchMode?.set("catalog");
     renderRecentView();
     $("#tag-list").scrollTop = viewScrolls.recent || 0;
     setTimeout(() => { $("#tag-list").scrollTop = viewScrolls.recent || 0; }, 60);
@@ -2775,6 +2880,7 @@ $("#search-input").addEventListener("input", (e) => doSearch(e.target.value));
 // focus 与 input 是独立事件，不会干扰后续 input→runSearch 流程。
 $("#search-input").addEventListener("focus", () => {
   if (state.view !== "browse") showView("browse");
+  window.WorkbenchMode?.set("catalog");
 });
 $("#cat-filter").addEventListener("change", () => doSearch($("#search-input").value));
 bind("#semantic-search-btn", "click", runSemanticSearch);
@@ -2823,7 +2929,8 @@ bind("#prompt-history-btn", "click", openSnapshotModal);
 bind("#bundles-close", "click", closeBundlesModal); bind("#bundle-create", "click", () => createBundle());
 bind("#snapshot-close", "click", closeSnapshotModal); bind("#save-snapshot-btn", "click", () => saveSnapshot());
 bind("#save-bundle-btn", "click", () => openBundlesModal());
-bind("#send-generate-btn", "click", async () => { const text = promptPreviewText(); if (!text) { toast("当前 Prompt 为空"); return; } await switchToGenerateView(); });
+bind("#send-generate-btn", "click", async () => { const text = promptPreviewText(); if (!text) { toast("当前提示词为空"); return; } await switchToGenerateView(); });
+bind("#nai-back-to-market", "click", async () => { await showView("browse"); window.WorkbenchMode?.set("text"); });
 // More 菜单（头部 More ▾ 与高级工作区 More… 共用同一个菜单）
 function toggleCartMore(force) {
   const menu = $("#cart-more-menu");
@@ -2841,7 +2948,7 @@ $("#ws-copy")?.addEventListener("click", async () => { workspaceFlushSync(); doE
 $("#ws-continue")?.addEventListener("click", async () => {
   workspaceFlushSync();
   const text = promptPreviewText();
-  if (!text) { toast("当前 Prompt 为空"); return; }
+  if (!text) { toast("当前提示词为空"); return; }
   await switchToGenerateView();
 });
 $("#bundles-modal").addEventListener("click", (e) => { if (e.target.id === "bundles-modal") closeBundlesModal(); });
@@ -3336,9 +3443,9 @@ async function showGalleryPreview(dirName, fileName) {
     body.innerHTML =
       `<img src="${imgPath}" class="gallery-preview-img" alt="" />` +
       parentLine +
-      (() => { const recipe = naiRecipeFromItem(it), settings = recipe.settings || recipe; return `<dl class="gallery-meta"><dt>Prompt</dt><dd>${esc(it.prompt || "")}</dd><dt>Negative</dt><dd>${esc(it.negative_prompt || "")}</dd><dt>Seed</dt><dd>${esc(settings.seed ?? it.seed ?? "-")}</dd><dt>Model</dt><dd>${esc(settings.model ?? it.model ?? "-")}</dd></dl>`; })() +
+      (() => { const recipe = naiRecipeFromItem(it), settings = recipe.settings || recipe; return `<dl class="gallery-meta"><dt>提示词</dt><dd>${esc(it.prompt || "")}</dd><dt>负面词</dt><dd>${esc(it.negative_prompt || "")}</dd><dt>种子</dt><dd>${esc(settings.seed ?? it.seed ?? "-")}</dd><dt>模型</dt><dd>${esc(settings.model ?? it.model ?? "-")}</dd></dl>`; })() +
       `<div class="gallery-preview-actions"><button class="primary" id="gallery-continue-btn">继续生成</button><button class="ghost" id="gallery-fav-btn">${it.favorite ? "取消收藏 ★" : "收藏 ☆"}</button></div>` +
-      `<div class="gallery-recipe-actions"><button id="gallery-recipe-seed">复用 Seed</button><button id="gallery-recipe-img2img">用作图生图</button><button id="gallery-recipe-copy-prompt">复制 Prompt</button></div>` +
+      `<div class="gallery-recipe-actions"><button id="gallery-recipe-seed">复用种子</button><button id="gallery-recipe-img2img">用作图生图</button><button id="gallery-recipe-copy-prompt">复制提示词</button></div>` +
       (it.snapshot_id ? `<details class="gallery-partial-restore"><summary>部分恢复 ▾</summary><div class="gallery-restore-actions"><button data-restore-sections="">全部加载</button><button data-restore-sections="character,appearance,clothing,expression,action">加载角色</button><button data-restore-sections="style,quality">加载画风</button><button data-restore-sections="composition,scene">加载构图</button></div></details>` : "");
     // 主按钮：恢复完整生成配置 + 跳转生图 + 聚焦 Prompt；记录 continue 事件并带父级血缘。
     $("#gallery-continue-btn").addEventListener("click", async () => {
@@ -3359,14 +3466,14 @@ async function showGalleryPreview(dirName, fileName) {
         await showView("generate");
         $("#nai-seed").value = String(meta.seed);
         $("#nai-seed-mode").value = "fixed";
-        toast(`Seed ${meta.seed} 已填入（Fixed 模式）`);
-      } else { toast("该图无 Seed 信息"); }
+        toast(`种子 ${meta.seed} 已填入（固定模式）`);
+      } else { toast("该图无种子信息"); }
     });
     $("#gallery-recipe-copy-prompt").addEventListener("click", async () => {
       const meta = extractMetaFromGalleryItem(it);
       const text = meta.effectivePrompt || meta.rawPrompt || it.prompt || "";
-      try { await navigator.clipboard.writeText(text); toast("Prompt 已复制"); }
-      catch { const restored = naiResolveRestoredPrompt(meta.rawPrompt, meta.rawNegative, meta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); toast("已填入 Prompt 框"); }
+      try { await navigator.clipboard.writeText(text); toast("提示词已复制"); }
+      catch { const restored = naiResolveRestoredPrompt(meta.rawPrompt, meta.rawNegative, meta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); toast("已填入提示词框"); }
     });
     $("#gallery-recipe-img2img").addEventListener("click", async () => { await showView("generate"); await naiUseImageSource(imgPath, it.file_name || "图库图片"); toast("已设为图生图基础图"); });
     body.querySelectorAll("[data-restore-sections]").forEach((b) => b.addEventListener("click", () => {
@@ -3482,6 +3589,8 @@ let naiSSEOpened = false;
 let naiPhase = "ready";        // ready|submitting|generating|retrieving|saving|complete|error|cancelled
 let naiImages = [];            // Python 图库 nai_generated 图片列表
 let naiIdx = -1;               // viewer 当前索引
+let naiGalleryLoadSeq = 0;     // 历史刷新序列，避免并发响应倒序覆盖
+let naiPendingFocus = null;     // 当前生图批次最后保存的资产，刷新后优先聚焦
 let naiZoom = 1;               // 1 = Fit，其他为缩放倍数
 let naiApiBatchId = null;
 let naiApiConfigured = false;
@@ -3489,12 +3598,99 @@ let naiSubscriptionTier = "unknown";
 let naiGenerationMode = "txt2img";
 let naiImg2ImgSource = null;
 let naiCharacters;
+// 工作台一键换姿势的临时批次计划。它不是第二份 Prompt 权威状态，只保存
+// 待发送的计划；实际 Prompt 在生成前由 PromptDocument 克隆编译。
+let naiPoseBatch = null;
+let naiPoseStatusTimer = null;
+let naiApprovedPoseTemplates = [];
+let naiPoseTemplateLoadPromise = null;
+let naiPoseTemplatesLoadedAt = 0;
 // P0: Generation 档位 & Prompt Compiler state
 // positive tier: off | standard | light；negative tier: off | light | heavy | furry_focus | human_focus
 // 默认 standard + heavy 以保持当前 V5 Full 默认行为。
 let naiPositiveTier = "standard";
 let naiNegativeTier = "heavy";
 let naiTransparentBg = false;
+
+// 工作台与 NSFW Builder 共用已审核模板。此前工作台只把固定的 POSE_LIBRARY
+// 传给 buildPosePlans，Scene 中批准的模板永远不会进入“一键换姿势”批次。
+function naiNormalizeApprovedPoseTemplate(raw) {
+  const structure = raw?.structure && typeof raw.structure === "object" ? raw.structure : raw;
+  if (!structure || typeof structure !== "object") return null;
+  const count = Number(structure.participant_count ?? raw?.participant_count ?? raw?.minParticipants ?? 1);
+  if (!Number.isInteger(count) || count < 1 || count > 6) return null;
+  const rawId = String(raw?.id ?? structure.id ?? "").trim();
+  if (!rawId) return null;
+  const id = rawId.startsWith("imported-") ? rawId : `imported-${rawId}`;
+  const list = (value) => Array.isArray(value) ? value.map(String).map((item) => item.trim()).filter(Boolean) : [];
+  const relations = Array.isArray(raw?.relations) ? raw.relations : (Array.isArray(structure.relations) ? structure.relations : []);
+  return {
+    id,
+    label: String(raw?.label ?? structure.label ?? `导入姿势 ${rawId}`),
+    minParticipants: count,
+    maxParticipants: count,
+    baseTags: list(raw?.baseTags ?? structure.base_tags),
+    cameraTags: list(raw?.cameraTags ?? structure.camera_tags),
+    camera: list(raw?.camera ?? raw?.cameraTags ?? structure.camera_tags),
+    roleTags: Array.isArray(raw?.roleTags) ? raw.roleTags : (Array.isArray(structure.role_tags) ? structure.role_tags : []),
+    relations,
+    interaction: String(relations[0]?.action || "interact"),
+    sourceLabel: String(raw?.sourceLabel ?? raw?.source?.source_type ?? "导入"),
+    adultOnly: true,
+  };
+}
+
+function naiPositionOptionsAsPoseTemplates() {
+  const positions = window.WorkbenchComponents?.nsfwBuilder?.options?.positions;
+  if (!Array.isArray(positions)) return [];
+  return positions.map((option) => {
+    const tag = String(option?.tag || option?.key || "").trim();
+    if (!tag) return null;
+    const minParticipants = Number(option?.minParticipants || 2);
+    return {
+      id: `position-${tag}`,
+      label: String(option?.label || tag),
+      minParticipants: Number.isInteger(minParticipants) && minParticipants > 0 ? minParticipants : 2,
+      maxParticipants: option?.maxParticipants == null ? null : Number(option.maxParticipants),
+      // 不预设角色分配，让 normalizePlan 按当前人数复制到每个角色，
+      // 避免 3–6 人随机时只给前两个角色写入动作。
+      baseTags: [tag],
+      roleTags: [],
+      relations: [],
+      interaction: minParticipants >= 2 ? "sex" : "interact",
+      sourceLabel: "体位候选",
+      adultOnly: true,
+    };
+  }).filter(Boolean);
+}
+
+async function naiLoadApprovedPoseTemplates({ force = false } = {}) {
+  if (userSettings.adolescent_mode) return [];
+  const now = Date.now();
+  if (naiPoseTemplateLoadPromise) return naiPoseTemplateLoadPromise;
+  if (!force && now - naiPoseTemplatesLoadedAt < 30_000) return naiApprovedPoseTemplates;
+  const load = (async () => {
+    try {
+      const response = await fetch(`${NAI_SERVER}/api/templates?status=approved&limit=200`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const normalized = (Array.isArray(data?.templates) ? data.templates : []).map(naiNormalizeApprovedPoseTemplate).filter(Boolean);
+      const seen = new Set();
+      naiApprovedPoseTemplates = normalized.filter((item) => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
+      naiPoseTemplatesLoadedAt = Date.now();
+    } catch (error) {
+      // 模板服务不可用时保留内置池，不能让“换姿势”按钮整体失效。
+      console.warn("工作台已审核姿势模板加载失败：", error.message);
+    }
+    return naiApprovedPoseTemplates;
+  })();
+  naiPoseTemplateLoadPromise = load;
+  try { return await load; } finally { if (naiPoseTemplateLoadPromise === load) naiPoseTemplateLoadPromise = null; }
+}
 // 生成血缘：显式「继续生成 / 恢复」后设置，随下一次 naiGenerate 写入 meta.parent，随后立即清空，
 // 避免无关的空白工作区生图误带父级。
 let naiGenerationParent = null;
@@ -3625,6 +3821,76 @@ function naiRenderImg2ImgSource() {
     : `<span>尚未选择图片</span>`;
 }
 
+function naiPoseReplacementTags() {
+  const tags = new Set();
+  for (const pose of POSE_LIBRARY) {
+    for (const tag of [...(pose.baseTags || []), ...(pose.camera || []), ...(pose.roleTags || []).flat()]) tags.add(String(tag).trim());
+  }
+  for (const entry of promptDocument?.getTargetEntries?.(state.prompt, "base") || []) if (entry.source === "pose_variation") tags.add(entry.tag);
+  for (let index = 0; index < (state.prompt?.characters || []).length; index++) {
+    for (const entry of promptDocument?.getTargetEntries?.(state.prompt, `char:${index}`) || []) if (entry.source === "pose_variation") tags.add(entry.tag);
+  }
+  return [...tags].filter(Boolean);
+}
+
+function naiApplyPosePlan(plan) {
+  if (!plan || !window.PromptBridge) return false;
+  // 姿势 / 状态属于角色卡；Base 只接收计划中的镜头构图词。
+  return !!window.PromptBridge.dispatch({ type: "APPLY_POSE_VARIATION", payload: { target: "characters", plan, replaceTags: naiPoseReplacementTags(), source: "workbench" } });
+}
+
+function naiSetPoseStatus(text, cls = "") {
+  const node = document.getElementById("nai-pose-status");
+  if (!node) return;
+  node.textContent = text;
+  node.className = `nai-pose-status${cls ? ` ${cls}` : ""}`;
+  clearTimeout(naiPoseStatusTimer);
+  if (text) naiPoseStatusTimer = setTimeout(() => { node.textContent = ""; node.className = "nai-pose-status"; }, 7000);
+}
+
+let naiPosePreparing = false;
+async function naiPreparePoseVariations() {
+  if (userSettings.adolescent_mode) { naiSetPoseStatus("青少年模式下成人姿势快捷操作已禁用。", "warn"); return false; }
+  if (naiPosePreparing) return false;
+  naiPosePreparing = true;
+  naiSetPoseStatus("正在读取已审核姿势模板…");
+  const requested = Math.max(1, Math.min(6, Math.floor(Number($("#nai-count")?.value) || 1)));
+  const participantCount = Math.max(1, Math.min(6, state.prompt?.characters?.length || 1));
+  try {
+    // 每次点击允许刷新一次本地已审核库，但失败时仍使用内置姿势池。
+    await naiLoadApprovedPoseTemplates({ force: true });
+    const recent = state.prompt?.assistant_context?.pose_history || [];
+    const plans = buildPosePlans({ count: requested, participantCount, seed: `${Date.now()}-${Math.random()}`, recentFingerprints: recent, library: [...POSE_LIBRARY, ...naiPositionOptionsAsPoseTemplates(), ...naiApprovedPoseTemplates] });
+    if (plans.length < requested) {
+      naiSetPoseStatus(`当前人数只有 ${plans.length} 个兼容姿势，无法生成 ${requested} 个互不重复变体。请减少批次数或到 Scene 构建补充。`, "warn");
+      return false;
+    }
+    naiPoseBatch = { plans, count: requested, replaceTags: naiPoseReplacementTags(), createdAt: Date.now() };
+    // 单张立即应用；批次只预览第一张，剩余五张在发送前从同一基线独立编译。
+    if (plans[0]) naiApplyPosePlan(plans[0]);
+    if (requested === 1) naiSetPoseStatus(`已切换：${plans[0].label}`);
+    else naiSetPoseStatus(`已准备 ${requested} 张不同姿势；点击“生成”将逐张发送独立提示词。`, "ok");
+    return true;
+  } finally {
+    naiPosePreparing = false;
+  }
+}
+
+function naiCompilePoseVariation(plan) {
+  const variationDoc = promptDocument.applyPoseVariation(state.prompt, { plan, replaceTags: naiPoseBatch?.replaceTags || naiPoseReplacementTags() });
+  const generation = promptDocument.buildGenerationPromptState(variationDoc);
+  const compiled = naiCompileGeneration(generation.basePrompt, generation.globalUc).result;
+  const characters = generation.characters.map((character) => ({ name: character.name, prompt: character.prompt, negative_prompt: character.uc, position: character.position ? { ...character.position } : null, enabled: character.enabled !== false })).filter((character) => character.prompt);
+  return {
+    prompt: compiled.effectivePositive,
+    negative_prompt: compiled.effectiveNegative,
+    characters,
+    pose_template_id: plan.id,
+    pose_fingerprint: plan.fingerprint || poseFingerprint(plan),
+    structured_state: variationDoc,
+  };
+}
+
 function naiReadBlobAsDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3654,45 +3920,71 @@ async function naiUseImageSource(url, name = "历史图") {
   naiRenderImg2ImgSource();
 }
 
-function naiRenderCharacters() {
+// 角色目标栏是 PromptDocument 的全局导航：工作台里贴着单一编辑器，
+// 进入标签超市后移到工具栏下方，保证推荐 / 图形化 / Scene 都能直接切换角色，
+// 同时只保留一个 DOM 与一套事件监听，避免两个目标栏状态分叉。
+function syncCharacterTabsPlacement() {
+  const tabs = document.getElementById("nai-character-tabs");
+  const workbenchAnchor = document.getElementById("nai-character-tabs-anchor");
+  const marketHost = document.getElementById("market-character-host");
+  if (!tabs || !workbenchAnchor || !marketHost) return;
+  const target = state.view === "generate" ? workbenchAnchor : marketHost;
+  if (tabs.parentElement !== target) target.appendChild(tabs);
+}
+
+function naiCharacterDisplayName(character, index) {
+  const identity = String(character?.name || "").trim();
+    const generic = `角色 ${index + 1}`;
+    return identity && identity !== generic && identity !== `Character ${index + 1}` ? `${generic} · ${identity}` : generic;
+}
+
+function renderNaiCharacterTabs() {
   const tabsBox = $("#nai-character-tabs");
+  if (!tabsBox) return;
+  const addBtn = tabsBox.querySelector("#nai-character-add");
+  const baseBtn = tabsBox.querySelector('[data-nai-char-tab="base"]');
+  tabsBox.querySelectorAll("[data-nai-char-tab]").forEach((button) => { if (button !== baseBtn) button.remove(); });
+  naiCharacters.forEach((character, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.className = `nai-char-tab ${activeNaiTarget === index ? "active" : ""} ${character.enabled === false ? "disabled" : ""}`;
+    button.dataset.naiCharTab = String(index);
+    button.textContent = naiCharacterDisplayName(character, index);
+    button.setAttribute("aria-selected", String(activeNaiTarget === index));
+    button.setAttribute("aria-label", `${naiCharacterDisplayName(character, index)}${character.enabled === false ? "（已停用）" : ""}`);
+    button.title = character.enabled === false ? "角色已停用；点击可编辑" : "切换到该角色";
+    tabsBox.insertBefore(button, addBtn);
+  });
+  baseBtn?.classList.toggle("active", activeNaiTarget === "base");
+  baseBtn?.setAttribute("aria-selected", String(activeNaiTarget === "base"));
+}
+
+function naiRenderCharacters() {
   const list = $("#nai-character-list");
   const count = document.getElementById("nai-character-count");
   if (count) count.textContent = String(naiCharacters.length);
   rebuildNaiTagTarget();
   // 悬空 activeNaiTarget 回退 base
   if (activeNaiTarget !== "base" && !naiCharacters[activeNaiTarget]) activeNaiTarget = "base";
-  // Tab 条：Base（静态）+ Character N（动态，插在「+ 角色」前）
-  if (tabsBox) {
-    const addBtn = tabsBox.querySelector("#nai-character-add");
-    const baseBtn = tabsBox.querySelector('[data-nai-char-tab="base"]');
-    tabsBox.querySelectorAll("[data-nai-char-tab]").forEach((b) => { if (b !== baseBtn) b.remove(); });
-    naiCharacters.forEach((_, i) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = `nai-char-tab ${activeNaiTarget === i ? "active" : ""}`;
-      b.dataset.naiCharTab = String(i);
-      const identity = String(state.prompt?.characters?.[i]?.name || "").trim();
-      const generic = `Character ${i + 1}`;
-      b.textContent = identity && identity !== generic ? `${generic} · ${identity}` : generic;
-      tabsBox.insertBefore(b, addBtn);
-    });
-    baseBtn?.classList.toggle("active", activeNaiTarget === "base");
-  }
+  // Tab 条：基础（静态）+ 角色 N（动态，插在「+ 角色」前）。
+  // 标签名称和启用态均从 PromptDocument 的 view adapter 重新派生。
+  renderNaiCharacterTabs();
   if (activeNaiTarget === "base") {
-    list.innerHTML = `<div class="empty">Base Prompt 在顶部编辑</div>`;
+    list.innerHTML = `<div class="empty">基础提示词在上方编辑</div>`;
     return;
   }
   const index = activeNaiTarget;
   const character = state.prompt?.characters?.[index];
   if (!character) { list.innerHTML = `<div class="empty">暂无独立角色</div>`; return; }
   const manual = !!character.position;
-  // 角色设置：可折叠，仅 角色名 / Position / X·Y / 上移·下移 / 移除；绝不内嵌 textarea
+  // 角色设置：可折叠，包含独立启用开关；Prompt / UC 仍在顶部单一编辑器编辑。
   // （该角色 Prompt / UC 一律在顶部单一 #nai-editor 编辑）。
   list.innerHTML = `<details class="nai-character" data-character-index="${index}" open>
     <summary class="nai-character-head">
-      <input type="text" class="nai-character-name" data-character-name value="${esc(character.name || `Character ${index + 1}`)}" placeholder="角色名" aria-label="角色名" />
+      <input type="text" class="nai-character-name" data-character-name value="${esc(displayCharacterName(character, index))}" placeholder="角色名" aria-label="角色名" />
       <span class="nai-character-head-actions">
+        <label class="nai-character-enabled" title="单独启用或停用此角色"><input type="checkbox" data-character-enabled ${character.enabled !== false ? "checked" : ""} /><span>启用</span></label>
         <button type="button" data-character-move="up" title="上移" ${index === 0 ? "disabled" : ""}>↑</button>
         <button type="button" data-character-move="down" title="下移" ${index === naiCharacters.length - 1 ? "disabled" : ""}>↓</button>
         <button type="button" data-character-remove title="移除角色">×</button>
@@ -3704,7 +3996,7 @@ function naiRenderCharacters() {
         <label><span>X</span><input type="number" min="0" max="1" step="0.05" data-character-field="x" value="${character.position?.x ?? 0.5}" /></label>
         <label><span>Y</span><input type="number" min="0" max="1" step="0.05" data-character-field="y" value="${character.position?.y ?? 0.5}" /></label>
       </div>
-      <p class="nai-character-hint">在顶部单一编辑器编辑该角色 Prompt / UC。</p>
+      <p class="nai-character-hint">在上方编辑器编辑该角色提示词 / 负面词。</p>
     </div>
   </details>`;
 }
@@ -3721,7 +4013,7 @@ function naiAddCharacter(character = {}) {
 function naiCollectCharacters() {
   // NAI v4 multi-prompt shape：{ prompt, negative_prompt, position }，来自 PromptDocument 权威。
   return promptDocument.buildGenerationPromptState(state.prompt).characters
-    .map((character) => ({ prompt: character.prompt, negative_prompt: character.uc, position: character.position ? { ...character.position } : null }))
+    .map((character) => ({ name: character.name, prompt: character.prompt, negative_prompt: character.uc, position: character.position ? { ...character.position } : null, enabled: character.enabled !== false }))
     .filter((character) => character.prompt);
 }
 
@@ -3770,7 +4062,7 @@ function naiUpdateEffectivePreview() {
   const { result, params } = naiCompileGeneration(rawPrompt, rawNeg);
   const preset = NAI_RESOLUTION_PRESETS[params.resolution_category];
   const resolutionStr = preset ? `${preset.width}×${preset.height}` : `${params.width}×${params.height}`;
-  const seedStr = params.seed_mode === "random" ? "Random" : String(params.seed ?? "-");
+  const seedStr = params.seed_mode === "random" ? "随机" : String(params.seed ?? "-");
   if ($("#nai-effective-prompt")) $("#nai-effective-prompt").textContent = result.effectivePositive || "(空)";
   if ($("#nai-effective-negative")) $("#nai-effective-negative").textContent = result.effectiveNegative || "(空)";
   if ($("#nai-source-positive-user")) $("#nai-source-positive-user").textContent = result.userPositive.length ? result.userPositive.join(", ") : "(无)";
@@ -3825,20 +4117,20 @@ function naiRenderCost() {
   const isV5 = String(parameters.model || "").startsWith("nai-diffusion-5-");
   if (eligible && naiSubscriptionTier === "opus") {
     el.className = "nai-cost";
-    el.innerHTML = `<span>Opus 串行队列 · ${count} 张分别发送${isV5 ? " · V5 使用额度" : ""}</span><strong>预计 0 Image Anlas</strong>`;
-    el.title = `本地批处理会逐张串行请求；当前为文生图、Normal、≤28 Steps，符合 Opus 单张免 Image Anlas 条件。${isV5 ? "V5 仍受 Opus 使用额度限制；额度耗尽后的费用以 NovelAI 实际扣费为准。" : ""}`;
+    el.innerHTML = `<span>Opus 串行队列 · ${count} 张分别发送${isV5 ? " · V5 使用额度" : ""}</span><strong>预计 0 Anlas</strong>`;
+    el.title = `本地批处理会逐张串行请求；当前为文生图、标准尺寸、≤28 步，符合 Opus 单张免图像 Anlas 条件。${isV5 ? "V5 仍受 Opus 使用额度限制；额度耗尽后的费用以 NovelAI 实际扣费为准。" : ""}`;
   } else if (eligible) {
     el.className = "nai-cost unknown";
     el.innerHTML = `<span>Opus 串行规则 · ${count} 张分别发送</span><strong>${naiSubscriptionTier === "unknown" ? "正在确认订阅方案" : "当前套餐不免 Anlas"}</strong>`;
-    el.title = "本地批处理逐张发送，不会触发“同时生成多张”的收费条件；但免 Image Anlas 仅适用于 Opus。当前套餐的实际费用请以 NovelAI 返回结果为准。";
+    el.title = "本地批处理逐张发送，不会触发“同时生成多张”的收费条件；但免图像 Anlas 仅适用于 Opus。当前套餐的实际费用请以 NovelAI 返回结果为准。";
   } else {
     el.className = "nai-cost paid";
     el.innerHTML = `<span>不满足 Opus 单张免 Anlas 条件（${count} 张串行）</span><strong>费用以 NovelAI 实际扣费为准</strong>`;
-    el.title = "免 Image Anlas 需要 Opus、文生图、Normal 尺寸、≤28 Steps，且每个上游请求仅一张。图生图、Small/Large/自定义尺寸或更高 Steps 不在本地免费承诺范围内。";
+    el.title = "免图像 Anlas 需要 Opus、文生图、标准尺寸、≤28 步，且每个上游请求仅一张。图生图、小型/大型/自定义尺寸或更高步数不在本地免费承诺范围内。";
   }
   const btn = $("#nai-gen");
   if (["ready", "complete", "error", "cancelled"].includes(naiPhase)) {
-    btn.textContent = naiApiConfigured ? "Generate" : "Generate · 未配置 Token";
+    btn.textContent = naiApiConfigured ? "生成" : "生成 · 未配置 Token";
     btn.disabled = !naiApiConfigured;
   }
 }
@@ -3848,7 +4140,7 @@ function updateNaiPromptMeta() {
   if (!editor) return;
   const text = editor.value.trim();
   const n = text ? text.split(",").filter((x) => x.trim()).length : 0;
-  $("#nai-prompt-meta").textContent = `${n} tags · ${text.length} 字符`;
+  $("#nai-prompt-meta").textContent = `${n} 个标签 · ${text.length} 字符`;
 }
 
 function naiSetJob(text, cls) {
@@ -3868,14 +4160,14 @@ function naiSetPhase(phase, msg) {
   btn.disabled = active || !naiApiConfigured;
   cancel.disabled = !["generating", "retrieving", "saving"].includes(phase);
   switch (phase) {
-    case "ready": btn.textContent = "Generate"; naiSetJob("Ready"); naiRenderCost(); break;
-    case "submitting": btn.textContent = "Submitting..."; naiSetJob("Submitting..."); job.insertAdjacentHTML("beforeend", '<div class="nai-progress"></div>'); break;
-    case "generating": btn.textContent = "Generating..."; naiSetJob("Generating with NovelAI..."); job.insertAdjacentHTML("beforeend", '<div class="nai-progress"></div>'); break;
-    case "retrieving": btn.textContent = "Retrieving..."; naiSetJob("Retrieving image..."); break;
-    case "saving": btn.textContent = "Saving..."; naiSetJob("Saving to library..."); break;
-    case "complete": btn.textContent = "Generate"; naiSetJob("Saved to library", "ok"); naiRenderCost(); break;
-    case "error": btn.textContent = "Generate"; naiSetJob(msg || "生成失败", "err"); naiRenderCost(); break;
-    case "cancelled": btn.textContent = "Generate"; naiSetJob("已取消", "err"); naiRenderCost(); break;
+    case "ready": btn.textContent = "生成"; naiSetJob("就绪"); naiRenderCost(); break;
+    case "submitting": btn.textContent = "提交中…"; naiSetJob("提交中…"); job.insertAdjacentHTML("beforeend", '<div class="nai-progress"></div>'); break;
+    case "generating": btn.textContent = "生成中…"; naiSetJob("正在使用 NovelAI 生成…"); job.insertAdjacentHTML("beforeend", '<div class="nai-progress"></div>'); break;
+    case "retrieving": btn.textContent = "获取图片中…"; naiSetJob("正在获取图片…"); break;
+    case "saving": btn.textContent = "保存中…"; naiSetJob("正在保存到图库…"); break;
+    case "complete": btn.textContent = "生成"; naiSetJob("已保存到图库", "ok"); naiRenderCost(); break;
+    case "error": btn.textContent = "生成"; naiSetJob(msg || "生成失败", "err"); naiRenderCost(); break;
+    case "cancelled": btn.textContent = "生成"; naiSetJob("已取消", "err"); naiRenderCost(); break;
   }
 }
 
@@ -3898,7 +4190,7 @@ async function loadNaiApiStatus() {
     status.className = "nai-live " + (naiApiConfigured ? "ok" : "err");
     if (["ready", "complete", "error", "cancelled"].includes(naiPhase)) {
       $("#nai-gen").disabled = !naiApiConfigured;
-      $("#nai-gen").textContent = naiApiConfigured ? "Generate" : "Generate · 暂不可用";
+      $("#nai-gen").textContent = naiApiConfigured ? "生成" : "生成 · 暂不可用";
     }
     naiRenderCost();
     return j;
@@ -3908,12 +4200,15 @@ async function loadNaiApiStatus() {
     status.textContent = `NovelAI 本地服务未启动：${NAI_SERVER}`;
     status.className = "nai-live err";
     $("#nai-gen").disabled = true;
-    $("#nai-gen").textContent = "Generate · 服务未启动";
+    $("#nai-gen").textContent = "生成 · 服务未启动";
     return null;
   }
 }
 
 function initGenerateView() {
+  restoreNaiLayoutPreferences();
+  const poseButton = document.getElementById("nai-pose-next");
+  if (poseButton) poseButton.hidden = !!userSettings.adolescent_mode;
   naiSetMode(naiGenerationMode);
   naiRenderImg2ImgSource();
   // 进入生图视图时让 naiCharacters 单向镜像 state.prompt.characters（权威状态），
@@ -3926,6 +4221,9 @@ function initGenerateView() {
   naiRenderCost();
   loadNaiGallery();
   loadNaiApiStatus();
+  // 提前缓存已审核姿势模板；点击换姿势时仍会强制刷新一次，确保刚在
+  // NSFW Builder 批准的模板能进入工作台随机池。
+  void naiLoadApprovedPoseTemplates();
   // P0: Initialize 档位选择器（正面 / 负面）
   naiSetSelectValue("#nai-positive-tier", naiPositiveTier, "standard");
   naiSetSelectValue("#nai-negative-tier", naiNegativeTier, "heavy");
@@ -3966,8 +4264,10 @@ async function naiGenerate() {
   const characters = naiCollectCharacters();
   const maxCount = naiBatchMaxCount();
   const count = Math.max(1, Math.min(maxCount, Number(parameters.count) || 1));
+  const posePlans = naiPoseBatch && naiPoseBatch.count === count ? naiPoseBatch.plans.slice(0, count) : [];
+  const variations = posePlans.length === count ? posePlans.map((plan) => naiCompilePoseVariation(plan)) : [];
   if (["fixed", "increment"].includes(parameters.seed_mode) && !Number.isInteger(parameters.seed)) {
-    toast("Fixed/Increment 模式需要整数 Seed"); return;
+    toast("固定/递增模式需要填写整数种子"); return;
   }
   if (naiGenerationMode === "img2img" && !naiImg2ImgSource?.dataUrl) {
     toast("图生图需要先选择基础图片"); return;
@@ -4022,6 +4322,11 @@ async function naiGenerate() {
       ...(characters.length ? { characterPrompts: characters } : {}),
       // 生成血缘：继续生成 / 恢复时带入父级身份；空白工作区生成为 null。
       parent: naiGenerationParent,
+      poseVariation: variations.length ? {
+        count: variations.length,
+        fingerprints: variations.map((item) => item.pose_fingerprint),
+        templateIds: variations.map((item) => item.pose_template_id),
+      } : null,
     };
     naiGenerationParent = null; // 用后即清，避免无关的空白生图误带父级
     const res = await fetch(`${NAI_SERVER}/api/novelai/generate`, {
@@ -4046,7 +4351,8 @@ async function naiGenerate() {
           cfg_rescale: parameters.cfg_rescale ?? 0,
           auto_smea: parameters.auto_smea === true,
         },
-         count,
+        count,
+        variations,
          quality_preset: naiPositiveTier,
          uc_preset: naiNegativeTier,
          prompt_presets_compiled: true,
@@ -4069,6 +4375,7 @@ async function naiGenerate() {
       throw new Error(hints[j.code] || j.error || "生成失败");
     }
     naiApiBatchId = j.batchId;
+    naiPoseBatch = null;
     naiSetPhase("generating");
     naiSetJob(`生成中：0/${j.total || count}`);
   } catch (e) {
@@ -4099,7 +4406,8 @@ function naiSSE() {
       } else if (e.status === "completed") {
         naiSetPhase("complete");
         naiSetJob(`已完成：${e.completed}/${e.total}`);
-        loadNaiGallery(); loadGalleryList();
+        loadNaiGallery(naiPendingFocus || {}); loadGalleryList();
+        naiPendingFocus = null;
         setTimeout(() => { naiApiBatchId = null; naiSetPhase("ready"); }, 1500);
       } else if (e.status === "cancelling") {
         naiSetJob(`正在停止剩余请求：当前已完成 ${e.completed || 0}/${e.total || 0}`);
@@ -4117,7 +4425,11 @@ function naiSSE() {
       }
     }
     if (e.type === "api-batch.image" && (!naiApiBatchId || e.batchId === naiApiBatchId)) {
-      loadNaiGallery();
+      const latest = Array.isArray(e.items) ? e.items.at(-1) : null;
+      const focusAssetId = latest?.id || null;
+      const focusFileName = latest?.file_name || null;
+      if (focusAssetId || focusFileName) naiPendingFocus = { focusAssetId, focusFileName };
+      loadNaiGallery({ focusAssetId, focusFileName });
       loadGalleryList();
     }
   };
@@ -4133,12 +4445,29 @@ function switchToGenerateView() {
 }
 
 // ---- Output Viewer / History ----
-async function loadNaiGallery() {
+function naiGalleryFocusIndex(items, assetId = null, fileName = null) {
+  const rows = Array.isArray(items) ? items : [];
+  if (assetId != null) {
+    const byAsset = rows.findIndex((item) => String(item?.source_asset_id || "") === String(assetId));
+    if (byAsset >= 0) return byAsset;
+  }
+  if (fileName) return rows.findIndex((item) => item?.file_name === fileName);
+  return -1;
+}
+
+async function loadNaiGallery({ focusAssetId = null, focusFileName = null } = {}) {
+  const seq = ++naiGalleryLoadSeq;
+  const current = naiImages[naiIdx] || null;
+  const previousAssetId = focusAssetId || current?.source_asset_id || null;
+  const previousFileName = focusFileName || current?.file_name || null;
   try {
     const data = await api("/api/gallery/nai_generated");
+    if (seq !== naiGalleryLoadSeq) return;
     naiImages = data.items || [];
-    if (naiImages.length && naiIdx < 0) naiIdx = 0;
-    if (naiIdx >= naiImages.length) naiIdx = naiImages.length - 1;
+    const focusedIndex = naiGalleryFocusIndex(naiImages, previousAssetId, previousFileName);
+    if (focusedIndex >= 0) naiIdx = focusedIndex;
+    else if (naiImages.length && naiIdx < 0) naiIdx = 0;
+    else if (naiIdx >= naiImages.length) naiIdx = naiImages.length - 1;
     renderViewer();
     renderHistory();
   } catch { /* 图库暂无该目录时忽略 */ }
@@ -4147,19 +4476,23 @@ async function loadNaiGallery() {
 function renderViewer() {
   const v = $("#nai-viewer");
   const meta = $("#nai-viewer-meta");
+  const metaCollapse = $("#nai-viewer-meta-collapse");
   const navi = $("#nai-navi");
   if (!naiImages.length || naiIdx < 0) {
     v.innerHTML = `<div class="empty">生成后图片显示在这里，点击可 100% 查看</div>`;
-    meta.textContent = ""; navi.textContent = ""; return;
+    meta.textContent = ""; navi.textContent = "";
+    if (metaCollapse) metaCollapse.hidden = true;
+    return;
   }
+  if (metaCollapse) metaCollapse.hidden = false;
   const it = naiImages[naiIdx];
   const src = `/gallery/nai_generated/${encodeURIComponent(it.file_path.split("/").pop())}`;
   v.innerHTML = `<img src="${src}" id="nai-viewer-img" alt="" />`;
   navi.textContent = `${naiIdx + 1} / ${naiImages.length}`;
   const recipe = naiRecipeFromItem(it);
   const settings = recipe.settings || recipe;
-  meta.innerHTML = `<div><strong>Prompt</strong> ${esc(it.prompt || "-")}</div><div><strong>Negative</strong> ${esc(it.negative_prompt || "-")}</div><div><strong>Seed</strong> ${esc(settings.seed ?? it.seed ?? "-")} · <strong>Model</strong> ${esc(settings.model ?? it.model ?? "-")} · <strong>Mode</strong> ${esc(recipe.mode || "txt2img")}</div>` +
-    `<div class="viewer-meta-actions"><button data-meta-action="restore">恢复参数</button><button data-meta-action="seed">复用 Seed</button><button data-meta-action="copy">复制 Prompt</button></div>` +
+  meta.innerHTML = `<div><strong>提示词</strong> ${esc(it.prompt || "-")}</div><div><strong>负面词</strong> ${esc(it.negative_prompt || "-")}</div><div><strong>种子</strong> ${esc(settings.seed ?? it.seed ?? "-")} · <strong>模型</strong> ${esc(settings.model ?? it.model ?? "-")} · <strong>模式</strong> ${esc(recipe.mode || "txt2img")}</div>` +
+    `<div class="viewer-meta-actions"><button data-meta-action="restore">恢复参数</button><button data-meta-action="seed">复用种子</button><button data-meta-action="copy">复制提示词</button></div>` +
     (it.snapshot_id ? `<div class="viewer-restore-actions"><button data-viewer-restore="">全部加载</button><button data-viewer-restore="character,appearance,clothing,expression,action">加载角色</button><button data-viewer-restore="style,quality">加载画风</button><button data-viewer-restore="composition,scene">加载构图</button></div>` : "");
   meta.querySelectorAll("[data-viewer-restore]").forEach((b) => b.addEventListener("click", () => {
     sendGalleryEvent(it, "restore");
@@ -4169,10 +4502,10 @@ function renderViewer() {
   meta.querySelectorAll("[data-meta-action]").forEach((b) => b.addEventListener("click", () => {
     const itemMeta = extractMetaFromGalleryItem(it);
     if (b.dataset.metaAction === "restore") { sendGalleryEvent(it, "restore"); setGenerationParent(it); applyGenerationConfig(itemMeta); }
-    else if (b.dataset.metaAction === "seed" && itemMeta.seed != null) { $("#nai-seed").value = String(itemMeta.seed); $("#nai-seed-mode").value = "fixed"; toast(`Seed ${itemMeta.seed} 已填入`); }
-    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("Prompt 已复制")).catch(() => { const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt, itemMeta.rawNegative, itemMeta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); toast("已填入 Prompt 框"); }); }
+    else if (b.dataset.metaAction === "seed" && itemMeta.seed != null) { $("#nai-seed").value = String(itemMeta.seed); $("#nai-seed-mode").value = "fixed"; toast(`种子 ${itemMeta.seed} 已填入`); }
+    else if (b.dataset.metaAction === "copy") { const t = itemMeta.effectivePrompt || itemMeta.rawPrompt || it.prompt || ""; navigator.clipboard.writeText(t).then(() => toast("提示词已复制")).catch(() => { const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt, itemMeta.rawNegative, itemMeta.characterPrompts); naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters); toast("已填入提示词框"); }); }
   }));
-  $("#nai-pin").textContent = it.favorite ? "♥ Pin" : "♡ Pin";
+  $("#nai-pin").textContent = it.favorite ? "♥ 已收藏" : "♡ 收藏";
   $("#nai-pin").classList.toggle("on", !!it.favorite);
   const img = $("#nai-viewer-img");
   img.style.transform = naiZoom === 1 ? "" : `scale(${naiZoom})`;
@@ -4180,6 +4513,90 @@ function renderViewer() {
     if (naiZoom === 1) { naiZoom = 2; img.style.transform = "scale(2)"; img.style.cursor = "zoom-out"; }
     else { naiZoom = 1; img.style.transform = ""; img.style.cursor = "zoom-in"; }
   };
+}
+
+const NAI_LAYOUT_PREF_KEY = "nai_layout_preferences_v1";
+
+function readNaiLayoutPreferences() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(NAI_LAYOUT_PREF_KEY) || "{}");
+    return { left: !!saved.left, right: !!saved.right };
+  } catch { return { left: false, right: false }; }
+}
+
+function saveNaiLayoutPreferences() {
+  const layout = $("#generate-view");
+  if (!layout) return;
+  try {
+    localStorage.setItem(NAI_LAYOUT_PREF_KEY, JSON.stringify({
+      left: layout.classList.contains("nai-left-collapsed"),
+      right: layout.classList.contains("nai-right-collapsed"),
+    }));
+  } catch { /* 隐私模式下忽略布局偏好持久化失败 */ }
+}
+
+function syncNaiLayoutUi() {
+  const layout = $("#generate-view");
+  if (!layout) return;
+  const leftCollapsed = layout.classList.contains("nai-left-collapsed");
+  const rightCollapsed = layout.classList.contains("nai-right-collapsed");
+  const focus = leftCollapsed && rightCollapsed;
+  layout.classList.toggle("nai-focus-mode", focus);
+  const focusButton = $("#nai-focus-toggle");
+  if (focusButton) {
+    focusButton.setAttribute("aria-pressed", String(focus));
+    focusButton.textContent = focus ? "退出专注" : "专注画布";
+    focusButton.title = focus ? "恢复两侧面板" : "收起两侧面板，让画布尽可能大";
+  }
+}
+
+function setNaiLeftCollapsed(collapsed, { persist = true } = {}) {
+  const layout = $("#generate-view");
+  const panel = $("#nai-left");
+  const button = $("#nai-left-toggle");
+  if (!layout || !panel || !button) return;
+  const next = !!collapsed;
+  layout.classList.toggle("nai-left-collapsed", next);
+  panel.classList.toggle("collapsed", next);
+  button.setAttribute("aria-expanded", String(!next));
+  button.textContent = next ? "展开" : "收起";
+  button.title = next ? "展开生成前检查" : "收起生成前检查";
+  syncNaiLayoutUi();
+  if (persist) saveNaiLayoutPreferences();
+}
+
+function setNaiRightCollapsed(collapsed) {
+  setNaiRightCollapsedInternal(collapsed, { persist: true });
+}
+
+function setNaiRightCollapsedInternal(collapsed, { persist = true } = {}) {
+  const layout = $("#generate-view");
+  const panel = $("#nai-right");
+  const button = $("#nai-right-toggle");
+  if (!layout || !panel || !button) return;
+  const next = !!collapsed;
+  layout.classList.toggle("nai-right-collapsed", next);
+  panel.classList.toggle("collapsed", next);
+  button.setAttribute("aria-expanded", String(!next));
+  button.textContent = next ? "展开" : "收起";
+  button.title = next ? "展开参数与历史" : "收起参数与历史";
+  syncNaiLayoutUi();
+  if (persist) saveNaiLayoutPreferences();
+}
+
+function setNaiFocusMode(focused, { persist = true } = {}) {
+  const next = !!focused;
+  setNaiLeftCollapsed(next, { persist: false });
+  setNaiRightCollapsedInternal(next, { persist: false });
+  syncNaiLayoutUi();
+  if (persist) saveNaiLayoutPreferences();
+}
+
+function restoreNaiLayoutPreferences() {
+  const saved = readNaiLayoutPreferences();
+  setNaiLeftCollapsed(saved.left, { persist: false });
+  setNaiRightCollapsedInternal(saved.right, { persist: false });
+  syncNaiLayoutUi();
 }
 
 function renderHistory() {
@@ -4216,9 +4633,9 @@ function updateAdvSummary(parameters) {
   const p = parameters || {};
   const parts = [];
   if (p.sampler) parts.push(p.sampler);
-  if (p.steps) parts.push(`Steps ${p.steps}`);
+  if (p.steps) parts.push(`步数 ${p.steps}`);
   if (p.guidance) parts.push(`CFG ${p.guidance}`);
-  if (p.scheduler && p.scheduler !== "karras") parts.push(p.scheduler);
+  if (p.scheduler && p.scheduler !== "karras") parts.push(p.scheduler === "normal" ? "普通调度" : p.scheduler === "exponential" ? "指数调度" : p.scheduler);
   $("#nai-adv-summary").textContent = parts.length ? parts.join(" · ") : "NovelAI 当前";
 }
 
@@ -4255,9 +4672,12 @@ function naiSyncRestoredPromptToState(basePrompt, globalUc, characters) {
   state.prompt = promptDocument.reconcileTargetText(state.prompt, "global_uc", globalUc, known);
   characters.forEach((character, index) => {
     state.prompt.characters[index].position = character.position ? { ...character.position } : null;
+    state.prompt.characters[index].enabled = character.enabled !== false;
     state.prompt = promptDocument.reconcileTargetText(state.prompt, `char:${index}`, character.prompt, known);
     state.prompt = promptDocument.reconcileTargetText(state.prompt, `char:${index}:uc`, character.negative_prompt, known);
   });
+  // 文本恢复也走同一套归类，避免 flat / legacy / metadata 三条入口行为不一致。
+  state.prompt = promptDocument.migrateBasePoseState(state.prompt);
 }
 
 // 结构化边界：把恢复出的干净 Base / Global UC / 角色分发到生成表单并同步权威状态。
@@ -4282,6 +4702,7 @@ function restorePromptDocumentFromGeneration(data = {}) {
     negative_prompt: String(character?.uc ?? character?.negative_prompt ?? ""),
     position: character?.position ? { x: Number(character.position.x), y: Number(character.position.y) } : null,
     name: character?.name || null,
+    enabled: character?.enabled !== false,
   }));
   naiSyncRestoredPromptToState(
     src.basePrompt != null ? String(src.basePrompt) : "",
@@ -4307,11 +4728,21 @@ async function naiRestoreItem(it) {
   sendGalleryEvent(it, "restore");
   setGenerationParent(it);
   const recipe = naiRecipeFromItem(it);
+  const itemMeta = extractMetaFromGalleryItem(it);
   const p = recipe.settings || recipe;
+  // 姿势批次的每张图保存了独立 PromptDocument；优先恢复该快照，
+  // 这样点击第 4 张图不会错误地回到批次第 1 张的姿势。
+  const hasStructuredState = recipe.structured_state && typeof recipe.structured_state === "object";
+  if (hasStructuredState) {
+    window.PromptBridge.dispatch({ type: "RESTORE_DOCUMENT", payload: { target: "base", document: recipe.structured_state } });
+    syncNaiCharactersFromState();
+    naiRenderCharacters();
+    renderWorkbenchEditorFromDocument({ force: true });
+  }
   // P0 结构化边界：与 applyGenerationConfig 共用 naiResolveRestoredPrompt 拆分，
   // 绝不把 legacy 结构化串（Base:/Character N:/Global UC:）整段写回 #nai-prompt。
-  const restored = naiResolveRestoredPrompt(recipe.prompt || it.prompt || "", recipe.negative_prompt ?? it.negative_prompt ?? "", recipe.characters);
-  naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters);
+  const restored = naiResolveRestoredPrompt(itemMeta.rawPrompt || recipe.prompt || it.prompt || "", itemMeta.rawNegative ?? recipe.negative_prompt ?? it.negative_prompt ?? "", itemMeta.characterPrompts || recipe.characters);
+  if (!hasStructuredState) naiApplyRestoredPrompt(restored.basePrompt, restored.globalUc, restored.characters);
   naiSetSelectValue("#nai-model", p.model, "nai-diffusion-5-full");
   $("#nai-width").value = p.width ?? 832;
   $("#nai-height").value = p.height ?? 1216;
@@ -4374,7 +4805,7 @@ function applyGenerationConfig(cfg) {
   restorePromptDocumentFromGeneration({
     basePrompt: restored.basePrompt ?? undefined,
     globalUc: restored.globalUc ?? undefined,
-    characters: (restored.characters || []).map((character) => ({ prompt: character.prompt, uc: character.negative_prompt, position: character.position })),
+    characters: (restored.characters || []).map((character) => ({ name: character.name, prompt: character.prompt, uc: character.negative_prompt, position: character.position, enabled: character.enabled })),
   });
   // Model
   naiSetSelectValue("#nai-model", cfg.model, "nai-diffusion-5-full");
@@ -4434,6 +4865,19 @@ function applyGenerationConfig(cfg) {
  * 新格式：item.parameters.meta 存在。
  * 旧格式：从 item.parameters.recipe 或 item.parameters 重建。
  */
+function filterImportedPresetTokens(text, presetGroups) {
+  const presetTags = new Set((presetGroups || []).flatMap((group) => Array.isArray(group) ? group : []).map((tag) => String(tag).trim().toLocaleLowerCase()).filter(Boolean));
+  if (!presetTags.size) return String(text || "").trim();
+  // 只过滤与自动预设完全相同的普通 token；带权重/强调/关系前缀的写法
+  // 可能是用户刻意调整过的内容，必须原样保留。
+  return joinPromptTokens(splitPromptTokens(text).filter((token) => !presetTags.has(String(token).trim().toLocaleLowerCase())));
+}
+
+function importedPromptWithoutAutoPresets(text, negative = false) {
+  const groups = negative ? Object.values(UC_PRESETS) : Object.values(QUALITY_PRESETS);
+  return filterImportedPresetTokens(text, groups);
+}
+
 function extractMetaFromGalleryItem(item) {
   const params = item?.parameters && typeof item.parameters === "object" ? item.parameters : {};
   // 新格式：直接有 meta 字段
@@ -4441,10 +4885,17 @@ function extractMetaFromGalleryItem(item) {
   // 旧格式：从 recipe 或 parameters 重建 meta
   const recipe = params.recipe && typeof params.recipe === "object" ? params.recipe : params;
   const s = recipe.settings || recipe;
+  // ZIP/外部图片导入通常只有 file_name 推导出的 prompt，没有本项目生成时的
+  // recipe 元数据；这类 prompt 往往已经是图片实际使用的完整提示词（包含
+  // masterpiece / very aesthetic / UC 等默认项）。读取时剔除自动预设，
+  // 再由当前工作台档位统一注入，避免预设重复填入。
+  const isExternalImportedImage = Object.keys(params).length === 0;
+  const importedPrompt = isExternalImportedImage ? importedPromptWithoutAutoPresets(recipe.prompt || item.prompt || "") : (recipe.prompt || item.prompt || "");
+  const importedNegative = isExternalImportedImage ? importedPromptWithoutAutoPresets(recipe.negative_prompt ?? item.negative_prompt ?? "", true) : (recipe.negative_prompt ?? item.negative_prompt ?? "");
   return {
-    rawPrompt: recipe.prompt || item.prompt || "",
+    rawPrompt: importedPrompt,
     effectivePrompt: recipe.prompt || item.prompt || "",
-    rawNegative: recipe.negative_prompt ?? item.negative_prompt ?? "",
+    rawNegative: importedNegative,
     effectiveNegative: recipe.negative_prompt ?? item.negative_prompt ?? "",
     model: s.model,
     width: s.width,
@@ -4486,6 +4937,22 @@ function naiUpdateRangeLabels() {
 
 // ---- 生图视图事件绑定 ----
 $("#nai-gen").addEventListener("click", naiGenerate);
+$("#nai-left-toggle")?.addEventListener("click", () => {
+  const layout = $("#generate-view");
+  setNaiLeftCollapsed(!layout?.classList.contains("nai-left-collapsed"));
+});
+$("#nai-right-toggle")?.addEventListener("click", () => {
+  const layout = $("#generate-view");
+  setNaiRightCollapsed(!layout?.classList.contains("nai-right-collapsed"));
+});
+$("#nai-focus-toggle")?.addEventListener("click", () => {
+  const layout = $("#generate-view");
+  setNaiFocusMode(!layout?.classList.contains("nai-focus-mode"));
+});
+$("#nai-pose-next")?.addEventListener("click", () => {
+  if (naiGenerationMode === "img2img") { toast("图生图请先确认基础图，再手动调整姿势"); return; }
+  naiPreparePoseVariations();
+});
 $("#nai-cancel").addEventListener("click", naiCancel);
 document.querySelectorAll("[data-nai-mode]").forEach((button) => button.addEventListener("click", () => naiSetMode(button.dataset.naiMode)));
 $("#nai-img2img-pick").addEventListener("click", () => $("#nai-img2img-file").click());
@@ -4536,12 +5003,18 @@ $("#nai-character-list").addEventListener("input", (event) => {
   window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index, position } });
 });
 $("#nai-character-list").addEventListener("change", (event) => {
+  if (event.target.matches("[data-character-enabled]")) {
+    const article = event.target.closest("[data-character-index]");
+    window.PromptBridge.dispatch({ type: "SET_CHARACTER_ENABLED", payload: { index: Number(article.dataset.characterIndex), enabled: event.target.checked } });
+    return;
+  }
   if (event.target.matches("[data-character-manual]")) {
     const article = event.target.closest("[data-character-index]");
     window.PromptBridge.dispatch({ type: "SET_CHARACTER_POSITION", payload: { index: Number(article.dataset.characterIndex), position: event.target.checked ? { x: 0.5, y: 0.5 } : null } });
   }
 });
 $("#nai-character-list").addEventListener("click", (event) => {
+  if (event.target.matches("[data-character-enabled], [data-character-name]")) { event.stopPropagation(); return; }
   const article = event.target.closest("[data-character-index]");
   if (!article) return;
   const index = Number(article.dataset.characterIndex);
@@ -4573,7 +5046,7 @@ $("#nai-free-text-use-en")?.addEventListener("change", (event) => { state.prompt
 $("#nai-resolution-category").addEventListener("change", () => { naiApplyResolutionPreset(); updateAdvSummary(naiCollectParameters()); naiRenderCost(); });
 $("#nai-width").addEventListener("change", () => { naiSyncResolutionFromInputs(); naiRenderCost(); });
 $("#nai-height").addEventListener("change", () => { naiSyncResolutionFromInputs(); naiRenderCost(); });
-$("#nai-count").addEventListener("input", naiRenderCost);
+$("#nai-count").addEventListener("input", () => { naiPoseBatch = null; naiRenderCost(); });
 $("#nai-steps").addEventListener("input", naiRenderCost);
 $("#nai-zoom-in").addEventListener("click", () => { naiZoom = Math.min(4, naiZoom + 0.5); applyZoom(); });
 $("#nai-zoom-out").addEventListener("click", () => { naiZoom = Math.max(1, naiZoom - 0.5); applyZoom(); });

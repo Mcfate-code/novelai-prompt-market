@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from prompt.recommendation import RecommendationService
 
@@ -73,6 +74,28 @@ class PhaseCRecommendationV3Test(unittest.TestCase):
         self.assertTrue(reason)
         self.assertNotRegex(reason.lower(), r"rrf|npmi|score")
 
+    def test_general_recommendation_has_runtime_safety_boundary(self):
+        service = self.service({"global_related": [
+            {"tag": "bedroom"},
+            {"tag": "pantyshot", "is_adult": 0},
+            {"tag": "onee shota", "is_adult": 0},
+        ]})
+        result = service.recommend_v3(tags=["blue eyes"], mode="general", limit=20)
+        tags = {item["tag"] for item in result["recommendations"]}
+        self.assertIn("bedroom", tags)
+        self.assertNotIn("pantyshot", tags)
+        self.assertNotIn("onee shota", tags)
+
+    def test_adult_recommendation_keeps_adult_tags_but_blocks_minor_like(self):
+        service = self.service({"global_related": [
+            {"tag": "pantyshot", "is_adult": 1},
+            {"tag": "onee shota", "is_adult": 1},
+        ]})
+        result = service.recommend_v3(tags=["bedroom"], mode="adult", limit=20)
+        tags = {item["tag"] for item in result["recommendations"]}
+        self.assertIn("pantyshot", tags)
+        self.assertNotIn("onee shota", tags)
+
     def test_last_added_tag_intent_changes_subset(self):
         sources = {"global_related": [
             {"tag": "other", "slot": "base_composition"},
@@ -129,6 +152,27 @@ class PhaseCRecommendationV3Test(unittest.TestCase):
         ]}).recommend_v3(tags=["bedroom"], target="base")
         self.assertEqual(result["recommendations"][0]["tag"], "bed")
         self.assertNotIn("alice", [i["tag"] for i in result["recommendations"]])
+
+    def test_slot_prior_rejects_stale_cross_slot_rows(self):
+        class FakePrior:
+            def related_tags(self, *args, **kwargs): return []
+            def semantic_neighbors(self, *args, **kwargs): return []
+            def context_candidates(self, *args, **kwargs): return []
+            def next_slot_prior(self, *args, **kwargs): return []
+            def slot_candidates(self, slot, **kwargs):
+                return [{"tag": "male focus"}, {"tag": "portrait"}, {"tag": "legacy tail"}]
+            def semantic_node_for_tag(self, tag):
+                return {"male focus": "char_identity", "portrait": "base_composition"}.get(tag)
+
+        state = SimpleNamespace(next_steps=lambda target, limit: [
+            SimpleNamespace(node_id="base_composition", label="Composition", zh="构图", status="empty", reason="尚未设置"),
+        ])
+        with patch("prompt.prior.get_prior", return_value=FakePrior()):
+            result = self.service().recommend_v3(tags=["bedroom"], target="base", semantic_state=state)
+        tags = {item["tag"] for item in result["recommendations"]}
+        self.assertIn("portrait", tags)
+        self.assertNotIn("male focus", tags)
+        self.assertNotIn("legacy tail", tags)
 
     def test_uc_never_produces_positive_recommendations(self):
         result = self.service({"global_related": ["candidate"]}).recommend_v3(tags=["seed"], target="global_uc")

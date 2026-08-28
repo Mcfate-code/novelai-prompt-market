@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from prompt.sections import classify_tag as classify_prompt_section
+from prompt.prior_safety import classify_tag_safety
 
 
 RRF_K = 60
@@ -335,8 +336,8 @@ class RecommendationService:
         # Each prior family degrades independently (spec 4.8): a failure in the
         # embedding/neighbour prior must not disable the context / slot /
         # next-slot priors, and vice versa.  Failures are recorded for debug only.
+        prior = None
         if use_prior:
-            prior = None
             try:
                 from prompt import prior as prior_mod
                 prior = prior_mod.get_prior()
@@ -370,15 +371,23 @@ class RecommendationService:
                 for node in nodes:
                     try:
                         for raw in prior.slot_candidates(node, context=self._context_map(ctx), adult=adult) or []:
-                            self._v3_add(candidates, rankings, "semantic_context", {**raw, "slot": node}, ctx)
+                            # Mark offline slot candidates so the canonical semantic
+                            # ownership table can reject stale/misclassified rows
+                            # (for example ``male focus`` was historically stored
+                            # under composition although it belongs to identity).
+                            self._v3_add(candidates, rankings, "semantic_context",
+                                         {**raw, "slot": node, "_slot_prior_candidate": True}, ctx)
                     except Exception as exc:
                         self._record_debug("slot_prior", exc)
                 # 5. next-slot transition prior
                 try:
-                    filled = [s.get("node_id") for s in self._filled_slots(state_dict)]
+                    # _filled_slots 已经返回 node_id 字符串；旧代码再次调用
+                    # .get 会被异常捕获，导致 next-slot prior 永远失效。
+                    filled = self._filled_slots(state_dict)
                     for raw in prior.next_slot_prior(filled, adult=adult) or []:
                         for candidate in prior.slot_candidates(raw.get("node_id", ""), context=self._context_map(ctx), adult=adult) or []:
-                            self._v3_add(candidates, rankings, "semantic_context", {**candidate, "slot": raw.get("node_id")}, ctx)
+                            self._v3_add(candidates, rankings, "semantic_context",
+                                         {**candidate, "slot": raw.get("node_id"), "_slot_prior_candidate": True}, ctx)
                 except Exception as exc:
                     self._record_debug("next_slot_prior", exc)
         for source in self.SOURCE_NAMES:
@@ -408,6 +417,33 @@ class RecommendationService:
                         entry["meta"].setdefault("sections", {classify_prompt_section(self.conn, tag)})
                 except Exception:
                     pass
+        # The slot prior is generated from frequency data and can lag behind
+        # the semantic ownership table.  Do not surface a candidate in the
+        # wrong slot (or an unowned taxonomy tail) just because it is popular.
+        # Keep this validation scoped to offline slot candidates; explicit
+        # semantic-node seeds and injected adapters remain backwards compatible.
+        owner_lookup = getattr(prior, "semantic_node_for_tag", None)
+        if prior is not None and callable(owner_lookup):
+            for tag, entry in list(candidates.items()):
+                meta = entry.get("meta", {})
+                if not meta.get("_slot_prior_candidate"):
+                    continue
+                slot = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
+                if not slot:
+                    continue
+                try:
+                    owner = owner_lookup(tag)
+                except Exception as exc:
+                    self._record_debug("slot_owner_lookup", exc)
+                    owner = None
+                if owner == slot:
+                    continue
+                # Unknown ownership is not safe enough for a slot-specific
+                # recommendation either: it is usually a stale taxonomy row.
+                del candidates[tag]
+                for values in rankings.values():
+                    while tag in values:
+                        values.remove(tag)
         return rankings, candidates, same_slot
 
     def _record_debug(self, key: str, exc: Exception) -> None:
@@ -482,6 +518,7 @@ class RecommendationService:
         slot = meta.get("slot") or meta.get("node_id") or meta.get("dst_node")
         public["slot"] = slot
         public["target"] = meta.get("target", ctx.target or "base")
+        public["operation"] = "add"
         public["scene_context"] = any(meta.get(k) is not None for k in ("scene", "primary_act", "stage", "position", "body_focus", "activity", "participant_count", "composition", "environment"))
         # Human-meaningful reason (spec 4.9); never exposes raw source names.
         intent_node = ctx.node_id or (ctx.semantic_node.get("node_id") if isinstance(ctx.semantic_node, Mapping) else None)
@@ -518,6 +555,7 @@ class RecommendationService:
             pub["reason"] = f"这是{_slot_zh(node)}的相似替代项" if node else "这是相似替代项"
             pub["slot"] = node
             pub["target"] = ctx.target or "base"
+            pub["operation"] = "replace"
             pub["scene_context"] = False
             pub["similarity"] = float(meta.get("similarity", meta.get("semantic_priority", 0)) or 0)
             out.append(pub)
@@ -647,7 +685,20 @@ class RecommendationService:
         tag, meta = item["tag"], item["meta"]
         if tag in selected or tag in self.hidden_tags or meta.get("nsfw") and self.adolescent_mode:
             return False
-        if ctx.mode == "adult" and (meta.get("minor_like") or meta.get("juvenile") or meta.get("underage")):
+        # 运行时二次安全分类：不能只信 prior 中的 is_adult/nsfw 元数据。
+        # 这个边界防止错误标记的成人或年龄敏感标签混入 General 推荐。
+        scope = meta.get("safety_scope") or classify_tag_safety(
+            tag,
+            rating=meta.get("rating"),
+            meta=meta,
+        )
+        adult_mode = ctx.mode in {"adult", "nsfw", "scene"}
+        if self.adolescent_mode or not adult_mode:
+            if scope != "general":
+                return False
+        elif scope in ("minor_like", "age_ambiguous"):
+            return False
+        if adult_mode and (meta.get("minor_like") or meta.get("juvenile") or meta.get("underage")):
             return False
         if ctx.target in TARGET_SECTIONS and meta.get("target") and meta["target"] != ctx.target:
             return False

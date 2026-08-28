@@ -1,5 +1,5 @@
 import unittest
-from prompt.semantic_state import build_semantic_state, EMPTY, PARTIAL, FILLED, FILLED_BY_AUTO_PRESET
+from prompt.semantic_state import build_semantic_state, EMPTY, PARTIAL, FILLED, FILLED_BY_AUTO_PRESET, SATISFIED_BY_ALTERNATIVE
 
 class TestSemanticState(unittest.TestCase):
     def _state(self, sections=None, characters=None, ctx=None):
@@ -48,6 +48,14 @@ class TestSemanticState(unittest.TestCase):
         # At least one scene-related slot should be non-empty
         non_empty = [slot for slot in s.base_slots if slot.status != EMPTY and slot.node_id != "quality"]
         self.assertTrue(len(non_empty) > 0)
+
+    def test_indoor_and_outdoor_are_alternative_environment_branches(self):
+        state = self._state(sections={"scene": [{"tag": "bedroom"}]})
+        s = build_semantic_state(state)
+        slots = {slot.node_id: slot for slot in s.base_slots}
+        self.assertEqual(slots["env_indoor"].status, FILLED)
+        self.assertEqual(slots["env_outdoor"].status, SATISFIED_BY_ALTERNATIVE)
+        self.assertNotIn("env_outdoor", {slot.node_id for slot in s.next_steps("base")})
 
     def test_quality_preset_on(self):
         s = build_semantic_state(self._state(), generation_config={"positiveTier":"standard"})

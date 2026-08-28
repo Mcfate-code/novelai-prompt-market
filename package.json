@@ -8,10 +8,14 @@
   },
   "scripts": {
     "test": "node --experimental-sqlite --test server/*.test.mjs tests/*.mjs static/tests/*.mjs",
+    "test:e2e": "playwright test e2e/product-v3.spec.mjs",
     "lint:js": "node --experimental-vm-modules scripts/check_js_syntax.mjs"
   },
   "dependencies": {
     "jszip": "^3.10.1",
     "undici": "^7.29.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
   }
 }

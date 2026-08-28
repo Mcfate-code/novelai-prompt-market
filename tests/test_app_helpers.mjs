@@ -28,7 +28,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitPromptTokens } from "../static/prompt-tokenizer.js";
+import { splitPromptTokens, joinPromptTokens } from "../static/prompt-tokenizer.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -41,6 +41,8 @@ globalThis.window = { NaiStructured };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_JS = readFileSync(path.join(__dirname, "..", "static", "app.js"), "utf8");
+const APP_HTML = readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
+const APP_CSS = readFileSync(path.join(__dirname, "..", "static", "app.css"), "utf8");
 
 // ---- 源码提取：把 app.js 中指定顶层函数原样取出（balanced-brace，容忍 ${...} 模板字面量） ----
 function extractFunction(name) {
@@ -78,6 +80,10 @@ const remapNaiTagTarget = loadFunction("remapNaiTagTarget");
 // ---- P2 翻译一致性纯函数（无自由变量） ----
 const shouldAcceptTranslation = loadFunction("shouldAcceptTranslation");
 const mergeImportedFreeText = loadFunction("mergeImportedFreeText");
+const naiRecipeFromItem = loadFunction("naiRecipeFromItem");
+const filterImportedPresetTokens = new Function("splitPromptTokens", "joinPromptTokens", `${extractFunction("filterImportedPresetTokens")}; return filterImportedPresetTokens;`)(splitPromptTokens, joinPromptTokens);
+const importedPromptWithoutAutoPresets = (text, negative = false) => filterImportedPresetTokens(text, negative ? [["worst quality", "lowres"]] : [["masterpiece", "very aesthetic"]]);
+const extractMetaFromGalleryItem = new Function("naiRecipeFromItem", "importedPromptWithoutAutoPresets", `${extractFunction("extractMetaFromGalleryItem")}; return extractMetaFromGalleryItem;`)(naiRecipeFromItem, importedPromptWithoutAutoPresets);
 const recognizedTagToken = loadFunction("recognizedTagToken");
 const extractRecognizedTagIdentities = new Function("recognizedTagToken", "splitPromptTokens", `${extractFunction("extractRecognizedTagIdentities")}; return extractRecognizedTagIdentities;`)(recognizedTagToken, splitPromptTokens);
 const promptTokenRange = loadFunction("promptTokenRange");
@@ -87,6 +93,7 @@ const workspaceTabToTarget = loadFunction("workspaceTabToTarget");
 // ---- P3 修复纯函数（无自由变量） ----
 const naiStructuredBaseLine = loadFunction("naiStructuredBaseLine");
 const naiAutocompleteSkipSearch = loadFunction("naiAutocompleteSkipSearch");
+const naiGalleryFocusIndex = loadFunction("naiGalleryFocusIndex");
 
 test("recognized identity extraction is target-local and excludes unsupported syntax", () => {
   const known = new Map([["same", "same"], ["character tag", "character tag"]]);
@@ -105,6 +112,67 @@ test("advanced cart contract keeps target mapping and layout hooks explicit", ()
   assert.match(APP_JS, /cart-advanced-layout/);
   assert.match(APP_JS, /closest\("\.tag-card"\)/);
   assert.match(APP_JS, /setTimeout\(\(\) => showThumbPreview/);
+});
+
+test("generation layout keeps viewer details and run controls independently collapsible", () => {
+  assert.match(APP_HTML, /<details id="nai-viewer-meta-collapse"[^>]*hidden>/);
+  assert.match(APP_HTML, /<section id="nai-left" class="panel nai-left">/);
+  assert.match(APP_HTML, /id="nai-left-toggle"[^>]*aria-controls="nai-left"/);
+  assert.match(APP_HTML, /<section id="nai-right" class="panel nai-right">/);
+  assert.match(APP_HTML, /id="nai-right-toggle"[^>]*aria-controls="nai-right"/);
+  assert.match(APP_HTML, /id="nai-focus-toggle"[^>]*aria-pressed="false"/);
+  assert.match(APP_HTML, /<div class="nai-generate-bar"[^>]*>[^]*id="nai-gen"/);
+  assert.match(APP_CSS, /\.nai-layout\.nai-left-collapsed\.nai-right-collapsed[\s\S]*grid-template-columns: 46px minmax\(0, 1fr\) 46px/);
+  assert.match(APP_CSS, /\.nai-viewer img \{[^}]*width: 100%;[^}]*height: 100%;/);
+  assert.match(APP_JS, /function setNaiLeftCollapsed\(collapsed/);
+  assert.match(APP_JS, /function setNaiRightCollapsed\(collapsed\)/);
+  assert.match(APP_JS, /function setNaiFocusMode\(focused/);
+  assert.match(APP_JS, /metaCollapse\.hidden = true/);
+});
+
+test("工作台换姿势接受 characters 逻辑目标，并加载已审核模板", () => {
+  // APPLY_POSE_VARIATION 会整体替换 PromptDocument；characters 是逻辑作用域，
+  // 不能按普通 char:N 目标解析后静默丢弃。
+  assert.match(APP_JS, /action\.type === "APPLY_POSE_VARIATION" && payload\.target === "characters"[\s\S]*\? "base"/);
+  assert.match(APP_JS, /naiLoadApprovedPoseTemplates\(\{ force: true \}\)/);
+  assert.match(APP_JS, /library: \[\.\.\.POSE_LIBRARY, \.\.\.naiPositionOptionsAsPoseTemplates\(\), \.\.\.naiApprovedPoseTemplates\]/);
+});
+
+test("newly saved gallery asset remains focused after the history list prepends it", () => {
+  const before = [
+    { file_name: "old-b.png", source_asset_id: "asset-b" },
+    { file_name: "old-a.png", source_asset_id: "asset-a" },
+  ];
+  const after = [
+    { file_name: "new.png", source_asset_id: "asset-new" },
+    ...before,
+  ];
+  assert.equal(naiGalleryFocusIndex(after, "asset-new"), 0);
+  assert.equal(naiGalleryFocusIndex(after, "asset-b"), 1);
+  assert.equal(naiGalleryFocusIndex(after, null, "old-a.png"), 2);
+});
+
+test("读取外部导入图片提示词时过滤自动预设，保留用户加权写法", () => {
+  assert.equal(filterImportedPresetTokens("1girl, masterpiece, very aesthetic, 1.4::masterpiece::", [["masterpiece", "very aesthetic"]]), "1girl, 1.4::masterpiece::");
+  assert.equal(filterImportedPresetTokens("worst quality, lowres", [["worst quality", "lowres"]]), "");
+});
+
+test("外部导入图片提示词过滤预设后由当前档位统一注入", () => {
+  const meta = extractMetaFromGalleryItem({ prompt: "1girl, masterpiece, very aesthetic", negative_prompt: "worst quality" });
+  assert.equal(meta.rawPrompt, "1girl");
+  assert.equal(meta.rawNegative, "");
+  assert.equal(meta.positiveTier, "standard");
+  assert.equal(meta.negativeTier, "heavy");
+});
+
+test("带生成元数据的图库图片仍恢复原有预设档位", () => {
+  const meta = extractMetaFromGalleryItem({
+    prompt: "1girl, masterpiece",
+    parameters: { recipe: { prompt: "1girl, masterpiece", quality_preset: "light", uc_preset: "human_focus" } },
+  });
+  assert.equal(meta.positiveTier, "light");
+  assert.equal(meta.negativeTier, "human_focus");
+  assert.equal(meta.rawPrompt, "1girl, masterpiece");
 });
 
 // ---- 4. P3 修复：结构化 Base 手动编辑不再整段解析多行 display ----
@@ -561,7 +629,7 @@ test("P0 naiRestoreItem and clipboard fallbacks share clean restore (no structur
   assert.match(APP_JS, /function naiSyncRestoredPromptToState\(/);
   assert.match(APP_JS, /function naiApplyRestoredPrompt\(/);
   // naiRestoreItem 经 naiResolveRestoredPrompt + naiApplyRestoredPrompt，不再直接赋值 recipe.prompt
-  assert.match(APP_JS, /naiResolveRestoredPrompt\(recipe\.prompt \|\| it\.prompt \|\| "", recipe\.negative_prompt \?\? it\.negative_prompt \?\? "", recipe\.characters\)/);
+  assert.match(APP_JS, /naiResolveRestoredPrompt\(itemMeta\.rawPrompt \|\| recipe\.prompt \|\| it\.prompt \|\| "", itemMeta\.rawNegative \?\? recipe\.negative_prompt \?\? it\.negative_prompt \?\? "", itemMeta\.characterPrompts \|\| recipe\.characters\)/);
   assert.doesNotMatch(APP_JS, /\$\("#nai-prompt"\)\.value = recipe\.prompt/);
   // 三个恢复入口（naiRestoreItem + 两处剪贴板失败回退）统一走 naiApplyRestoredPrompt 分发
   assert.equal((APP_JS.match(/naiApplyRestoredPrompt\(restored\.basePrompt, restored\.globalUc, restored\.characters\)/g) || []).length, 3, "restore + 2 clipboard fallbacks all use shared restore");

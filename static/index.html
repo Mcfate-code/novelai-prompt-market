@@ -17,12 +17,12 @@
       <select id="model-select"></select>
     </div>
     <div class="searchbox">
-      <input id="search-input" type="text" placeholder="搜索：蓝眼 / blue eyes / 长发 …" autocomplete="off" />
+      <input id="search-input" type="text" placeholder="搜索：蓝眼 / 例：blue eyes / 长发 …" autocomplete="off" />
       <button id="semantic-search-btn" class="semantic-search-btn" type="button" title="使用中文自然语言查找英文标签">语义找词</button>
     </div>
     <nav class="top-actions module-nav" aria-label="主要功能">
       <button class="top-action primary" data-module="generate" data-view="generate">生图 <span>主工作台</span></button>
-      <button class="top-action active" data-module="market" data-view="browse">标签超市 <span>准备 Prompt</span></button>
+      <button class="top-action active" data-module="market" data-view="browse">标签超市 <span>准备提示词</span></button>
       <button class="top-action" data-module="gallery" data-view="gallery">图库 <span>整理结果</span></button>
       <button id="settings-btn" class="top-action top-settings" title="打开项目设置">设置</button>
     </nav>
@@ -37,7 +37,7 @@
       <span class="context-divider" aria-hidden="true"></span>
       <button id="top-import-btn" class="context-action">导入提示词</button>
       <button id="bundles-btn" class="context-action">标签模板</button>
-      <button id="prompt-history-btn" class="context-action">Prompt 历史</button>
+      <button id="prompt-history-btn" class="context-action">提示词历史</button>
       <button id="sync-btn" class="context-action" title="从 Danbooru 更新标签库">更新标签库</button>
     </nav>
     <div class="subbar-controls">
@@ -49,11 +49,11 @@
         过滤：
         <select id="cat-filter">
           <option value="">全部类别</option>
-          <option value="0">General</option>
-          <option value="4">Character</option>
-          <option value="1">Artist</option>
-          <option value="3">Copyright</option>
-          <option value="5">Meta</option>
+          <option value="0">通用</option>
+          <option value="4">角色</option>
+          <option value="1">画师</option>
+          <option value="3">作品</option>
+          <option value="5">元数据</option>
         </select>
       </div>
     </div>
@@ -62,30 +62,37 @@
 
   <!-- 生图视图（三栏：Prompt Editor / Image Viewer / Generation Settings + History） -->
   <main id="generate-view" class="nai-layout" style="display:none">
-    <!-- 左：Prompt Editor（Prompt/UC tabs、Base/Character tabs、多角色、Effective Preview） -->
-    <section class="panel nai-left">
+    <!-- 左：只做生成前确认。推荐 / 图形化 / Scene 统一放在标签超市。 -->
+    <section id="nai-left" class="panel nai-left">
       <div class="nai-panel-head">
-        <span class="nai-panel-kicker">Prompt Editor</span>
-        <div id="prompt-mode-switch" class="nai-prompt-mode" role="group" aria-label="提示词模式（Text / Visual / Scene）">
-          <button type="button" class="active" data-prompt-mode="text">Text</button>
-          <button type="button" data-prompt-mode="visual">Visual</button>
-          <button type="button" data-prompt-mode="scene">Scene</button>
+        <span class="nai-panel-kicker">生成前检查</span>
+        <div class="nai-panel-head-actions">
+          <button id="nai-back-to-market" class="nai-btn-sm" type="button">返回超市继续编辑</button>
+          <button id="nai-left-toggle" class="nai-btn-sm nai-panel-toggle" type="button" aria-expanded="true" aria-controls="nai-left">收起</button>
         </div>
+      </div>
+      <p class="nai-workbench-hint">这里只做生成前的最终确认；标签推荐、图形化构建和场景编排请在标签超市完成。</p>
+      <div class="nai-pose-toolbar" aria-label="姿势快捷操作">
+        <button id="nai-pose-next" class="nai-btn-sm nai-pose-btn" type="button" title="保持角色、画风和参数不变，仅替换姿势">换姿势</button>
+        <span class="nai-pose-help">一键随机替换姿势；批次大于 1 时为每张图准备不同姿势</span>
+        <span id="nai-pose-status" class="nai-pose-status" role="status" aria-live="polite"></span>
       </div>
       <div id="nai-api-status" class="nai-live" title="NovelAI 官方 API 连接状态"><span class="nai-live-dot"></span><span>正在检查官方 API…</span></div>
 
       <div class="nai-tabs">
-        <button class="nai-tab active" data-tab="prompt">Prompt</button>
-        <button class="nai-tab" data-tab="uc">UC</button>
+        <button class="nai-tab active" data-tab="prompt">提示词</button>
+        <button class="nai-tab" data-tab="uc">负面词（UC）</button>
       </div>
-      <div class="nai-character-tabs" id="nai-character-tabs" role="tablist">
-        <button type="button" class="nai-char-tab active" data-nai-char-tab="base">Base</button>
-        <button type="button" class="nai-char-tab" id="nai-character-add" title="添加角色">+ 角色</button>
-        <span class="nai-character-count" id="nai-character-count">0</span>
+      <div id="nai-character-tabs-anchor">
+        <div class="nai-character-tabs" id="nai-character-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected="true" class="nai-char-tab active" data-nai-char-tab="base">基础</button>
+          <button type="button" class="nai-char-tab" id="nai-character-add" title="添加角色">+ 角色</button>
+          <span class="nai-character-count" id="nai-character-count">0</span>
+        </div>
       </div>
 
       <textarea id="nai-editor" class="nai-prompt" placeholder="1girl, masterpiece, …"></textarea>
-      <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 tags</span></div>
+      <div class="nai-prompt-meta"><span id="nai-prompt-meta">0 个标签</span></div>
       <details class="nai-free-text-collapse" id="nai-free-text-collapse" hidden>
         <summary><span>▸ 自然语言补充</span></summary>
         <div class="nai-free-text-body">
@@ -95,33 +102,27 @@
         </div>
       </details>
 
-      <div id="nai-character-list" class="nai-character-list"><div class="empty">Base Prompt 在顶部编辑</div></div>
-
-      <!-- Tag Assistant and Visual Builder share PromptBridge state. -->
-      <div id="tag-assistant-root"></div>
-      <div id="visual-prompt-root"></div>
-      <!-- NSFW Scene Builder（成人模式启用；青少年模式禁用空态）。 -->
-      <div id="nsfw-builder-root"></div>
+      <div id="nai-character-list" class="nai-character-list"><div class="empty">基础提示词在上方编辑</div></div>
 
       <details class="nai-effective-preview">
         <summary id="nai-effective-toggle"><span>实际发送内容 ▸</span></summary>
         <div class="nai-effective-body">
-          <div class="nai-effective-row"><span>Effective Prompt</span><pre id="nai-effective-prompt"></pre></div>
-          <div class="nai-effective-row nai-effective-source"><span>Positive · User</span><pre id="nai-source-positive-user"></pre></div>
-          <div class="nai-effective-row nai-effective-source"><span>Positive · Auto</span><pre id="nai-source-positive-auto"></pre></div>
-          <div class="nai-effective-row"><span>Effective Negative</span><pre id="nai-effective-negative"></pre></div>
-          <div class="nai-effective-row nai-effective-source"><span>Negative · User</span><pre id="nai-source-negative-user"></pre></div>
-          <div class="nai-effective-row nai-effective-source"><span>Negative · Auto</span><pre id="nai-source-negative-auto"></pre></div>
-          <div class="nai-effective-row nai-effective-source"><span>Cross-polarity conflicts (warning, not removed)</span><pre id="nai-suppressed-auto"></pre></div>
-          <div class="nai-effective-row nai-effective-source"><span>User cross-polarity conflicts</span><pre id="nai-user-conflicts"></pre></div>
+          <div class="nai-effective-row"><span>实际生效提示词</span><pre id="nai-effective-prompt"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>正向 · 手动</span><pre id="nai-source-positive-user"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>正向 · 自动</span><pre id="nai-source-positive-auto"></pre></div>
+          <div class="nai-effective-row"><span>实际生效负面词</span><pre id="nai-effective-negative"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>负向 · 手动</span><pre id="nai-source-negative-user"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>负向 · 自动</span><pre id="nai-source-negative-auto"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>正负向冲突（仅警告，不移除）</span><pre id="nai-suppressed-auto"></pre></div>
+          <div class="nai-effective-row nai-effective-source"><span>用户正负向冲突</span><pre id="nai-user-conflicts"></pre></div>
           <div class="nai-effective-grid">
-            <span>Model</span><strong id="nai-eff-model"></strong>
-            <span>Resolution</span><strong id="nai-eff-resolution"></strong>
-            <span>Sampler</span><strong id="nai-eff-sampler"></strong>
-            <span>Scheduler</span><strong id="nai-eff-scheduler"></strong>
-            <span>Steps</span><strong id="nai-eff-steps"></strong>
-            <span>CFG</span><strong id="nai-eff-cfg"></strong>
-            <span>Seed</span><strong id="nai-eff-seed"></strong>
+            <span>模型</span><strong id="nai-eff-model"></strong>
+            <span>分辨率</span><strong id="nai-eff-resolution"></strong>
+            <span>采样器</span><strong id="nai-eff-sampler"></strong>
+            <span>调度器</span><strong id="nai-eff-scheduler"></strong>
+            <span>步数</span><strong id="nai-eff-steps"></strong>
+            <span>引导系数（CFG）</span><strong id="nai-eff-cfg"></strong>
+            <span>种子</span><strong id="nai-eff-seed"></strong>
           </div>
         </div>
       </details>
@@ -130,28 +131,33 @@
     <!-- 中：Image Viewer（中心画布 + 缩放 / Pin / 恢复 / 图生图） -->
     <section class="panel nai-center">
       <div class="nai-viewer-toolbar">
-        <span id="nai-navi" class="nai-navi"></span>
+        <span class="nai-viewer-identity"><strong id="nai-viewer-context">历史结果</strong><span id="nai-navi" class="nai-navi"></span></span>
         <div class="nai-viewer-actions">
-          <button id="nai-pin" class="nai-btn-sm" title="收藏当前图">♡ Pin</button>
+          <button id="nai-focus-toggle" class="nai-btn-sm" type="button" aria-pressed="false" title="收起两侧面板，让画布尽可能大">专注画布</button>
+          <button id="nai-pin" class="nai-btn-sm" title="收藏当前图">♡ 收藏</button>
           <button id="nai-reuse" class="nai-btn-sm" title="恢复当前图的完整生成设置">恢复设置</button>
           <button id="nai-use-img2img" class="nai-btn-sm" title="以当前历史图作为图生图基础图">图生图</button>
           <button id="nai-zoom-out" class="nai-btn-sm" title="缩小">−</button>
-          <button id="nai-zoom-fit" class="nai-btn-sm" title="适应窗口">Fit</button>
+          <button id="nai-zoom-fit" class="nai-btn-sm" title="适应窗口">适应窗口</button>
           <button id="nai-zoom-in" class="nai-btn-sm" title="放大">+</button>
         </div>
       </div>
       <div id="nai-viewer" class="nai-viewer"><div class="empty">生成后图片显示在这里，点击可 100% 查看</div></div>
-      <div id="nai-viewer-meta" class="nai-viewer-footer"></div>
+      <details id="nai-viewer-meta-collapse" class="nai-viewer-meta-collapse" hidden>
+        <summary><span>图片详细数据</span><span class="nai-collapse-caret">▾</span></summary>
+        <div id="nai-viewer-meta" class="nai-viewer-footer"></div>
+      </details>
     </section>
 
     <!-- 右：Generation Settings（基础常显 / Advanced 折叠）+ History（可隐藏） -->
-    <section class="panel nai-right">
+    <section id="nai-right" class="panel nai-right">
       <div class="nai-panel-head">
-        <span class="nai-panel-kicker">Generation Settings</span>
+        <span class="nai-panel-kicker">生图参数</span>
+        <button id="nai-right-toggle" class="nai-btn-sm nai-panel-toggle" type="button" aria-expanded="true" aria-controls="nai-right">收起</button>
       </div>
       <div class="nai-settings-body">
         <div class="nai-quick-toggles">
-          <label class="nai-toggle-item" title="Prompt 追加 transparent background，API 使用 straight_alpha">
+          <label class="nai-toggle-item" title="提示词追加“透明背景”标签，API 使用 straight_alpha">
             <input type="checkbox" id="nai-transparent" /><span>透明背景</span>
           </label>
         </div>
@@ -162,17 +168,17 @@
         </div>
 
         <div class="nai-control-strip">
-          <label class="nai-strip-field"><span>Model</span><select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 Full</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 Curated</option><option value="nai-diffusion-4-5-full">NAI Diffusion V4.5 Full</option><option value="nai-diffusion-4-full">NAI Diffusion V4 Full</option></select></label>
+          <label class="nai-strip-field"><span>模型</span><select id="nai-model" class="nai-select"><option value="nai-diffusion-5-full">NAI Diffusion V5 完整版</option><option value="nai-diffusion-5-curated">NAI Diffusion V5 精选版</option><option value="nai-diffusion-4-5-full">NAI Diffusion V4.5 完整版</option><option value="nai-diffusion-4-full">NAI Diffusion V4 完整版</option></select></label>
           <label class="nai-strip-field"><span>尺寸档位</span><select id="nai-resolution-category" class="nai-select">
-            <option value="small_portrait">Small · 纵向 512×768</option>
-            <option value="small_square">Small · 方形 640×640</option>
-            <option value="small_landscape">Small · 横向 768×512</option>
-            <option value="normal_portrait" selected>Normal · 纵向 832×1216</option>
-            <option value="normal_square">Normal · 方形 1024×1024</option>
-            <option value="normal_landscape">Normal · 横向 1216×832</option>
-            <option value="large_portrait">Large · 纵向 1024×1536</option>
-            <option value="large_square">Large · 方形 1472×1472</option>
-            <option value="large_landscape">Large · 横向 1536×1024</option>
+            <option value="small_portrait">小型 · 纵向 512×768</option>
+            <option value="small_square">小型 · 方形 640×640</option>
+            <option value="small_landscape">小型 · 横向 768×512</option>
+            <option value="normal_portrait" selected>标准 · 纵向 832×1216</option>
+            <option value="normal_square">标准 · 方形 1024×1024</option>
+            <option value="normal_landscape">标准 · 横向 1216×832</option>
+            <option value="large_portrait">大型 · 纵向 1024×1536</option>
+            <option value="large_square">大型 · 方形 1472×1472</option>
+            <option value="large_landscape">大型 · 横向 1536×1024</option>
             <option value="custom">自定义宽高</option>
           </select></label>
           <label class="nai-strip-field"><span>批次</span><input id="nai-count" class="nai-select" type="number" min="1" max="6" step="1" value="1" inputmode="numeric" /></label>
@@ -180,12 +186,12 @@
 
         <div class="nai-seed-row">
           <select id="nai-seed-mode" class="nai-select nai-seed-mode">
-            <option value="random">Random：每张随机</option>
-            <option value="fixed">Fixed：批次内固定</option>
-            <option value="increment">Increment：逐张递增</option>
+            <option value="random">随机：每张不同</option>
+            <option value="fixed">固定：批次内相同</option>
+            <option value="increment">递增：逐张递增</option>
           </select>
-          <input id="nai-seed" class="nai-seed-input" placeholder="Random 模式无需填写" autocomplete="off" />
-          <button id="nai-seed-random" class="nai-icon-btn" title="生成基础 Seed">随机</button>
+          <input id="nai-seed" class="nai-seed-input" placeholder="随机模式无需填写" autocomplete="off" />
+          <button id="nai-seed-random" class="nai-icon-btn" title="生成基础种子">随机</button>
         </div>
         <div id="nai-custom-resolution" class="nai-resolution-row" hidden>
           <input id="nai-width" type="number" min="64" step="64" aria-label="宽度" value="832" placeholder="W" />
@@ -196,15 +202,15 @@
         <div class="nai-tier-grid">
           <label><span>正面提示词档位</span><select id="nai-positive-tier" class="nai-select">
             <option value="off">关闭</option>
-            <option value="standard" selected>Standard</option>
-            <option value="light">Light</option>
+            <option value="standard" selected>标准</option>
+            <option value="light">轻量</option>
           </select></label>
           <label><span>负面提示词档位</span><select id="nai-negative-tier" class="nai-select">
             <option value="off">关闭</option>
-            <option value="light">Light</option>
-            <option value="heavy" selected>Heavy</option>
-            <option value="furry_focus">Furry Focus</option>
-            <option value="human_focus">Human Focus</option>
+            <option value="light">轻量</option>
+            <option value="heavy" selected>增强</option>
+            <option value="furry_focus">兽人侧重</option>
+            <option value="human_focus">人类侧重</option>
           </select></label>
         </div>
         <div id="nai-tier-hint" class="nai-tier-hint"></div>
@@ -214,41 +220,42 @@
           <button id="nai-img2img-pick" type="button" class="nai-source-picker">选择基础图</button>
           <div id="nai-img2img-preview" class="nai-source-preview"><span>尚未选择图片</span></div>
           <div class="nai-range-grid">
-            <label><span>Strength <output id="nai-strength-value">0.70</output></span><input id="nai-strength" type="range" min="0.01" max="0.99" step="0.01" value="0.70" /></label>
-            <label><span>Noise <output id="nai-noise-value">0.00</output></span><input id="nai-noise" type="range" min="0" max="0.99" step="0.01" value="0" /></label>
+            <label><span>重绘强度 <output id="nai-strength-value">0.70</output></span><input id="nai-strength" type="range" min="0.01" max="0.99" step="0.01" value="0.70" /></label>
+            <label><span>噪声 <output id="nai-noise-value">0.00</output></span><input id="nai-noise" type="range" min="0" max="0.99" step="0.01" value="0" /></label>
           </div>
         </section>
 
         <details class="nai-advanced" id="nai-advanced-section">
-          <summary><span>▸ Advanced Settings</span><span id="nai-adv-summary" class="nai-adv-value"></span></summary>
-          <div class="nai-adv-row nai-adv-ctrl"><span>Sampler</span><select id="nai-sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2s_ancestral">DPM++ 2S Ancestral</option><option value="k_dpmpp_2m">DPM++ 2M</option></select></div>
-          <div class="nai-adv-row nai-adv-ctrl"><span>Scheduler</span><select id="nai-scheduler"><option value="karras">Karras</option><option value="normal">Normal</option><option value="exponential">Exponential</option></select></div>
-          <div class="nai-adv-row nai-adv-ctrl"><span>Steps</span><input id="nai-steps" type="number" min="1" max="50" value="23" placeholder="NovelAI 默认" /></div>
-          <div class="nai-adv-row nai-adv-ctrl"><span>Guidance (CFG)</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="7" placeholder="NovelAI 默认" /></div>
-          <div class="nai-adv-row nai-adv-ctrl"><span>CFG Rescale</span><input id="nai-cfg-rescale" type="number" step="0.01" min="0" max="1" value="0" placeholder="0" /></div>
-          <div class="nai-adv-row nai-adv-ctrl"><span>Auto SMEA</span><select id="nai-auto-smea"><option value="false">Off</option><option value="true">On</option></select></div>
+          <summary><span>▸ 高级设置</span><span id="nai-adv-summary" class="nai-adv-value"></span></summary>
+          <div class="nai-adv-row nai-adv-ctrl"><span>采样器</span><select id="nai-sampler"><option value="k_euler_ancestral">欧拉祖先</option><option value="k_euler">欧拉</option><option value="k_dpmpp_2s_ancestral">DPM++ 2S 祖先</option><option value="k_dpmpp_2m">DPM++ 2M</option></select></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>调度器</span><select id="nai-scheduler"><option value="karras">Karras</option><option value="normal">普通</option><option value="exponential">指数</option></select></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>步数</span><input id="nai-steps" type="number" min="1" max="50" value="23" placeholder="NovelAI 默认" /></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>引导系数（CFG）</span><input id="nai-guidance" type="number" step="0.1" min="0" max="10" value="7" placeholder="NovelAI 默认" /></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>CFG 重缩放</span><input id="nai-cfg-rescale" type="number" step="0.01" min="0" max="1" value="0" placeholder="0" /></div>
+          <div class="nai-adv-row nai-adv-ctrl"><span>自动 SMEA</span><select id="nai-auto-smea"><option value="false">关闭</option><option value="true">开启</option></select></div>
         </details>
-      </div>
-
-      <div class="nai-bottom">
-        <div id="nai-cost" class="nai-cost unknown"><span>Opus 本地预估</span><strong>正在读取参数</strong></div>
-        <div class="nai-run-actions">
-          <button id="nai-gen" class="nai-generate" disabled>Generate</button>
-          <button id="nai-cancel" class="nai-cancel" type="button" disabled title="停止尚未发送的图片请求">取消</button>
-        </div>
-        <div id="nai-job" class="nai-job">Ready</div>
       </div>
 
       <!-- History：右侧可折叠（纯 CSS 开关，点击标题隐藏/显示） -->
       <div class="nai-history-box">
         <input type="checkbox" id="nai-history-check" class="nai-history-check" checked />
         <div class="nai-history-head">
-          <label for="nai-history-check" class="nai-history-toggle" title="显示 / 隐藏 History"><span>History</span><span class="nai-history-caret">▾</span></label>
+          <label for="nai-history-check" class="nai-history-toggle" title="显示 / 隐藏历史记录"><span>历史记录</span><span class="nai-history-caret">▾</span></label>
           <button id="nai-history-refresh" class="nai-btn-sm">刷新</button>
         </div>
         <div id="nai-history" class="nai-history"><div class="empty">暂无生成历史</div></div>
       </div>
     </section>
+
+    <!-- 独立生成操作条：不再挤占右侧参数栏，也不压缩中间画布。 -->
+    <div class="nai-generate-bar" role="group" aria-label="生成操作">
+      <div id="nai-cost" class="nai-cost unknown"><span>Opus 本地预估</span><strong>正在读取参数</strong></div>
+      <div class="nai-run-actions">
+        <button id="nai-gen" class="nai-generate" disabled>生成</button>
+        <button id="nai-cancel" class="nai-cancel" type="button" disabled title="停止尚未发送的图片请求">取消</button>
+      </div>
+      <div id="nai-job" class="nai-job">就绪</div>
+    </div>
   </main>
 
   <!-- 图库视图 -->
@@ -305,7 +312,7 @@
       <div class="gallery-review-footer">
         <span id="gallery-review-count" class="gallery-review-count"></span>
         <div class="gallery-review-zoom" role="group" aria-label="缩放">
-          <button id="gallery-review-zoom-fit" class="gallery-review-zoom-btn" type="button" title="适应窗口 (F)" aria-pressed="true">Fit</button>
+          <button id="gallery-review-zoom-fit" class="gallery-review-zoom-btn" type="button" title="适应窗口 (F)" aria-pressed="true">适应窗口</button>
           <button id="gallery-review-zoom-100" class="gallery-review-zoom-btn" type="button" title="原始大小 1:1 (1)" aria-pressed="false">1:1</button>
         </div>
       </div>
@@ -321,74 +328,90 @@
     <section class="panel browse">
       <div class="browse-head">
         <div><span class="section-kicker">提示词素材</span><h3 id="browse-title">标签目录</h3></div>
-        <div class="browse-controls">
-          <button id="back-btn" class="ghost" style="display:none" title="回到上次浏览的位置">← 返回</button>
-          <select id="sort-select" title="排序方式">
-            <option value="hot">按热度</option>
-            <option value="preference">我的偏好</option>
-          </select>
+        <div class="market-head-actions">
+          <div id="prompt-mode-switch" class="market-tool-switch" role="tablist" aria-label="超市提示词工具">
+            <button type="button" class="active" role="tab" aria-selected="true" data-prompt-mode="catalog">标签目录</button>
+            <button type="button" role="tab" aria-selected="false" data-prompt-mode="text">提示词推荐</button>
+            <button type="button" role="tab" aria-selected="false" data-prompt-mode="visual">图形化</button>
+            <button type="button" role="tab" aria-selected="false" data-prompt-mode="scene">场景编排</button>
+          </div>
+          <div class="browse-controls">
+            <button id="back-btn" class="ghost" style="display:none" title="回到上次浏览的位置">← 返回</button>
+            <select id="sort-select" title="排序方式">
+              <option value="hot">按热度</option>
+              <option value="preference">我的偏好</option>
+            </select>
+          </div>
         </div>
       </div>
-      <div id="thumb-load-status" class="thumb-load-status" hidden>
-        <div class="thumb-load-row">
-          <span id="thumb-load-text">正在加载例图…</span>
-          <span id="thumb-load-count">0 / 0</span>
+      <div id="market-character-host" class="market-character-host" aria-label="当前编辑目标"></div>
+      <div id="market-catalog-root" class="market-tool-root">
+        <div id="thumb-load-status" class="thumb-load-status" hidden>
+          <div class="thumb-load-row">
+            <span id="thumb-load-text">正在加载例图…</span>
+            <span id="thumb-load-count">0 / 0</span>
+          </div>
+          <div class="thumb-load-track"><div id="thumb-load-bar" class="thumb-load-bar"></div></div>
         </div>
-        <div class="thumb-load-track"><div id="thumb-load-bar" class="thumb-load-bar"></div></div>
+        <div id="tag-list" class="tag-list"></div>
+        <section id="semantic-results" class="semantic-results" hidden>
+          <div class="semantic-results-head"><span class="semantic-results-head-title"><strong>语义候选</strong><span id="semantic-status"></span></span><button id="semantic-close" class="semantic-close" type="button" title="关闭语义候选" aria-label="关闭语义候选">×</button></div>
+          <div id="semantic-list" class="semantic-list"></div>
+        </section>
+        <section id="recommendations" class="recommendations" hidden>
+          <div class="recommendations-head"><span class="recommendations-head-title"><strong>相关推荐</strong><span>根据当前提示词</span></span><button id="recommendations-close" class="recommendations-close" type="button" title="关闭相关推荐" aria-label="关闭相关推荐">×</button></div>
+          <div id="recommendation-list" class="recommendation-list"></div>
+        </section>
+        <div id="pagination" class="pagination"></div>
       </div>
-      <div id="tag-list" class="tag-list"></div>
-      <section id="semantic-results" class="semantic-results" hidden>
-        <div class="semantic-results-head"><span class="semantic-results-head-title"><strong>语义候选</strong><span id="semantic-status"></span></span><button id="semantic-close" class="semantic-close" type="button" title="关闭语义候选" aria-label="关闭语义候选">×</button></div>
-        <div id="semantic-list" class="semantic-list"></div>
+      <section id="market-builder-root" class="market-tool-root market-builder-root" hidden aria-label="提示词构建工具">
+        <div id="tag-assistant-root"></div>
+        <div id="visual-prompt-root" hidden></div>
+        <div id="nsfw-builder-root" hidden></div>
       </section>
-      <section id="recommendations" class="recommendations" hidden>
-        <div class="recommendations-head"><span class="recommendations-head-title"><strong>相关推荐</strong><span>根据当前 Prompt</span></span><button id="recommendations-close" class="recommendations-close" type="button" title="关闭相关推荐" aria-label="关闭相关推荐">×</button></div>
-        <div id="recommendation-list" class="recommendation-list"></div>
-      </section>
-      <div id="pagination" class="pagination"></div>
     </section>
 
     <aside class="panel cart">
       <div class="cart-header">
-        <h3>Prompt · <span id="cart-target-name">Base</span></h3>
+        <h3>提示词 · <span id="cart-target-name">基础</span></h3>
         <div class="cart-actions">
           <button id="undo-btn" title="撤销上一步">撤销</button>
           <div class="cart-more">
-            <button id="cart-more-btn" type="button" title="更多操作">More ▾</button>
+            <button id="cart-more-btn" type="button" title="更多操作">更多 ▾</button>
             <div class="cart-more-menu" id="cart-more-menu" hidden>
               <button id="import-btn" type="button">导入提示词</button>
               <button id="clear-btn" type="button">清空</button>
               <button id="cart-advanced-toggle" type="button" title="显示分区、权重与多角色编辑">高级编辑</button>
               <button id="save-snapshot-btn" type="button">保存快照</button>
               <button id="save-bundle-btn" type="button">保存为标签模板</button>
-              <button id="cart-history-btn" type="button">Prompt 历史</button>
+              <button id="cart-history-btn" type="button">提示词历史</button>
             </div>
           </div>
         </div>
         <label class="nai-tag-target-pick" hidden><span>添加到</span>
           <select id="nai-tag-target">
-            <option value="base">Base / Scene</option>
+            <option value="base">基础 / 场景</option>
           </select>
         </label>
       </div>
       <div id="conflict-panel" class="conflict-panel" hidden></div>
       <div id="cart" class="cart-body"></div>
       <section class="prompt-preview-bar">
-        <div class="prompt-preview-head"><strong>Prompt Preview</strong><span id="prompt-preview-meta">0 tags</span></div>
-        <div id="prompt-preview-text" class="prompt-preview-text">当前 Prompt 为空</div>
+        <div class="prompt-preview-head"><strong>提示词预览</strong><span id="prompt-preview-meta">0 个标签</span></div>
+        <div id="prompt-preview-text" class="prompt-preview-text">当前提示词为空</div>
         <div class="prompt-preview-actions">
           <button id="export-btn" title="复制完整提示词">复制</button>
           <button id="send-generate-btn" class="primary">继续到生图</button>
         </div>
       </section>
       <div id="workspace-actions" class="workspace-actions" hidden>
-        <button id="ws-copy" type="button" title="复制 Effective Prompt">Copy</button>
-        <button id="ws-more-btn" type="button" title="更多操作">More…</button>
-        <button id="ws-continue" class="primary" type="button">Continue Generate</button>
+        <button id="ws-copy" type="button" title="复制实际生效提示词">复制</button>
+        <button id="ws-more-btn" type="button" title="更多操作">更多…</button>
+        <button id="ws-continue" class="primary" type="button">继续生成</button>
       </div>
       <details class="legacy-preset-box">
-        <summary>Prompt Preset</summary>
-        <div class="cart-footer"><button id="save-preset">保存 Preset</button></div>
+        <summary>提示词预设</summary>
+        <div class="cart-footer"><button id="save-preset">保存预设</button></div>
         <div class="prompt-preset-row">
           <select id="prompt-preset-select">
             <option value="">选择已保存提示词</option>
@@ -446,7 +469,7 @@
       </section>
       <section class="settings-section">
         <h4>自定义标签</h4>
-        <p class="setting-help">保存在本地的自定义标签（不在 Danbooru 词库中时使用）。也可在购物车点「＋ 自定义标签」直接添加并加入当前 Prompt。</p>
+        <p class="setting-help">保存在本地的自定义标签（不在 Danbooru 词库中时使用）。也可在购物车点「＋ 自定义标签」直接添加并加入当前提示词。</p>
         <div id="custom-tag-list" class="custom-tag-list"></div>
       </section>
       <section class="settings-section">
@@ -470,7 +493,7 @@
   <div id="custom-tag-modal" class="modal" style="display:none">
     <div class="modal-box">
       <div class="modal-title">添加自定义标签</div>
-      <p class="setting-help">自定义标签会保存到本地词库，之后在搜索中也能直接命中（via：自定义）。标签建议用英文（NovelAI 语法），例如 <code>original character</code>、<code>my_style</code>。</p>
+      <p class="setting-help">自定义标签会保存到本地词库，之后在搜索中也能直接命中（来源：自定义）。标签建议用英文（NovelAI 语法），例如 <code>original character</code>、<code>my_style</code>。</p>
       <label class="setting-field-stack"><span>标签名（必填）</span><input id="custom-tag-name" type="text" autocomplete="off" placeholder="例如：original character, my_style" /></label>
       <label class="setting-field-stack"><span>中文名（选填）</span><div class="inline-field"><input id="custom-tag-zh" type="text" autocomplete="off" placeholder="可手填或自动翻译" /><button id="custom-tag-translate" type="button">自动翻译</button></div></label>
       <label class="setting-field-stack"><span>备注（选填）</span><input id="custom-tag-note" type="text" autocomplete="off" placeholder="可选，记录用途" /></label>
@@ -495,7 +518,7 @@
         <label><input type="radio" name="import-mode" value="replace" checked /> 替换</label>
         <label><input type="radio" name="import-mode" value="append" /> 追加到目标</label>
         <div class="spacer"></div>
-        <button id="import-auto-split" title="按语义自动整理 Base / 角色（多角色身份）">自动整理角色</button>
+        <button id="import-auto-split" title="按语义自动整理基础提示词 / 角色（多角色身份）">自动整理角色</button>
         <button id="import-preview" class="primary">解析预览</button>
       </div>
       <div id="import-preview-box" class="import-preview-box" style="display:none"></div>
@@ -515,15 +538,15 @@
 
   <div id="bundles-modal" class="modal" style="display:none">
     <div class="modal-box workspace-modal-box">
-      <div class="modal-title-row"><div><span class="section-kicker">Prompt 组件</span><div class="modal-title">标签模板</div></div><button id="bundles-close" title="关闭">×</button></div>
-      <div class="bundle-create-row"><input id="bundle-name" placeholder="标签模板名称" /><button id="bundle-create" class="primary">用当前 Prompt 创建</button></div>
+      <div class="modal-title-row"><div><span class="section-kicker">提示词组件</span><div class="modal-title">标签模板</div></div><button id="bundles-close" title="关闭">×</button></div>
+      <div class="bundle-create-row"><input id="bundle-name" placeholder="标签模板名称" /><button id="bundle-create" class="primary">用当前提示词创建</button></div>
       <div id="bundles-list" class="workspace-list"><div class="empty">正在加载标签模板…</div></div>
     </div>
   </div>
 
   <div id="snapshot-modal" class="modal" style="display:none">
     <div class="modal-box workspace-modal-box">
-      <div class="modal-title-row"><div class="modal-title">Prompt 历史</div><button id="snapshot-close" title="关闭">×</button></div>
+      <div class="modal-title-row"><div class="modal-title">提示词历史</div><button id="snapshot-close" title="关闭">×</button></div>
       <div id="snapshot-list" class="workspace-list"><div class="empty">正在加载历史…</div></div>
     </div>
   </div>

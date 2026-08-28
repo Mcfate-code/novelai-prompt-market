@@ -99,6 +99,7 @@ def test_ambiguous_is_age_ambiguous():
 def test_adult_vocab_fallback():
     assert classify_tag_safety("paizuri") == "adult"
     assert classify_tag_safety("creampie") == "adult"
+    assert classify_tag_safety("pantyshot") == "adult"
 
 
 def test_case_and_underscore_normalized():

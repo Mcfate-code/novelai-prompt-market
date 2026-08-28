@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   addCharacter, addTag, createEmpty, getTargetEntries, normalize, parseTargetText,
-  reconcileTargetText, removeCharacter, removeTag, renameCharacter, moveCharacter, setCharacterPosition, serializeTarget,
+  reconcileTargetText, removeCharacter, removeTag, renameCharacter, setCharacterEnabled, moveCharacter, setCharacterPosition, serializeTarget, buildGenerationPromptState,
   updateEntry,
 } from "../static/prompt-document.js";
 
@@ -97,6 +97,23 @@ test("character and entry mutations preserve a valid document", () => {
   doc = removeCharacter(doc, 1);
   assert.equal(doc.characters.length, 1);
   assert.equal(doc.characters[0].name, "Character 1");
+});
+
+test("character can be removed with content and enabled state is independent", () => {
+  let doc = createEmpty();
+  doc = addCharacter(doc, { name: "Second" });
+  doc = addTag(doc, "char:0", "first", "character");
+  doc = addTag(doc, "char:1", "second", "character");
+  doc = setCharacterEnabled(doc, 1, false);
+  assert.equal(doc.characters[1].enabled, false);
+  doc.assistant_context = { participant_count: 2, clothing_state: { 0: "nude", 1: "dressed" }, interactions: [{ id: "i", actor: 0, target: 1 }] };
+  doc = removeCharacter(doc, 0);
+  assert.equal(doc.characters.length, 1);
+  assert.equal(doc.characters[0].name, "Second");
+  assert.equal(doc.characters[0].enabled, false);
+  assert.deepEqual(doc.assistant_context.clothing_state, { 0: "dressed" });
+  assert.deepEqual(doc.assistant_context.interactions, []);
+  assert.equal(buildGenerationPromptState(doc).characters[0].enabled, false);
 });
 
 test("V2 hard regressions: character add/move/position/isolation/invalid target and weighted comma token", () => {

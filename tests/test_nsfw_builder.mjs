@@ -41,6 +41,7 @@ import {
   isSelected,
   normalizeOption,
   normalizeOptions,
+  normalizePoseTemplates,
   normalizeRecommendation,
   normalizeRecommendations,
   optionVisibleForCount,
@@ -171,15 +172,15 @@ test("participant 减少：尾部空角色 -> 允许并带 autoRemovableEmptyInd
 
 // ---- 3. all-character clothing render ----
 
-test("participant_count=3 时 render 同时渲染三个服装子组（Character 1/2/3 衣着，data-char 0/1/2）", () => {
+test("participant_count=3 时 render 同时渲染三个服装子组（角色 1/2/3 衣着，data-char 0/1/2）", () => {
   const doc = setAssistantContext(createEmpty(), { participant_count: "3" });
   const bridge = makeBridge(doc);
   const builder = new NsfwBuilder({ root: minimalRoot(), bridge, ...OPTIONS });
   builder.render();
   const html = builder.root.innerHTML;
-  assert.ok(html.includes("Character 1 衣着"));
-  assert.ok(html.includes("Character 2 衣着"));
-  assert.ok(html.includes("Character 3 衣着"));
+  assert.ok(html.includes("角色 1 衣着"));
+  assert.ok(html.includes("角色 2 衣着"));
+  assert.ok(html.includes("角色 3 衣着"));
   assert.ok(html.includes('data-char="0"'));
   assert.ok(html.includes('data-char="1"'));
   assert.ok(html.includes('data-char="2"'));
@@ -397,10 +398,52 @@ test("normalizeOption / normalizeOptions：key 唯一、tag 可选、位置过�
   assert.deepEqual(normalizeOptions(undefined), []);
 });
 
-test("participantNumber 映射 1/2/3 -> 数值，4+ -> 4，非法 -> null", () => {
+test("已审核导入模板映射为可应用的多人姿势计划", () => {
+  const list = normalizePoseTemplates([{ id: 7, label: "导入后方", structure: {
+    participant_count: 2, base_tags: ["doggystyle"], camera_tags: ["from behind"],
+    role_tags: [["on all fours"], ["standing"]],
+    relations: [{ source: 0, target: 1, action: "sex", relation: "directional" }],
+  }, source: { source_type: "civitai" } }]);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].minParticipants, 2);
+  const bridge = makeBridge(setAssistantContext(createEmpty(), { participant_count: 2 }));
+  const builder = new NsfwBuilder({ bridge, poseTemplates: list });
+  builder.refresh();
+  assert.equal(builder.applyPoseTemplate("imported-7"), true);
+  const action = bridge.dispatched.find((item) => item.type === "APPLY_POSE_VARIATION");
+  assert.equal(action.payload.plan.relations[0].source, 0);
+  assert.deepEqual(action.payload.plan.roleTags, [["on all fours"], ["standing"]]);
+});
+
+test("模板库刷新会恢复待审核候选，并把后端旧版本转成可操作提示", async () => {
+  const pending = { id: 8, status: "pending", label: "候选后方", structure: {
+    participant_count: 2, base_tags: ["doggystyle"], camera_tags: ["from behind"],
+    role_tags: [["on all fours"], ["standing"]], relations: [{ source: 0, target: 1, action: "sex" }],
+    metrics: { tag_validity: 1, completeness: 0.8 },
+  }, source: { source_type: "civitai", source_url: "https://civitai.com/images/8" } };
+  const responses = async (url) => {
+    if (url.endsWith("/api/runtime-info")) return { ok: true, status: 200, json: async () => ({ template_api_version: 1 }) };
+    if (url.includes("status=approved")) return { ok: true, status: 200, json: async () => ({ templates: [] }) };
+    return { ok: true, status: 200, json: async () => ({ templates: [pending] }) };
+  };
+  const builder = new NsfwBuilder({ root: minimalRoot(), bridge: makeBridge(), fetchImpl: responses });
+  assert.equal(await builder.refreshTemplateLibrary(), true);
+  assert.equal(builder.templateCandidates.length, 1);
+  assert.match(builder.root.innerHTML, /候选后方/);
+  assert.match(builder.root.innerHTML, /姿势\/动作/);
+
+  const stale = new NsfwBuilder({ root: minimalRoot(), bridge: makeBridge(), fetchImpl: async () => ({ ok: false, status: 404, json: async () => ({}) }) });
+  assert.equal(await stale.refreshTemplateLibrary(), false);
+  assert.equal(stale.templateApiStatus, "error");
+  assert.match(stale.templateNotice, /后端服务版本过旧/);
+});
+
+test("participantNumber 映射 1–6，4+ 仍兼容为 4，非法 -> null", () => {
   assert.equal(participantNumber("1"), 1);
   assert.equal(participantNumber("3"), 3);
   assert.equal(participantNumber("4+"), 4);
+  assert.equal(participantNumber("5"), 5);
+  assert.equal(participantNumber("6"), 6);
   assert.equal(participantNumber(null), null);
   assert.equal(participantNumber(""), null);
   assert.equal(participantNumber("abc"), null);
@@ -507,11 +550,11 @@ test("Phase7：互动按钮标签随当前 actor/target 选择变化", () => {
   const doc = setAssistantContext(createEmpty(), { participant_count: "2" });
   const builder = new NsfwBuilder({ root: minimalRoot(), bridge: makeBridge(doc), ...OPTIONS, interactionActions: [{ key: "kissing", label: "接吻", tag: "kissing" }] });
   builder.render();
-  assert.ok(builder.root.innerHTML.includes("互动 C1 → C2"), "默认 actor=0,target=1 → C1 → C2");
+  assert.ok(builder.root.innerHTML.includes("互动：角色 1 → 角色 2"), "默认 actor=0,target=1 → 角色 1 → 角色 2");
   builder.interactionDraft = { actor: 1, target: 0, relation: "mutual" };
   builder.render();
-  assert.ok(builder.root.innerHTML.includes("互动 C2 → C1"), "draft 改变后标签反映当前选择");
-  assert.ok(!builder.root.innerHTML.includes("互动 C1 → C2"), "不再显示旧的固定标签");
+  assert.ok(builder.root.innerHTML.includes("互动：角色 2 → 角色 1"), "draft 改变后标签反映当前选择");
+  assert.ok(!builder.root.innerHTML.includes("互动：角色 1 → 角色 2"), "不再显示旧的固定标签");
 });
 
 test("Phase7：环境/情境选择写入 Base（route → primary_scene_type / section=scene）", () => {
